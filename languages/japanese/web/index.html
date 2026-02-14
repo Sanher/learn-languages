@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Japanese Daily Trainer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>🇯🇵 Japanese Daily Trainer</h1>
+      <p>Sesión diaria con 3-4 juegos rotativos.</p>
+
+      <section class="card">
+        <label for="learner">Learner ID</label>
+        <input id="learner" value="user_ha" />
+        <label for="note">Notas (opcional)</label>
+        <textarea id="note" placeholder="Hoy quiero practicar partículas..."></textarea>
+        <button id="load-btn">Preparar sesión de hoy</button>
+      </section>
+
+      <section id="result" class="card hidden"></section>
+    </main>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
