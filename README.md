@@ -31,3 +31,8 @@ python demo_pronunciation_activity.py
 ```bash
 python -m unittest discover -s tests
 ```
+
+
+## Documento de arquitectura
+
+- `ESTRUCTURA_GENERAL.md`: visión general de servicios, flujo de análisis de audio y plan de implementación por fases.
