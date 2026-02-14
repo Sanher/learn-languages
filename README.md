@@ -36,3 +36,8 @@ python -m unittest discover -s tests
 ## Documento de arquitectura
 
 - `ESTRUCTURA_GENERAL.md`: visión general de servicios, flujo de análisis de audio y plan de implementación por fases.
+
+
+## Operativa Git
+
+- `GIT_REMOTE_SETUP.md`: pasos para configurar remoto (`origin`) y trabajar con `pull/push` también desde Codex web.
