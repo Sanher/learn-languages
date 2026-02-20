@@ -45,9 +45,10 @@ from .services.openai_client import OpenAIPlanner
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
-DB_PATH = os.getenv("JAPANESE_DB_PATH", str(BASE_DIR / "data" / "progress.db"))
+ADDON_LANGUAGE_DATA_DIR = Path("/data") / "japanese"
+LOCAL_LANGUAGE_DATA_DIR = BASE_DIR / "data" / "japanese"
+DB_PATH = str((ADDON_LANGUAGE_DATA_DIR if Path("/data").exists() else LOCAL_LANGUAGE_DATA_DIR) / "progress.db")
 DEFAULT_LEARNER_ID = os.getenv("HA_DEFAULT_LEARNER_ID", "ha_default_user")
-LOG_LEVEL = os.getenv("LEARN_LANGUAGES_LOG_LEVEL", "INFO").upper()
 AVAILABLE_LANGUAGES = ["ja"]
 GAME_NAME_ALIASES_ES = {
     GAME_TYPE_KANJI_MATCH: "Emparejar Kanji",
@@ -72,7 +73,7 @@ if not logger.handlers:
         )
     )
     logger.addHandler(handler)
-logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+logger.setLevel(logging.INFO)
 logger.propagate = False
 
 planner = DailyGamePlanner()

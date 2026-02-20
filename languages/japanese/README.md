@@ -62,8 +62,9 @@ Notas de progresion:
 - `OPENAI_MODEL` (default: `gpt-4o-mini`)
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_VOICE_ID`
-- `JAPANESE_DB_PATH` (default: `languages/japanese/data/progress.db`)
-- `LEARN_LANGUAGES_LOG_LEVEL` (default: `INFO`)
+
+Persistencia de progreso:
+- El progreso del usuario se guarda de forma persistente entre reinicios.
 
 ## Observabilidad (logs con hora para HA)
 
