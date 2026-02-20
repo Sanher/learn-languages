@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Language Games Board</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="topbar card">
+        <div class="top-left">
+          <div class="label">Idioma actual</div>
+          <div class="value-row">
+            <strong id="current-language">ja</strong>
+            <button id="change-language-btn" class="ghost-btn">Change</button>
+          </div>
+        </div>
+        <div class="top-right">
+          <div class="label">Nivel actual</div>
+          <strong id="current-level">1</strong>
+          <button id="change-level-btn" class="ghost-btn">Cambiar nivel para hoy</button>
+          <small id="today-score" class="muted">Score de hoy: 0</small>
+        </div>
+      </header>
+
+      <section class="board">
+        <section id="game-zone" class="card hidden"></section>
+        <aside id="games-sidebar" class="card"></aside>
+      </section>
+    </main>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
