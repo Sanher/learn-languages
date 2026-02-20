@@ -33,12 +33,12 @@ class ElevenLabsService:
             return response.content
 
     async def evaluate_pronunciation(self, transcript: str, expected: str) -> dict:
-        """Placeholder: compara texto reconocido con esperado.
+        """Placeholder: compares recognized text with expected text.
 
-        Para producción se recomienda enviar audio a ASR y luego medir distancia fonética.
+        In production, send audio to ASR and score phonetic distance.
         """
         ratio = 1.0 if transcript.strip() == expected.strip() else 0.6
         return {
             "score": round(ratio * 100),
-            "feedback": "Muy bien" if ratio > 0.9 else "Buena base, revisa entonación y partículas.",
+            "feedback": "Very good." if ratio > 0.9 else "Good base, review intonation and particles.",
         }

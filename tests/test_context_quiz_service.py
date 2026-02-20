@@ -16,8 +16,8 @@ class ContextQuizServiceTests(unittest.TestCase):
         activities = service.get_activities(language="ja", level=1)
         self.assertTrue(activities)
         self.assertEqual(activities[0].game_type, GAME_TYPE_CONTEXT_QUIZ)
-        self.assertNotIn("Frase objetivo:", activities[0].prompt)
-        self.assertNotIn("Opciones:", activities[0].prompt)
+        self.assertNotIn("Target sentence:", activities[0].prompt)
+        self.assertNotIn("Options:", activities[0].prompt)
 
     def test_evaluate_attempt_shows_translation_and_retry_hides_it(self) -> None:
         service = ContextQuizService()
@@ -41,7 +41,7 @@ class ContextQuizServiceTests(unittest.TestCase):
         service = ContextQuizService()
         activities = service.get_activities(language="ja", level=3)
         self.assertTrue(activities)
-        self.assertNotIn("Romanizado:", activities[0].prompt)
+        self.assertNotIn("Romanized:", activities[0].prompt)
 
     def test_ui_options_include_romaji_for_japanese(self) -> None:
         service = ContextQuizService()

@@ -66,8 +66,8 @@ def _build_word_feedback(expected: list[str], recognized: list[str]) -> list[Wor
             feedback.append(
                 WordFeedback(
                     word=token,
-                    issue="palabra omitida o mal pronunciada",
-                    hint="Repite esta palabra de forma aislada 3 veces antes de rehacer la frase.",
+                    issue="omitted or mispronounced word",
+                    hint="Repeat this word in isolation three times before retrying the full sentence.",
                 )
             )
 
@@ -75,8 +75,8 @@ def _build_word_feedback(expected: list[str], recognized: list[str]) -> list[Wor
         feedback.append(
             WordFeedback(
                 word=expected[-1],
-                issue="ritmo o unión entre palabras mejorable",
-                hint="Intenta mantener un ritmo continuo sin pausas largas.",
+                issue="word rhythm/connection can be improved",
+                hint="Keep a steady flow and avoid long pauses.",
             )
         )
 
@@ -114,5 +114,5 @@ def run_pronunciation_activity(request: PronunciationRequest, current_date: date
             "pitch_stability": round(pitch_stability, 2),
         },
         "word_feedback": [feedback_item.__dict__ for feedback_item in feedback],
-        "next_step": "Repite la frase 3 veces con ritmo continuo." if feedback else "Pasa a la siguiente frase.",
+        "next_step": "Repeat the sentence three times with continuous rhythm." if feedback else "Move to the next sentence.",
     }

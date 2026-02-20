@@ -7,7 +7,7 @@ from .game_service import GameActivity
 from .writing_support import EASTERN_SCRIPT_LANGUAGE_CODES, is_eastern_script, writing_support_profile
 
 GAME_TYPE_CONTEXT_QUIZ = "context_quiz"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.context_quiz")
 
 
@@ -45,30 +45,30 @@ JAPANESE_CONTEXT_QUIZ_ITEMS_BY_LEVEL: dict[int, list[ContextQuizItem]] = {
         ContextQuizItem(
             item_id="ja-context-1-1",
             language="ja",
-            context_prompt="Conoces a alguien por primera vez en una situacion formal.",
+            context_prompt="You meet someone for the first time in a formal situation.",
             script_line="はじめまして。よろしくお願いします。",
             romanized_line="hajimemashite. yoroshiku onegaishimasu.",
-            literal_translation="primera vez que te veo. te pido buena disposicion.",
+            literal_translation="nice to meet you. please treat me favorably.",
             options=[
                 ContextQuizOption(
                     "a",
                     "はじめまして。よろしくお願いします。",
                     True,
-                    "Muy bien para primer contacto formal.",
+                    "Very appropriate for a formal first meeting.",
                     romaji_text="hajimemashite. yoroshiku onegaishimasu.",
                 ),
                 ContextQuizOption(
                     "b",
                     "おつかれさまです。",
                     False,
-                    "Esta expresion se usa para reconocer esfuerzo, no para presentarse.",
+                    "This expression acknowledges effort, not self-introductions.",
                     romaji_text="otsukaresama desu.",
                 ),
                 ContextQuizOption(
                     "c",
                     "いただきます。",
                     False,
-                    "Se dice antes de comer, no al presentarse.",
+                    "Used before eating, not when introducing yourself.",
                     romaji_text="itadakimasu.",
                 ),
             ],
@@ -77,30 +77,30 @@ JAPANESE_CONTEXT_QUIZ_ITEMS_BY_LEVEL: dict[int, list[ContextQuizItem]] = {
         ContextQuizItem(
             item_id="ja-context-1-2",
             language="ja",
-            context_prompt="Pides disculpas por llegar tarde.",
+            context_prompt="You apologize for arriving late.",
             script_line="遅れてすみません。",
             romanized_line="okurete sumimasen.",
-            literal_translation="llegando tarde, disculpame.",
+            literal_translation="sorry for being late.",
             options=[
                 ContextQuizOption(
                     "a",
                     "いってきます。",
                     False,
-                    "Se usa al salir de casa.",
+                    "Used when leaving home.",
                     romaji_text="ittekimasu.",
                 ),
                 ContextQuizOption(
                     "b",
                     "遅れてすみません。",
                     True,
-                    "Correcto para disculpa por retraso.",
+                    "Correct for apologizing about lateness.",
                     romaji_text="okurete sumimasen.",
                 ),
                 ContextQuizOption(
                     "c",
                     "おやすみなさい。",
                     False,
-                    "Se usa para despedirse al dormir.",
+                    "Used when saying goodnight.",
                     romaji_text="oyasuminasai.",
                 ),
             ],
@@ -111,30 +111,30 @@ JAPANESE_CONTEXT_QUIZ_ITEMS_BY_LEVEL: dict[int, list[ContextQuizItem]] = {
         ContextQuizItem(
             item_id="ja-context-2-1",
             language="ja",
-            context_prompt="Un cliente te pide confirmacion de un envio por correo formal.",
+            context_prompt="A client asks you to confirm a shipment in a formal email.",
             script_line="承知しました。確認してご連絡します。",
             romanized_line="shouchi shimashita. kakunin shite gorenraku shimasu.",
-            literal_translation="entendido. confirmo y te contacto.",
+            literal_translation="understood. I will confirm and contact you.",
             options=[
                 ContextQuizOption(
                     "a",
                     "わかった。あとでね。",
                     False,
-                    "Demasiado casual para contexto formal de cliente.",
+                    "Too casual for a formal client context.",
                     romaji_text="wakatta. atode ne.",
                 ),
                 ContextQuizOption(
                     "b",
                     "承知しました。確認してご連絡します。",
                     True,
-                    "Registro adecuado para cliente.",
+                    "Appropriate register for a client.",
                     romaji_text="shouchi shimashita. kakunin shite gorenraku shimasu.",
                 ),
                 ContextQuizOption(
                     "c",
                     "マジで？",
                     False,
-                    "Muy coloquial para contexto profesional.",
+                    "Too colloquial for a professional context.",
                     romaji_text="maji de?",
                 ),
             ],
@@ -145,30 +145,30 @@ JAPANESE_CONTEXT_QUIZ_ITEMS_BY_LEVEL: dict[int, list[ContextQuizItem]] = {
         ContextQuizItem(
             item_id="ja-context-3-1",
             language="ja",
-            context_prompt="Debes rechazar una propuesta con respeto en un entorno corporativo.",
+            context_prompt="You need to decline a proposal respectfully in a corporate setting.",
             script_line="大変恐縮ですが、今回は見送らせていただきます。",
             romanized_line="taihen kyoushuku desu ga, konkai wa miokurasete itadakimasu.",
-            literal_translation="muy apenado, pero esta vez permitenos dejarlo pasar.",
+            literal_translation="we are very sorry, but we must decline this time.",
             options=[
                 ContextQuizOption(
                     "a",
                     "それは無理です。",
                     False,
-                    "Correcto en contenido, pero demasiado directo.",
+                    "Content is fine, but too direct.",
                     romaji_text="sore wa muri desu.",
                 ),
                 ContextQuizOption(
                     "b",
                     "大変恐縮ですが、今回は見送らせていただきます。",
                     True,
-                    "Muy apropiado en registro formal.",
+                    "Very appropriate in a formal register.",
                     romaji_text="taihen kyoushuku desu ga, konkai wa miokurasete itadakimasu.",
                 ),
                 ContextQuizOption(
                     "c",
                     "やだ。",
                     False,
-                    "Registro inadecuado.",
+                    "Inappropriate register.",
                     romaji_text="yada.",
                 ),
             ],
@@ -185,7 +185,7 @@ ENGLISH_CONTEXT_QUIZ_ITEMS_BY_LEVEL: dict[int, list[ContextQuizItem]] = {
             context_prompt="You are in a job interview and need a polite opening.",
             script_line="Thank you for taking the time to meet with me.",
             romanized_line=None,
-            literal_translation="gracias por dedicar tiempo a reunirse conmigo",
+            literal_translation="thank you for taking the time to meet with me",
             options=[
                 ContextQuizOption("a", "Yo, what's up?", False, "Too informal for interview context."),
                 ContextQuizOption("b", "Thank you for taking the time to meet with me.", True, "Appropriate formal tone."),
@@ -198,7 +198,7 @@ ENGLISH_CONTEXT_QUIZ_ITEMS_BY_LEVEL: dict[int, list[ContextQuizItem]] = {
 
 
 class ContextQuizService:
-    """Servicio reusable de quiz contextual con objetivo diagnostico."""
+    """Reusable context quiz service with diagnostic purpose."""
 
     game_type = GAME_TYPE_CONTEXT_QUIZ
 
@@ -209,8 +209,8 @@ class ContextQuizService:
 
         for item in items:
             prompt_lines = [
-                f"Contexto: {item.context_prompt}",
-                "Elige la expresion mas adecuada.",
+                f"Context: {item.context_prompt}",
+                "Choose the most appropriate expression.",
             ]
 
             activities.append(
@@ -269,7 +269,7 @@ class ContextQuizService:
                 attempt.item_id,
                 attempt.selected_option_id,
             )
-            raise ValueError(f"selected_option_id no encontrado: {attempt.selected_option_id}")
+            raise ValueError(f"selected_option_id not found: {attempt.selected_option_id}")
 
         is_correct = selected.is_correct
         result = {
@@ -304,7 +304,7 @@ class ContextQuizService:
             if item.item_id == item_id:
                 return item
         logger.warning("item_not_found language=%s level=%s item_id=%s", language, level, item_id)
-        raise ValueError(f"item_id no encontrado para language={language}, level={level}: {item_id}")
+        raise ValueError(f"item_id not found for language={language}, level={level}: {item_id}")
 
     def _view_payload(self, item: ContextQuizItem, support, show_translation: bool, hide_translation_hint: bool = False) -> dict:
         show_romanized = bool(support.show_romanized_line and item.romanized_line)

@@ -8,10 +8,10 @@ from .writing_support import writing_support_profile
 
 LANGUAGE_JAPANESE = "ja"
 GAME_TYPE_SHADOWING_SCORE = "shadowing_score"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.shadowing_score")
 
-# Por ahora solo se definen frases semilla para japonés.
+# Seed Japanese phrases for now.
 JAPANESE_SHADOWING_ITEMS_BY_LEVEL: dict[int, list[tuple[str, str]]] = {
     1: [
         ("おはよう ございます", "ohayou gozaimasu"),
@@ -29,7 +29,7 @@ JAPANESE_SHADOWING_ITEMS_BY_LEVEL: dict[int, list[tuple[str, str]]] = {
     ],
 }
 
-# Compatibilidad con imports previos.
+# Backward-compatible alias for legacy imports.
 JAPANESE_SHADOWING_PHRASES_BY_LEVEL: dict[int, list[str]] = {
     level: [text for text, _romanized in items]
     for level, items in JAPANESE_SHADOWING_ITEMS_BY_LEVEL.items()
@@ -63,7 +63,7 @@ class ShadowingItem:
 
 
 class ShadowingScoreService:
-    """Servicio reusable de shadowing score (implementación ja inicial)."""
+    """Reusable shadowing-score service (initial Japanese implementation)."""
 
     game_type = GAME_TYPE_SHADOWING_SCORE
 
@@ -122,7 +122,7 @@ class ShadowingScoreService:
         )
         if attempt.language != LANGUAGE_JAPANESE:
             logger.warning("evaluate_invalid unsupported_language=%s", attempt.language)
-            raise ValueError(f"Idioma no soportado en shadowing score: {attempt.language}")
+            raise ValueError(f"Unsupported language in shadowing_score: {attempt.language}")
 
         expected_units = self._tokenize_japanese(attempt.expected_text)
         learner_units = self._tokenize_japanese(attempt.learner_text)
@@ -141,7 +141,7 @@ class ShadowingScoreService:
         alerts: list[str] = []
         if attempt.retry_count >= 3:
             alerts.append(
-                "Aviso: desde el 3er reintento puede aumentar el consumo de tokens STT/TTS."
+                "Warning: from the 3rd retry onward, STT/TTS token usage may increase."
             )
 
         result = {
@@ -177,7 +177,7 @@ class ShadowingScoreService:
 
     def _find_item(self, language: str, item_id: str, level: int) -> ShadowingItem:
         if language != LANGUAGE_JAPANESE:
-            raise ValueError(f"Idioma no soportado en shadowing score: {language}")
+            raise ValueError(f"Unsupported language in shadowing_score: {language}")
 
         for item in self.get_items(language=language, level=level):
             if item.item_id == item_id:
@@ -186,7 +186,7 @@ class ShadowingScoreService:
             for item in self.get_items(language=language, level=candidate_level):
                 if item.item_id == item_id:
                     return item
-        raise ValueError(f"item_id no encontrado para language={language}, level={level}: {item_id}")
+        raise ValueError(f"item_id not found for language={language}, level={level}: {item_id}")
 
     @staticmethod
     def _tokenize_japanese(text: str) -> list[str]:
@@ -217,11 +217,11 @@ class ShadowingScoreService:
     def _feedback_for_japanese(overlap: float, pace_score: float, pause_ratio: float) -> list[str]:
         feedback: list[str] = []
         if overlap < 0.7:
-            feedback.append("Repite la frase por bloques cortos y confirma cada mora.")
+            feedback.append("Repeat the sentence in short chunks and lock each mora.")
         if pace_score < 0.7:
-            feedback.append("Ajusta el ritmo para imitar el audio objetivo, sin acelerar al final.")
+            feedback.append("Adjust your rhythm to match the target audio without speeding up at the end.")
         if pause_ratio > 0.25:
-            feedback.append("Reduce pausas largas y conecta mejor las palabras funcionales.")
+            feedback.append("Reduce long pauses and connect function words more smoothly.")
         if not feedback:
-            feedback.append("Buen shadowing. Mantén el mismo ritmo y claridad en la siguiente frase.")
+            feedback.append("Good shadowing. Keep the same rhythm and clarity in the next sentence.")
         return feedback

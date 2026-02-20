@@ -14,7 +14,7 @@ class DailyGamesResult:
 
 
 class GamesOrchestrator:
-    """Resuelve idioma activo y actividades de juegos por servicio."""
+    """Resolves active language and daily game activities by service."""
 
     def __init__(
         self,

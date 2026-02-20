@@ -45,7 +45,7 @@ class PronunciationPipelineTests(unittest.TestCase):
 
         self.assertTrue(response["word_feedback"])
         self.assertIn("everyone", [item["word"] for item in response["word_feedback"]])
-        self.assertEqual(response["next_step"], "Repite la frase 3 veces con ritmo continuo.")
+        self.assertEqual(response["next_step"], "Repeat the sentence three times with continuous rhythm.")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Servicios de juegos por tipo con actividades por idioma."""
+"""Game services by type with language-specific activities."""
 
 from .context_quiz_service import (
     ENGLISH_CONTEXT_QUIZ_ITEMS_BY_LEVEL,

@@ -14,7 +14,7 @@ class WritingSupportProfile:
 
 
 def writing_support_profile(level: int) -> WritingSupportProfile:
-    """Define ayudas de escritura segun progreso (nivel)."""
+    """Defines writing assistance according to progress level."""
     if level <= 1:
         return WritingSupportProfile(
             stage="beginner",

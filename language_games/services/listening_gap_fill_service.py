@@ -7,7 +7,7 @@ from .game_service import GameActivity
 from .writing_support import EASTERN_SCRIPT_LANGUAGE_CODES, is_eastern_script, writing_support_profile
 
 GAME_TYPE_LISTENING_GAP_FILL = "listening_gap_fill"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.listening_gap_fill")
 
 
@@ -42,7 +42,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             options=["がくせい", "せんせい", "いしゃ"],
             script_line="私は学生です。",
             romanized_line="watashi wa gakusei desu",
-            literal_translation="yo tema estudiante soy",
+            literal_translation="I topic student am",
             level=1,
         ),
         ListeningGapFillItem(
@@ -53,7 +53,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             options=["ほん", "つくえ", "くるま"],
             script_line="これは本です。",
             romanized_line="kore wa hon desu",
-            literal_translation="esto tema libro es",
+            literal_translation="this topic book is",
             level=1,
         ),
     ],
@@ -66,7 +66,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             options=[],
             script_line="今日は寿司を食べます。",
             romanized_line="kyou wa sushi o tabemasu",
-            literal_translation="hoy tema sushi objeto como",
+            literal_translation="today topic sushi object eat",
             level=2,
         ),
         ListeningGapFillItem(
@@ -77,7 +77,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             options=[],
             script_line="駅に行きます。",
             romanized_line="eki ni ikimasu",
-            literal_translation="estacion a voy",
+            literal_translation="station to go",
             level=2,
         ),
     ],
@@ -90,7 +90,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             options=[],
             script_line="明日友達と映画を見ます。",
             romanized_line="ashita tomodachi to eiga o mimasu",
-            literal_translation="manana amigo con pelicula objeto vere",
+            literal_translation="tomorrow friend with movie object watch",
             level=3,
         ),
     ],
@@ -106,7 +106,7 @@ ENGLISH_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]]
             options=["study", "eat", "walk"],
             script_line="I study every day.",
             romanized_line=None,
-            literal_translation="yo estudio cada dia",
+            literal_translation="I study every day",
             level=1,
         )
     ],
@@ -119,7 +119,7 @@ ENGLISH_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]]
             options=[],
             script_line="She goes to school.",
             romanized_line=None,
-            literal_translation="ella va a la escuela",
+            literal_translation="she goes to school",
             level=2,
         )
     ],
@@ -132,7 +132,7 @@ ENGLISH_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]]
             options=[],
             script_line="They usually watch movies on weekends.",
             romanized_line=None,
-            literal_translation="ellos normalmente ven peliculas en fines de semana",
+            literal_translation="they usually watch movies on weekends",
             level=3,
         )
     ],
@@ -140,7 +140,7 @@ ENGLISH_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]]
 
 
 class ListeningGapFillService:
-    """Servicio reusable de completar huecos con apoyo progresivo por nivel."""
+    """Reusable listening gap-fill service with progressive support by level."""
 
     game_type = GAME_TYPE_LISTENING_GAP_FILL
 
@@ -152,18 +152,18 @@ class ListeningGapFillService:
         activities: list[GameActivity] = []
         for item in items:
             template = self._template_with_gaps(item.tokens, item.gap_positions)
-            options_line = f"Opciones: {', '.join(item.options)}" if support.show_options and item.options else ""
+            options_line = f"Options: {', '.join(item.options)}" if support.show_options and item.options else ""
 
-            prompt_lines = [f"Completa huecos: {template}"]
+            prompt_lines = [f"Fill the gaps: {template}"]
             if self._is_eastern_script(language):
-                prompt_lines.append(f"Kanji: {item.script_line}")
+                prompt_lines.append(f"Script: {item.script_line}")
                 if support.show_romanized_line and item.romanized_line:
-                    prompt_lines.append(f"Romanizado: {item.romanized_line}")
+                    prompt_lines.append(f"Romanized: {item.romanized_line}")
             else:
-                prompt_lines.append(f"Frase base: {item.script_line}")
+                prompt_lines.append(f"Base sentence: {item.script_line}")
 
             if support.show_translation_hint:
-                prompt_lines.append(f"Traduccion guia: {item.literal_translation}")
+                prompt_lines.append(f"Translation hint: {item.literal_translation}")
 
             if options_line:
                 prompt_lines.append(options_line)
@@ -240,7 +240,7 @@ class ListeningGapFillService:
             "expected_gap_tokens": expected,
             "user_gap_tokens": observed,
             "user_sentence": " ".join(user_sentence_tokens),
-            "feedback": "Huecos correctos." if is_correct else "Hay huecos incorrectos. Vuelve a escuchar y reintenta.",
+            "feedback": "Correct gap tokens." if is_correct else "Some gaps are incorrect. Listen again and retry.",
             "display": self._view_payload(item=item, support=support, show_translation=True),
             "retry_state": self._view_payload(
                 item=item,
@@ -264,7 +264,7 @@ class ListeningGapFillService:
             if item.item_id == item_id:
                 return item
         logger.warning("item_not_found language=%s level=%s item_id=%s", language, level, item_id)
-        raise ValueError(f"item_id no encontrado para language={language}, level={level}: {item_id}")
+        raise ValueError(f"item_id not found for language={language}, level={level}: {item_id}")
 
     def _view_payload(
         self,

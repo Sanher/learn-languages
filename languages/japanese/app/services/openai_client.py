@@ -20,19 +20,19 @@ class OpenAIPlanner:
                 "activities": [
                     {
                         "game": game,
-                        "prompt": f"Nivel {difficulty}: ejercicio de {game} para japonés.",
+                        "prompt": f"Level {difficulty}: {game} exercise for Japanese.",
                     }
                     for game in games
                 ],
             }
 
         system_prompt = (
-            "Eres un tutor de japonés. Genera actividades cortas, divertidas y progresivas. "
-            "Devuelve JSON válido con clave 'activities'."
+            "You are a Japanese tutor. Generate short, fun, progressive activities. "
+            "Return valid JSON with key 'activities'."
         )
         user_prompt = (
-            f"Dificultad {difficulty}/10. Juegos: {games}. "
-            f"Notas del alumno: {learner_note}."
+            f"Difficulty {difficulty}/10. Games: {games}. "
+            f"Learner notes: {learner_note}."
         )
 
         async with httpx.AsyncClient(timeout=30) as client:
@@ -78,14 +78,14 @@ class OpenAIPlanner:
             return {
                 "source": "fallback",
                 "transcript": "",
-                "error": "OPENAI_API_KEY no configurada para STT.",
+                "error": "OPENAI_API_KEY is not configured for STT.",
             }
 
         if not audio_bytes:
             return {
                 "source": "fallback",
                 "transcript": "",
-                "error": "Audio vacio.",
+                "error": "Empty audio payload.",
             }
 
         errors: list[str] = []
@@ -114,12 +114,12 @@ class OpenAIPlanner:
                     }
                 except httpx.HTTPStatusError as exc:
                     errors.append(f"{stt_model}: HTTP {exc.response.status_code}")
-                except Exception as exc:  # pragma: no cover - defensivo para red/proveedor
+                except Exception as exc:  # pragma: no cover - defensive for network/provider edge cases
                     errors.append(f"{stt_model}: {type(exc).__name__}")
 
         return {
             "source": "fallback",
             "transcript": "",
-            "error": "No se pudo transcribir audio.",
+            "error": "Audio transcription failed.",
             "details": errors,
         }

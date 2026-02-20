@@ -16,15 +16,15 @@ class KanjiMatchServiceTests(unittest.TestCase):
         activities = service.get_activities(language="ja", level=1)
         self.assertTrue(activities)
         self.assertEqual(activities[0].game_type, GAME_TYPE_KANJI_MATCH)
-        self.assertIn("Lecturas (romaji)", activities[0].prompt)
-        self.assertIn("Banco de significados", activities[0].prompt)
+        self.assertIn("Readings (romaji)", activities[0].prompt)
+        self.assertIn("Meaning bank", activities[0].prompt)
 
     def test_advanced_activity_hides_banco_and_lecturas(self) -> None:
         service = KanjiMatchService()
         activities = service.get_activities(language="ja", level=3)
         self.assertTrue(activities)
-        self.assertNotIn("Lecturas (romaji)", activities[0].prompt)
-        self.assertIn("Escribe el significado", activities[0].prompt)
+        self.assertNotIn("Readings (romaji)", activities[0].prompt)
+        self.assertIn("Write the meaning", activities[0].prompt)
 
     def test_western_language_is_not_eligible(self) -> None:
         service = KanjiMatchService()
@@ -41,7 +41,7 @@ class KanjiMatchServiceTests(unittest.TestCase):
                 expected_pairs=expected_pairs,
                 learner_matches={
                     expected_pairs[0].symbol: expected_pairs[0].meaning,
-                    expected_pairs[1].symbol: "incorrecto",
+                    expected_pairs[1].symbol: "incorrect",
                     expected_pairs[2].symbol: expected_pairs[2].meaning,
                 },
                 level=1,
@@ -63,7 +63,7 @@ class KanjiMatchServiceTests(unittest.TestCase):
                 expected_pairs=expected_pairs,
                 learner_readings={
                     expected_pairs[0].symbol: expected_pairs[0].reading_romaji,
-                    expected_pairs[1].symbol: "romaji incorrecto",
+                    expected_pairs[1].symbol: "wrong romaji",
                 },
                 level=1,
             )
@@ -87,7 +87,7 @@ class KanjiMatchServiceTests(unittest.TestCase):
                 },
                 learner_meanings={
                     expected_pairs[0].symbol: expected_pairs[0].meaning,
-                    expected_pairs[1].symbol: "vida nacer",
+                    expected_pairs[1].symbol: "lif",
                 },
                 level=2,
             )
@@ -98,8 +98,8 @@ class KanjiMatchServiceTests(unittest.TestCase):
         self.assertEqual(result["meaning_accuracy"], 0.75)
         self.assertEqual(result["score"], 88)
         statuses = {item["symbol"]: item["status"] for item in result["meaning_results"]}
-        self.assertIn("correcto", statuses.values())
-        self.assertIn("casi_correcto", statuses.values())
+        self.assertIn("correct", statuses.values())
+        self.assertIn("almost_correct", statuses.values())
 
     def test_service_is_reusable_through_registry(self) -> None:
         registry = GameServiceRegistry()

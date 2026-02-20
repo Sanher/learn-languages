@@ -11,36 +11,36 @@ from .writing_support import writing_support_profile
 
 GAME_TYPE_PRONUNCIATION_MATCH = "pronunciation_match"
 LANGUAGE_JAPANESE = "ja"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.pronunciation_match")
 
-# Contenido inicial solo para japonés: texto, romanizado y traduccion aproximada.
+# Initial Japanese-only content: script, romanized line, and approximate translation.
 JAPANESE_PRONUNCIATION_ITEMS_BY_LEVEL: dict[int, list[tuple[str, str, str]]] = {
     1: [
-        ("おはよう ございます", "ohayou gozaimasu", "buenos dias (formal)"),
-        ("ありがとうございます", "arigatou gozaimasu", "gracias (formal)"),
-        ("すみません", "sumimasen", "disculpe / perdon"),
+        ("おはよう ございます", "ohayou gozaimasu", "good morning (formal)"),
+        ("ありがとうございます", "arigatou gozaimasu", "thank you (formal)"),
+        ("すみません", "sumimasen", "excuse me / sorry"),
     ],
     2: [
-        ("今日は いい 天気 ですね", "kyou wa ii tenki desu ne", "hoy hace buen tiempo, verdad"),
-        ("もう 一度 お願い します", "mou ichido onegai shimasu", "otra vez, por favor"),
-        ("水 を ください", "mizu o kudasai", "agua, por favor"),
+        ("今日は いい 天気 ですね", "kyou wa ii tenki desu ne", "nice weather today, right?"),
+        ("もう 一度 お願い します", "mou ichido onegai shimasu", "one more time, please"),
+        ("水 を ください", "mizu o kudasai", "water, please"),
     ],
     3: [
         (
             "日本語 の 発音 を 毎日 練習 しています",
             "nihongo no hatsuon o mainichi renshuu shiteimasu",
-            "practico la pronunciacion de japones cada dia",
+            "I practice Japanese pronunciation every day",
         ),
         (
             "この 表現 は 場面 によって 使い分けます",
             "kono hyougen wa bamen ni yotte tsukaiwakemasu",
-            "esta expresion se usa segun el contexto",
+            "this expression changes depending on context",
         ),
     ],
 }
 
-# Compatibilidad con imports previos.
+# Backward-compatible alias for legacy imports.
 JAPANESE_PRONUNCIATION_PHRASES_BY_LEVEL: dict[int, list[str]] = {
     level: [text for text, _romanized, _translation in items]
     for level, items in JAPANESE_PRONUNCIATION_ITEMS_BY_LEVEL.items()
@@ -76,7 +76,7 @@ class PronunciationItem:
 
 
 class PronunciationMatchService:
-    """Servicio reusable de match de pronunciación (ja inicial)."""
+    """Reusable pronunciation match service (initial Japanese implementation)."""
 
     game_type = GAME_TYPE_PRONUNCIATION_MATCH
 
@@ -143,7 +143,7 @@ class PronunciationMatchService:
         )
         if attempt.language != LANGUAGE_JAPANESE:
             logger.warning("evaluate_invalid unsupported_language=%s", attempt.language)
-            raise ValueError(f"Idioma no soportado en pronunciation match: {attempt.language}")
+            raise ValueError(f"Unsupported language in pronunciation_match: {attempt.language}")
 
         item = self._resolve_item(
             language=attempt.language,
@@ -171,7 +171,7 @@ class PronunciationMatchService:
         alerts: list[str] = []
         if attempt.retry_count >= 3:
             alerts.append(
-                "Aviso: desde el 3er reintento puede aumentar el consumo de tokens STT/TTS."
+                "Warning: from the 3rd retry onward, STT/TTS token usage may increase."
             )
 
         result["match_threshold"] = threshold
@@ -214,7 +214,7 @@ class PronunciationMatchService:
 
     def _find_item(self, language: str, item_id: str, level: int) -> PronunciationItem:
         if language != LANGUAGE_JAPANESE:
-            raise ValueError(f"Idioma no soportado en pronunciation match: {language}")
+            raise ValueError(f"Unsupported language in pronunciation_match: {language}")
 
         for item in self.get_items(language=language, level=level):
             if item.item_id == item_id:
@@ -223,7 +223,7 @@ class PronunciationMatchService:
             for item in self.get_items(language=language, level=candidate_level):
                 if item.item_id == item_id:
                     return item
-        raise ValueError(f"item_id no encontrado para language={language}, level={level}: {item_id}")
+        raise ValueError(f"item_id not found for language={language}, level={level}: {item_id}")
 
     def _resolve_item(self, language: str, item_id: str, expected_text: str, level: int) -> PronunciationItem | None:
         if language != LANGUAGE_JAPANESE:

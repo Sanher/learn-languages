@@ -4,7 +4,7 @@ from .game_service import GameActivity, GameService
 
 
 class GameServiceRegistry:
-    """Coordina servicios de juego y devuelve actividades por idioma."""
+    """Coordinates game services and returns activities by language."""
 
     def __init__(self) -> None:
         self._services: dict[str, GameService] = {}

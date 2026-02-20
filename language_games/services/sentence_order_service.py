@@ -8,7 +8,7 @@ from .game_service import GameActivity
 from .writing_support import EASTERN_SCRIPT_LANGUAGE_CODES, is_eastern_script, writing_support_profile
 
 GAME_TYPE_SENTENCE_ORDER = "sentence_order"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.sentence_order")
 
 
@@ -39,7 +39,7 @@ JAPANESE_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
             ordered_tokens=["わたし", "は", "がくせい", "です"],
             script_line="私は学生です。",
             romanized_line="watashi wa gakusei desu",
-            literal_translation="yo tema estudiante soy",
+            literal_translation="I topic student am",
             level=1,
         ),
         SentenceOrderItem(
@@ -48,7 +48,7 @@ JAPANESE_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
             ordered_tokens=["これ", "は", "ほん", "です"],
             script_line="これは本です。",
             romanized_line="kore wa hon desu",
-            literal_translation="esto tema libro es",
+            literal_translation="this topic book is",
             level=1,
         ),
     ],
@@ -59,7 +59,7 @@ JAPANESE_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
             ordered_tokens=["きょう", "は", "しごと", "が", "あります"],
             script_line="今日は仕事があります。",
             romanized_line="kyou wa shigoto ga arimasu",
-            literal_translation="hoy tema trabajo sujeto existe",
+            literal_translation="today topic work subject exists",
             level=2,
         ),
         SentenceOrderItem(
@@ -68,7 +68,7 @@ JAPANESE_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
             ordered_tokens=["わたし", "は", "えき", "に", "いきます"],
             script_line="私は駅に行きます。",
             romanized_line="watashi wa eki ni ikimasu",
-            literal_translation="yo tema estacion a voy",
+            literal_translation="I topic station to go",
             level=2,
         ),
     ],
@@ -79,7 +79,7 @@ JAPANESE_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
             ordered_tokens=["あした", "ともだち", "と", "えいが", "を", "みます"],
             script_line="明日友達と映画を見ます。",
             romanized_line="ashita tomodachi to eiga o mimasu",
-            literal_translation="manana amigo con pelicula objeto vere",
+            literal_translation="tomorrow friend with movie object watch",
             level=3,
         ),
     ],
@@ -93,7 +93,7 @@ ENGLISH_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
             ordered_tokens=["I", "study", "every", "day"],
             script_line="I study every day.",
             romanized_line=None,
-            literal_translation="yo estudio cada dia",
+            literal_translation="I study every day",
             level=1,
         ),
         SentenceOrderItem(
@@ -102,7 +102,7 @@ ENGLISH_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
             ordered_tokens=["This", "is", "my", "book"],
             script_line="This is my book.",
             romanized_line=None,
-            literal_translation="esto es mi libro",
+            literal_translation="this is my book",
             level=1,
         ),
     ],
@@ -110,7 +110,7 @@ ENGLISH_SENTENCE_ORDER_ITEMS_BY_LEVEL: dict[int, list[SentenceOrderItem]] = {
 
 
 class SentenceOrderService:
-    """Servicio reusable de ordenar frase (ja y alfabetos occidentales)."""
+    """Reusable sentence-order service (Japanese and western-alphabet languages)."""
 
     game_type = GAME_TYPE_SENTENCE_ORDER
 
@@ -122,18 +122,18 @@ class SentenceOrderService:
 
         for item in items:
             scrambled = self._scrambled_tokens(item)
-            header = f"Ordena tokens: {' | '.join(scrambled)}"
+            header = f"Order tokens: {' | '.join(scrambled)}"
             if self._is_eastern_script(language):
-                lines = [header, f"Kanji: {item.script_line}"]
+                lines = [header, f"Script: {item.script_line}"]
                 if support.show_romanized_line and item.romanized_line:
-                    lines.append(f"Romanizado: {item.romanized_line}")
+                    lines.append(f"Romanized: {item.romanized_line}")
                 if support.show_translation_hint:
-                    lines.append(f"Traduccion guia: {item.literal_translation}")
+                    lines.append(f"Translation hint: {item.literal_translation}")
                 prompt = "\n".join(lines)
             else:
-                lines = [header, f"Frase base: {item.script_line}"]
+                lines = [header, f"Base sentence: {item.script_line}"]
                 if support.show_translation_hint:
-                    lines.append(f"Traduccion guia: {item.literal_translation}")
+                    lines.append(f"Translation hint: {item.literal_translation}")
                 prompt = "\n".join(lines)
 
             activities.append(
@@ -201,9 +201,9 @@ class SentenceOrderService:
             "user_sentence": " ".join(attempt.ordered_tokens_by_user),
             "expected_sentence": " ".join(item.ordered_tokens),
             "feedback": (
-                "Orden correcto. Buen trabajo."
+                "Correct order. Well done."
                 if is_correct
-                else "Orden no correcto aun. Revisa particulas y posicion del verbo."
+                else "Order is not correct yet. Review particles and verb position."
             ),
             "display": self._view_payload(item=item, support=support, show_translation=True),
             "retry_state": self._view_payload(
@@ -229,7 +229,7 @@ class SentenceOrderService:
             if item.item_id == item_id:
                 return item
         logger.warning("item_not_found language=%s level=%s item_id=%s", language, level, item_id)
-        raise ValueError(f"item_id no encontrado para language={language}, level={level}: {item_id}")
+        raise ValueError(f"item_id not found for language={language}, level={level}: {item_id}")
 
     def _view_payload(
         self,

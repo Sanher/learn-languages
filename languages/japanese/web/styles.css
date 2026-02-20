@@ -313,7 +313,7 @@ button {
 }
 
 .dnd-zone:empty:not([data-placeholder])::before {
-  content: 'Arrastra aqui';
+  content: 'Drag here';
   color: #64748b;
   font-size: 13px;
 }
@@ -388,15 +388,15 @@ button {
   min-height: 16px;
 }
 
-.status-correcto {
+.status-correct {
   color: #86efac;
 }
 
-.status-casi {
+.status-almost {
   color: #fde68a;
 }
 
-.status-incorrecto {
+.status-incorrect {
   color: #fca5a5;
 }
 

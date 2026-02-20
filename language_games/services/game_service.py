@@ -17,11 +17,11 @@ class GameService(Protocol):
     game_type: str
 
     def get_activities(self, language: str, level: int = 1) -> list[GameActivity]:
-        """Retorna actividades del juego para un idioma."""
+        """Returns game activities for a language."""
 
 
 class InMemoryGameService:
-    """Servicio simple para poblar actividades por idioma y nivel."""
+    """Simple service to provide activities by language and level."""
 
     def __init__(self, game_type: str, activities_by_language: dict[str, list[GameActivity]]) -> None:
         self.game_type = game_type

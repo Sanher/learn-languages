@@ -59,7 +59,7 @@ class ListeningGapFillServiceTests(unittest.TestCase):
             ListeningGapFillAttempt(
                 language="ja",
                 item_id=item.item_id,
-                user_gap_tokens=["incorrecto"],
+                user_gap_tokens=["wrong"],
                 level=1,
             )
         )

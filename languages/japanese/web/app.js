@@ -6,7 +6,7 @@ const gamesSidebarEl = document.getElementById('games-sidebar');
 const changeLanguageBtn = document.getElementById('change-language-btn');
 const changeLevelBtn = document.getElementById('change-level-btn');
 const LANGUAGE_ALIASES = {
-  ja: 'japanase',
+  ja: 'Japanese',
 };
 
 let availableLanguages = ['ja'];
@@ -82,7 +82,7 @@ function updateTopbar() {
   }
   const score = todayScoreCount > 0 ? Math.round(todayScoreTotal / todayScoreCount) : 0;
   if (todayScoreEl) {
-    todayScoreEl.textContent = `Score de hoy: ${score}`;
+    todayScoreEl.textContent = `Today's score: ${score}`;
   }
 }
 
@@ -96,7 +96,7 @@ function stopKanaElapsedTicker() {
 function formatKanaElapsed(seconds, approximate) {
   const normalized = Number.isFinite(seconds) ? Math.max(0.1, seconds) : KANA_DEFAULT_ELAPSED_SECONDS;
   const text = normalized.toFixed(1);
-  return approximate ? `~${text} (aprox.)` : `${text}`;
+  return approximate ? `~${text} (approx.)` : `${text}`;
 }
 
 function setKanaElapsed(seconds, approximate) {
@@ -120,7 +120,7 @@ function startKanaElapsedTicker() {
 function renderSingleGame(game) {
   if (!game) {
     gameZoneEl.classList.remove('hidden');
-    gameZoneEl.innerHTML = '<p class="muted">No hay juego disponible para hoy.</p>';
+    gameZoneEl.innerHTML = '<p class="muted">No game available for today.</p>';
     return;
   }
 
@@ -142,7 +142,7 @@ function renderSingleGame(game) {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
-      .filter((line) => !/^Opciones:/i.test(line));
+      .filter((line) => !/^Options:/i.test(line));
     promptHtml = `
       <div class="prompt game-meta">
         ${promptLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
@@ -150,9 +150,9 @@ function renderSingleGame(game) {
     `;
     controls = `
       <fieldset class="response-group">
-        <legend>Respuesta</legend>
+        <legend>Answer</legend>
         <div class="inline-select-field">
-          <label for="grammar-particle-select">Opciones de Particula:</label>
+          <label for="grammar-particle-select">Particle options:</label>
           <select id="grammar-particle-select" data-k="selected_particle">${options}</select>
         </div>
       </fieldset>
@@ -172,7 +172,7 @@ function renderSingleGame(game) {
       .join('');
     controls = `
       <fieldset class="response-group context-group">
-        <legend>Respuesta</legend>
+        <legend>Answer</legend>
         ${options}
       </fieldset>
     `;
@@ -196,10 +196,10 @@ function renderSingleGame(game) {
 
     controls = `
       <fieldset class="response-group">
-        <legend>Respuesta</legend>
-        <label>Fragmentos disponibles</label>
+        <legend>Answer</legend>
+        <label>Available fragments</label>
         <div id="sentence-sourcezone" class="sentence-dropzone dnd-zone">${dndItems}</div>
-        <label>Zona de orden final</label>
+        <label>Final order zone</label>
         <div id="sentence-dropzone" class="sentence-dropzone dnd-zone"></div>
       </fieldset>
     `;
@@ -214,7 +214,7 @@ function renderSingleGame(game) {
           return `<span class="gap-static-token">${escapeHtml(token)}</span>`;
         }
         const gapIndex = Number(gapIndexByPosition.get(position));
-        return `<span class="gap-dropzone dnd-zone" data-single-slot="true" data-gap-index="${gapIndex}" data-placeholder="Hueco ${gapIndex + 1}"></span>`;
+        return `<span class="gap-dropzone dnd-zone" data-single-slot="true" data-gap-index="${gapIndex}" data-placeholder="Gap ${gapIndex + 1}"></span>`;
       })
       .join('');
     const options = payload.options || [];
@@ -231,7 +231,7 @@ function renderSingleGame(game) {
     const fallbackInputs = gapPositions
       .map(
         (pos, idx) => `
-          <input data-k="gap_token_${idx}" placeholder="Valor hueco ${idx + 1}" />
+          <input data-k="gap_token_${idx}" placeholder="Gap value ${idx + 1}" />
         `
       )
       .join('');
@@ -239,8 +239,8 @@ function renderSingleGame(game) {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
-      .filter((line) => !/^Completa huecos:/i.test(line))
-      .filter((line) => !/^Opciones:/i.test(line));
+      .filter((line) => !/^Fill the gaps:/i.test(line))
+      .filter((line) => !/^Options:/i.test(line));
     promptHtml = `
       <div class="prompt listening-meta">
         ${promptLines.map((line) => `<p class="listening-line">${escapeHtml(line)}</p>`).join('')}
@@ -248,13 +248,13 @@ function renderSingleGame(game) {
     `;
     controls = `
       <div class="listening-controls">
-        <label>Fragmentos disponibles</label>
-        <div id="gap-options-bank" class="sentence-dropzone gap-options-bank dnd-zone" data-placeholder="Opciones disponibles">
+        <label>Available fragments</label>
+        <div id="gap-options-bank" class="sentence-dropzone gap-options-bank dnd-zone" data-placeholder="Available options">
           ${optionTokens}
         </div>
         <fieldset class="response-group">
-          <legend>Respuesta</legend>
-          <label>Kanji arrastra aqui</label>
+          <legend>Answer</legend>
+          <label>Drag here</label>
           <div class="gap-phrase-line">${phraseSlots}</div>
         </fieldset>
         ${
@@ -294,7 +294,7 @@ function renderSingleGame(game) {
         const meaningInput = requireMeaningInput
           ? `
             <div class="kanji-meaning-answer">
-              <input data-k="kanji-meaning:${escapeHtml(pair.symbol)}" placeholder="significado aproximado" />
+              <input data-k="kanji-meaning:${escapeHtml(pair.symbol)}" placeholder="approximate meaning" />
               <small class="kanji-meaning-status muted" data-meaning-status-for="${escapeHtml(pair.symbol)}"></small>
             </div>
           `
@@ -312,7 +312,7 @@ function renderSingleGame(game) {
               data-single-slot="true"
               data-symbol="${escapeHtml(pair.symbol)}"
               data-bank-selector="#kanji-reading-bank"
-              data-placeholder="Suelta romaji"
+              data-placeholder="Drop romaji"
             ></span>
             <span class="kanji-meaning-preview" data-meaning-preview-for="${escapeHtml(pair.symbol)}"></span>
             ${meaningInput}
@@ -322,10 +322,10 @@ function renderSingleGame(game) {
       .join('');
     controls = `
       <fieldset class="response-group">
-        <legend>Respuesta</legend>
+        <legend>Answer</legend>
         <div class="kanji-match-controls">
-          <label>Romanizado disponible</label>
-          <div id="kanji-reading-bank" class="sentence-dropzone kanji-reading-bank dnd-zone" data-placeholder="Arrastra romaji al kanji">
+          <label>Available romanized readings</label>
+          <div id="kanji-reading-bank" class="sentence-dropzone kanji-reading-bank dnd-zone" data-placeholder="Drag romaji to kanji">
             ${readingBankTokens}
           </div>
           <div class="kanji-match-list">${rows}</div>
@@ -345,30 +345,30 @@ function renderSingleGame(game) {
       </div>
     `;
     controls = `
-      <p><strong>Secuencia objetivo:</strong> ${escapeHtml(expectedText)}</p>
+      <p><strong>Target sequence:</strong> ${escapeHtml(expectedText)}</p>
       <input data-k="expected_text" type="hidden" value="${escapeHtml(expectedText)}" />
       <div class="audio-actions">
-        <button id="kana-play-audio-btn" type="button" class="ghost-btn">Reproducir audio (TTS)</button>
-        <button id="kana-record-btn" type="button" class="ghost-btn">Grabar</button>
-        <button id="kana-stop-record-btn" type="button" class="ghost-btn" disabled>Detener</button>
+        <button id="kana-play-audio-btn" type="button" class="ghost-btn">Play audio (TTS)</button>
+        <button id="kana-record-btn" type="button" class="ghost-btn">Record</button>
+        <button id="kana-stop-record-btn" type="button" class="ghost-btn" disabled>Stop</button>
       </div>
-      <small id="kana-record-status" class="muted kana-status-line">Micrófono inactivo.</small>
+      <small id="kana-record-status" class="muted kana-status-line">Microphone inactive.</small>
       <fieldset class="response-group">
-        <legend>Respuesta</legend>
-        <label>Transcript reconocido (STT)</label>
+        <legend>Answer</legend>
+        <label>Recognized transcript (STT)</label>
         <input data-k="recognized_text" placeholder="あ い う え お" />
       </fieldset>
       <div class="kana-elapsed-line" aria-live="polite">
-        <span class="kana-elapsed-label">Tiempo (segundos)</span>
+        <span class="kana-elapsed-label">Time (seconds)</span>
         <strong id="kana-elapsed-value" class="kana-elapsed-value">${escapeHtml(formatKanaElapsed(kanaElapsedSeconds, kanaElapsedApproximate))}</strong>
       </div>
     `;
   } else if (gameType === 'pronunciation_match') {
     const expectedText = payload.expected_text || game.prompt || '';
     pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
-    const promptLines = [`Frase objetivo: ${expectedText}`];
+    const promptLines = [`Target sentence: ${expectedText}`];
     if (payload.show_romanized_line && payload.romanized_line) {
-      promptLines.push(`Romanizado: ${payload.romanized_line}`);
+      promptLines.push(`Romanized: ${payload.romanized_line}`);
     }
     promptHtml = `
       <div class="prompt game-meta">
@@ -377,22 +377,22 @@ function renderSingleGame(game) {
     `;
     controls = `
       <div class="audio-actions">
-        <button id="pronunciation-record-btn" type="button" class="ghost-btn">Grabar</button>
-        <button id="pronunciation-stop-record-btn" type="button" class="ghost-btn" disabled>Detener</button>
+        <button id="pronunciation-record-btn" type="button" class="ghost-btn">Record</button>
+        <button id="pronunciation-stop-record-btn" type="button" class="ghost-btn" disabled>Stop</button>
       </div>
-      <small id="pronunciation-record-status" class="muted kana-status-line">Micrófono inactivo.</small>
+      <small id="pronunciation-record-status" class="muted kana-status-line">Microphone inactive.</small>
       <fieldset class="response-group">
-        <legend>Respuesta</legend>
-        <label>Transcript reconocido</label>
-        <input data-k="recognized_text" placeholder="texto reconocido" />
+        <legend>Answer</legend>
+        <label>Recognized transcript</label>
+        <input data-k="recognized_text" placeholder="recognized text" />
       </fieldset>
     `;
   } else if (gameType === 'shadowing_score') {
     const expectedText = payload.expected_text || game.prompt || '';
     shadowingElapsedSeconds = SHADOWING_DEFAULT_AUDIO_SECONDS;
-    const promptLines = [`Frase objetivo: ${expectedText}`];
+    const promptLines = [`Target sentence: ${expectedText}`];
     if (payload.show_romanized_line && payload.romanized_line) {
-      promptLines.push(`Romanizado: ${payload.romanized_line}`);
+      promptLines.push(`Romanized: ${payload.romanized_line}`);
     }
     promptHtml = `
       <div class="prompt game-meta">
@@ -401,23 +401,23 @@ function renderSingleGame(game) {
     `;
     controls = `
       <div class="audio-actions">
-        <button id="shadowing-record-btn" type="button" class="ghost-btn">Grabar</button>
-        <button id="shadowing-stop-record-btn" type="button" class="ghost-btn" disabled>Detener</button>
+        <button id="shadowing-record-btn" type="button" class="ghost-btn">Record</button>
+        <button id="shadowing-stop-record-btn" type="button" class="ghost-btn" disabled>Stop</button>
       </div>
-      <small id="shadowing-record-status" class="muted kana-status-line">Micrófono inactivo.</small>
+      <small id="shadowing-record-status" class="muted kana-status-line">Microphone inactive.</small>
       <fieldset class="response-group">
-        <legend>Respuesta</legend>
-        <label>Texto pronunciado (con puntuacion)</label>
-        <input data-k="learner_text" placeholder="texto pronunciado" />
+        <legend>Answer</legend>
+        <label>Pronounced text (with punctuation)</label>
+        <input data-k="learner_text" placeholder="pronounced text" />
       </fieldset>
     `;
   } else {
-    controls = '<p class="muted">Juego sin renderer específico.</p>';
+    controls = '<p class="muted">Game renderer not implemented.</p>';
   }
 
   const evaluateLabel = (gameType === 'pronunciation_match' || gameType === 'shadowing_score' || gameType === 'kana_speed_round')
-    ? 'Evaluar audio'
-    : 'Evaluar';
+    ? 'Evaluate audio'
+    : 'Evaluate';
 
   gameZoneEl.classList.remove('hidden');
   gameZoneEl.innerHTML = `
@@ -426,7 +426,7 @@ function renderSingleGame(game) {
     ${controls}
     <div class="actions">
       <button id="evaluate-btn">${evaluateLabel}</button>
-      <button id="retry-btn" class="ghost-btn">Reintento</button>
+      <button id="retry-btn" class="ghost-btn">Retry</button>
     </div>
     <div id="game-result" class="result"></div>
   `;
@@ -442,9 +442,9 @@ function renderSidebar(games) {
     .join('');
 
   gamesSidebarEl.innerHTML = `
-    <h3>Juegos disponibles</h3>
-    <p class="muted">Selecciona uno para probarlo.</p>
-    <div class="sidebar-list">${list || '<p class="muted">Sin juegos disponibles.</p>'}</div>
+    <h3>Available games</h3>
+    <p class="muted">Select one to try it.</p>
+    <div class="sidebar-list">${list || '<p class="muted">No games available.</p>'}</div>
   `;
 }
 
@@ -480,7 +480,7 @@ function extractSentenceOrderTokensFromPrompt(prompt) {
   if (!text) return [];
 
   const lines = text.split(/\r?\n/);
-  const targetLine = lines.find((line) => /Ordena tokens:/i.test(line));
+  const targetLine = lines.find((line) => /Order tokens:/i.test(line));
   if (!targetLine) return [];
 
   const raw = targetLine.split(':').slice(1).join(':').trim();
@@ -497,7 +497,7 @@ function extractKanaSequenceFromPrompt(prompt) {
   if (!text) return '';
 
   const lines = text.split(/\r?\n/);
-  const targetLine = lines.find((line) => /^Lee rapido/i.test(line.trim()));
+  const targetLine = lines.find((line) => /^Read fast/i.test(line.trim()));
   if (!targetLine) return text.trim();
 
   return targetLine.split(':').slice(1).join(':').trim() || text.trim();
@@ -607,7 +607,7 @@ function syncKanjiReadingPreview() {
     const statusEl = row.querySelector('[data-meaning-status-for]');
     if (statusEl) {
       statusEl.textContent = '';
-      statusEl.classList.remove('status-correcto', 'status-casi', 'status-incorrecto');
+      statusEl.classList.remove('status-correct', 'status-almost', 'status-incorrect');
     }
     if (!learnerReading) {
       row.classList.remove('kanji-reading-miss');
@@ -634,19 +634,19 @@ function applyKanjiEvaluationFeedback(data) {
     const status = String(result.status || '');
     const statusEl = gameZoneEl.querySelector(`[data-meaning-status-for="${symbol}"]`);
     if (!statusEl) return;
-    statusEl.classList.remove('status-correcto', 'status-casi', 'status-incorrecto');
-    if (status === 'correcto') {
-      statusEl.textContent = 'Significado: correcto';
-      statusEl.classList.add('status-correcto');
+    statusEl.classList.remove('status-correct', 'status-almost', 'status-incorrect');
+    if (status === 'correct') {
+      statusEl.textContent = 'Meaning: correct';
+      statusEl.classList.add('status-correct');
       return;
     }
-    if (status === 'casi_correcto') {
-      statusEl.textContent = 'Significado: casi correcto';
-      statusEl.classList.add('status-casi');
+    if (status === 'almost_correct') {
+      statusEl.textContent = 'Meaning: almost correct';
+      statusEl.classList.add('status-almost');
       return;
     }
-    statusEl.textContent = 'Significado: incorrecto';
-    statusEl.classList.add('status-incorrecto');
+    statusEl.textContent = 'Meaning: incorrect';
+    statusEl.classList.add('status-incorrect');
   });
 }
 
@@ -659,13 +659,13 @@ function renderEvaluation(data) {
   const scoreHtml = data.score != null ? `<p><strong>Score:</strong> ${escapeHtml(data.score)}</p>` : '';
   const feedbackHtml = data.feedback ? `<p><strong>Feedback:</strong> ${escapeHtml(data.feedback)}</p>` : '';
   const translationHtml = data.literal_translation
-    ? `<p><strong>Traducción (castellano):</strong> ${escapeHtml(data.literal_translation)}</p>`
+    ? `<p><strong>Literal translation:</strong> ${escapeHtml(data.literal_translation)}</p>`
     : '';
   const readingAccuracyHtml = data.reading_accuracy != null
-    ? `<p><strong>Lectura:</strong> ${escapeHtml(Math.round(Number(data.reading_accuracy) * 100))}%</p>`
+    ? `<p><strong>Reading:</strong> ${escapeHtml(Math.round(Number(data.reading_accuracy) * 100))}%</p>`
     : '';
   const meaningAccuracyHtml = data.meaning_accuracy != null
-    ? `<p><strong>Significado:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
+    ? `<p><strong>Meaning:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
     : '';
 
   let displayHtml = '';
@@ -728,7 +728,7 @@ async function playKanaAudio(game) {
     if (!res.ok || !data.audio_data_url) {
       const resultEl = document.getElementById('game-result');
       if (resultEl) {
-        resultEl.innerHTML = `<p class="alert">${escapeHtml(data.error || 'No se pudo generar el audio TTS')}</p>`;
+        resultEl.innerHTML = `<p class="alert">${escapeHtml(data.error || 'Could not generate TTS audio')}</p>`;
       }
       return;
     }
@@ -781,7 +781,7 @@ async function transcribeKanaRecording(blob, durationSeconds) {
   });
   const data = await res.json();
   if (!res.ok || !data.transcript) {
-    setKanaRecordStatus(data.error || 'No se pudo transcribir el audio.', true);
+    setKanaRecordStatus(data.error || 'Audio transcription failed.', true);
     return;
   }
 
@@ -790,7 +790,7 @@ async function transcribeKanaRecording(blob, durationSeconds) {
     transcriptInput.value = data.transcript;
   }
   setKanaElapsed(durationSeconds, false);
-  setKanaRecordStatus(`Transcript listo (${durationSeconds.toFixed(1)}s).`);
+  setKanaRecordStatus(`Transcript ready (${durationSeconds.toFixed(1)}s).`);
 }
 
 async function startKanaRecording() {
@@ -798,11 +798,11 @@ async function startKanaRecording() {
   if (activeRecorder) return;
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setKanaRecordStatus('Este navegador no soporta acceso a micrófono.', true);
+    setKanaRecordStatus('This browser does not support microphone access.', true);
     return;
   }
   if (typeof MediaRecorder === 'undefined') {
-    setKanaRecordStatus('MediaRecorder no está disponible en este navegador.', true);
+    setKanaRecordStatus('MediaRecorder is not available in this browser.', true);
     return;
   }
 
@@ -837,18 +837,18 @@ async function startKanaRecording() {
 
     activeRecorder.start();
     updateKanaRecordButtons(true);
-    setKanaRecordStatus('Grabando... pulsa Detener para transcribir.');
+    setKanaRecordStatus('Recording... press Stop to transcribe.');
   } catch (error) {
     stopKanaElapsedTicker();
     cleanupRecorder();
     updateKanaRecordButtons(false);
-    setKanaRecordStatus('No se pudo abrir el micrófono (revisa permisos).', true);
+    setKanaRecordStatus('Could not open microphone (check permissions).', true);
   }
 }
 
 function stopKanaRecording() {
   if (!activeRecorder) return;
-  setKanaRecordStatus('Procesando audio...');
+  setKanaRecordStatus('Processing audio...');
   activeRecorder.stop();
 }
 
@@ -879,7 +879,7 @@ async function transcribePronunciationRecording(blob, durationSeconds) {
   });
   const data = await res.json();
   if (!res.ok || !data.transcript) {
-    setPronunciationRecordStatus(data.error || 'No se pudo transcribir el audio.', true);
+    setPronunciationRecordStatus(data.error || 'Audio transcription failed.', true);
     return;
   }
 
@@ -888,7 +888,7 @@ async function transcribePronunciationRecording(blob, durationSeconds) {
     transcriptInput.value = data.transcript;
   }
   pronunciationElapsedSeconds = durationSeconds;
-  setPronunciationRecordStatus(`Transcript listo (${durationSeconds.toFixed(1)}s).`);
+  setPronunciationRecordStatus(`Transcript ready (${durationSeconds.toFixed(1)}s).`);
 }
 
 async function startPronunciationRecording() {
@@ -896,11 +896,11 @@ async function startPronunciationRecording() {
   if (activeRecorder) return;
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setPronunciationRecordStatus('Este navegador no soporta acceso a micrófono.', true);
+    setPronunciationRecordStatus('This browser does not support microphone access.', true);
     return;
   }
   if (typeof MediaRecorder === 'undefined') {
-    setPronunciationRecordStatus('MediaRecorder no está disponible en este navegador.', true);
+    setPronunciationRecordStatus('MediaRecorder is not available in this browser.', true);
     return;
   }
 
@@ -933,17 +933,17 @@ async function startPronunciationRecording() {
 
     activeRecorder.start();
     updatePronunciationRecordButtons(true);
-    setPronunciationRecordStatus('Grabando... pulsa Detener para transcribir.');
+    setPronunciationRecordStatus('Recording... press Stop to transcribe.');
   } catch (error) {
     cleanupRecorder();
     updatePronunciationRecordButtons(false);
-    setPronunciationRecordStatus('No se pudo abrir el micrófono (revisa permisos).', true);
+    setPronunciationRecordStatus('Could not open microphone (check permissions).', true);
   }
 }
 
 function stopPronunciationRecording() {
   if (!activeRecorder) return;
-  setPronunciationRecordStatus('Procesando audio...');
+  setPronunciationRecordStatus('Processing audio...');
   activeRecorder.stop();
 }
 
@@ -974,7 +974,7 @@ async function transcribeShadowingRecording(blob, durationSeconds) {
   });
   const data = await res.json();
   if (!res.ok || !data.transcript) {
-    setShadowingRecordStatus(data.error || 'No se pudo transcribir el audio.', true);
+    setShadowingRecordStatus(data.error || 'Audio transcription failed.', true);
     return;
   }
 
@@ -983,7 +983,7 @@ async function transcribeShadowingRecording(blob, durationSeconds) {
     learnerInput.value = data.transcript;
   }
   shadowingElapsedSeconds = durationSeconds;
-  setShadowingRecordStatus(`Transcript listo (${durationSeconds.toFixed(1)}s).`);
+  setShadowingRecordStatus(`Transcript ready (${durationSeconds.toFixed(1)}s).`);
 }
 
 async function startShadowingRecording() {
@@ -991,11 +991,11 @@ async function startShadowingRecording() {
   if (activeRecorder) return;
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setShadowingRecordStatus('Este navegador no soporta acceso a micrófono.', true);
+    setShadowingRecordStatus('This browser does not support microphone access.', true);
     return;
   }
   if (typeof MediaRecorder === 'undefined') {
-    setShadowingRecordStatus('MediaRecorder no está disponible en este navegador.', true);
+    setShadowingRecordStatus('MediaRecorder is not available in this browser.', true);
     return;
   }
 
@@ -1028,17 +1028,17 @@ async function startShadowingRecording() {
 
     activeRecorder.start();
     updateShadowingRecordButtons(true);
-    setShadowingRecordStatus('Grabando... pulsa Detener para transcribir.');
+    setShadowingRecordStatus('Recording... press Stop to transcribe.');
   } catch (error) {
     cleanupRecorder();
     updateShadowingRecordButtons(false);
-    setShadowingRecordStatus('No se pudo abrir el micrófono (revisa permisos).', true);
+    setShadowingRecordStatus('Could not open microphone (check permissions).', true);
   }
 }
 
 function stopShadowingRecording() {
   if (!activeRecorder) return;
-  setShadowingRecordStatus('Procesando audio...');
+  setShadowingRecordStatus('Processing audio...');
   activeRecorder.stop();
 }
 
@@ -1159,7 +1159,7 @@ async function loadDailyGame() {
 
 async function changeLanguage() {
   const options = availableLanguages.map((code) => `${languageLabel(code)} (${code})`).join(', ');
-  const value = prompt(`Idioma (${options})`, currentLanguage);
+  const value = prompt(`Language (${options})`, currentLanguage);
   if (!value) return;
   const language = resolveLanguageCode(value);
   if (!availableLanguages.includes(language)) return;
@@ -1175,7 +1175,7 @@ async function changeLanguage() {
 }
 
 async function changeLevelForToday() {
-  const value = prompt('Nivel para hoy (1, 2, 3). Vacío para volver al nivel base.', String(todayLevel));
+  const value = prompt('Level for today (1, 2, 3). Leave empty to return to base level.', String(todayLevel));
   if (value == null) return;
   const trimmed = value.trim();
   if (!trimmed) {

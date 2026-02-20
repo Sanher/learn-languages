@@ -8,7 +8,7 @@ from .writing_support import is_eastern_script, writing_support_profile
 
 GAME_TYPE_GRAMMAR_PARTICLE_FIX = "grammar_particle_fix"
 LANGUAGE_JAPANESE = "ja"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.grammar_particle_fix")
 PARTICLE_ROMAJI = {
     "は": "wa",
@@ -45,28 +45,28 @@ JAPANESE_PARTICLE_ITEMS_BY_LEVEL: dict[int, list[GrammarParticleItem]] = {
             item_id="ja-particle-1-1",
             sentence_template="わたし__ がくせい です。",
             romanized_line="watashi __ gakusei desu.",
-            literal_translation="yo tema estudiante soy",
+            literal_translation="I topic student am",
             choices=["は", "を", "に"],
             correct_particle="は",
-            explanation="`は` marca el tema de la frase.",
+            explanation="`は` marks the sentence topic.",
         ),
         GrammarParticleItem(
             item_id="ja-particle-1-2",
             sentence_template="みず__ のみます。",
             romanized_line="mizu __ nomimasu.",
-            literal_translation="agua objeto bebo",
+            literal_translation="water object drink",
             choices=["が", "を", "で"],
             correct_particle="を",
-            explanation="`を` marca el objeto directo de un verbo transitivo.",
+            explanation="`を` marks the direct object of a transitive verb.",
         ),
         GrammarParticleItem(
             item_id="ja-particle-1-3",
             sentence_template="がっこう__ いきます。",
             romanized_line="gakkou __ ikimasu.",
-            literal_translation="escuela hacia voy",
+            literal_translation="school toward go",
             choices=["に", "は", "と"],
             correct_particle="に",
-            explanation="`に` puede marcar destino de movimiento.",
+            explanation="`に` can mark a movement destination.",
         ),
     ],
     2: [
@@ -74,28 +74,28 @@ JAPANESE_PARTICLE_ITEMS_BY_LEVEL: dict[int, list[GrammarParticleItem]] = {
             item_id="ja-particle-2-1",
             sentence_template="きょうしつ__ べんきょう します。",
             romanized_line="kyoushitsu __ benkyou shimasu.",
-            literal_translation="en aula estudio",
+            literal_translation="in classroom study",
             choices=["で", "に", "が"],
             correct_particle="で",
-            explanation="`で` marca el lugar donde ocurre una accion.",
+            explanation="`で` marks the place where an action happens.",
         ),
         GrammarParticleItem(
             item_id="ja-particle-2-2",
             sentence_template="ともだち__ えいが を みます。",
             romanized_line="tomodachi __ eiga o mimasu.",
-            literal_translation="con amigo pelicula veo",
+            literal_translation="with friend movie watch",
             choices=["と", "を", "が"],
             correct_particle="と",
-            explanation="`と` se usa para realizar una accion con alguien.",
+            explanation="`と` is used to do an action with someone.",
         ),
         GrammarParticleItem(
             item_id="ja-particle-2-3",
             sentence_template="ねこ__ すき です。",
             romanized_line="neko __ suki desu.",
-            literal_translation="gato sujeto me gusta",
+            literal_translation="cat subject like",
             choices=["が", "を", "に"],
             correct_particle="が",
-            explanation="Con `すき`, normalmente se usa `が` para lo que gusta.",
+            explanation="With `すき`, `が` is normally used for what is liked.",
         ),
     ],
     3: [
@@ -103,26 +103,26 @@ JAPANESE_PARTICLE_ITEMS_BY_LEVEL: dict[int, list[GrammarParticleItem]] = {
             item_id="ja-particle-3-1",
             sentence_template="しごと__ おわって から、うち__ かえります。",
             romanized_line="shigoto __ owatte kara, uchi __ kaerimasu.",
-            literal_translation="trabajo sujeto termina y luego a casa regreso",
+            literal_translation="work subject finishes and then home return",
             choices=["が / に", "を / に", "で / を"],
             correct_particle="が / に",
-            explanation="`が` marca sujeto de estado previo y `に` marca destino.",
+            explanation="`が` marks the subject of prior state and `に` marks destination.",
         ),
         GrammarParticleItem(
             item_id="ja-particle-3-2",
             sentence_template="この ほん__ よんだ こと が あります。",
             romanized_line="kono hon __ yonda koto ga arimasu.",
-            literal_translation="este libro objeto experiencia de haber leido tengo",
+            literal_translation="this book object have-experience of reading",
             choices=["を", "が", "で"],
             correct_particle="を",
-            explanation="`を` indica el objeto de `よむ` en la expresion experiencial.",
+            explanation="`を` marks the object of `よむ` in this experience expression.",
         ),
     ],
 }
 
 
 class GrammarParticleFixService:
-    """Servicio reusable de seleccion de particulas (ja inicial)."""
+    """Reusable particle-selection service (initial Japanese implementation)."""
 
     game_type = GAME_TYPE_GRAMMAR_PARTICLE_FIX
 
@@ -197,7 +197,7 @@ class GrammarParticleFixService:
         )
         if attempt.language != LANGUAGE_JAPANESE:
             logger.warning("evaluate_invalid unsupported_language=%s", attempt.language)
-            raise ValueError(f"Idioma no soportado en grammar_particle_fix: {attempt.language}")
+            raise ValueError(f"Unsupported language in grammar_particle_fix: {attempt.language}")
 
         target_item = self._find_item(language=attempt.language, item_id=attempt.item_id, level=attempt.level)
 
@@ -215,9 +215,9 @@ class GrammarParticleFixService:
             "resolved_sentence": resolved_sentence,
             "literal_translation": target_item.literal_translation,
             "feedback": (
-                "Correcto. Buen uso de particulas."
+                "Correct. Good particle usage."
                 if is_correct
-                else f"Revisa esta regla: {target_item.explanation}"
+                else f"Review this rule: {target_item.explanation}"
             ),
             "display": self._view_payload(item=target_item, support=support, show_translation=True),
             "retry_state": self._view_payload(
@@ -239,11 +239,11 @@ class GrammarParticleFixService:
 
     @staticmethod
     def _prompt_for_item(item: GrammarParticleItem, support) -> str:
-        lines = [f"Completa particula: {item.sentence_template}", f"Opciones: {', '.join(item.choices)}"]
+        lines = [f"Fill in the particle: {item.sentence_template}", f"Options: {', '.join(item.choices)}"]
         if support.show_romanized_line:
-            lines.append(f"Romanizado: {item.romanized_line}")
+            lines.append(f"Romanized: {item.romanized_line}")
         if support.show_translation_hint:
-            lines.append(f"Traduccion guia: {item.literal_translation}")
+            lines.append(f"Translation hint: {item.literal_translation}")
         return "\n".join(lines)
 
     def _find_item(self, language: str, item_id: str, level: int) -> GrammarParticleItem:
@@ -252,7 +252,7 @@ class GrammarParticleFixService:
             if item.item_id == item_id:
                 return item
         logger.warning("item_not_found language=%s level=%s item_id=%s", language, level, item_id)
-        raise ValueError(f"item_id no encontrado para nivel {level}: {item_id}")
+        raise ValueError(f"item_id not found for level {level}: {item_id}")
 
     @staticmethod
     def _view_payload(

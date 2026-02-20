@@ -25,7 +25,7 @@ class LearnerSnapshot:
 
 
 class DailyGamePlanner:
-    """Planifica 4-5 juegos diarios evitando repeticiones recientes."""
+    """Plans 4-5 daily games while avoiding recent repeats."""
 
     def __init__(self, game_pool: Iterable[str] | None = None) -> None:
         self._pool = list(game_pool or GAME_POOL)
@@ -74,7 +74,7 @@ class DailyGamePlanner:
 
     @staticmethod
     def difficulty_for(learner: LearnerSnapshot) -> int:
-        """Escala 1-10 usando streak + precisión reciente."""
+        """Scales 1-10 using streak + recent accuracy."""
         base = 1 + min(5, learner.streak_days // 5)
         precision_boost = 2 if learner.recent_accuracy >= 0.85 else 1 if learner.recent_accuracy >= 0.7 else 0
         return min(10, base + precision_boost)

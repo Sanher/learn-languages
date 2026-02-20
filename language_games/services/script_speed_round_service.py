@@ -11,7 +11,7 @@ from .writing_support import writing_support_profile
 
 GAME_TYPE_SCRIPT_SPEED_ROUND = "script_speed_round"
 ALIAS_GAME_TYPE_KANA_SPEED_ROUND = "kana_speed_round"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.script_speed_round")
 
 LANGUAGE_JAPANESE = "ja"
@@ -103,7 +103,7 @@ TARGET_ITEMS_PER_MINUTE_LATIN: dict[int, tuple[float, float]] = {
 
 
 class ScriptSpeedRoundService:
-    """Servicio reusable de lectura rapida por sistema de escritura."""
+    """Reusable speed-reading service by writing system."""
 
     def __init__(self, game_type: str = GAME_TYPE_SCRIPT_SPEED_ROUND, allowed_languages: set[str] | None = None) -> None:
         self.game_type = game_type
@@ -129,10 +129,10 @@ class ScriptSpeedRoundService:
         activities: list[GameActivity] = []
         for idx, chunk in enumerate(chunks, start=1):
             sequence = " ".join(chunk)
-            lines = [f"Lee rapido ({profile.script_label}): {sequence}"]
+            lines = [f"Read fast ({profile.script_label}): {sequence}"]
             if language == LANGUAGE_JAPANESE and support.show_romanized_line:
                 romaji = " ".join(KANA_ROMAJI_MAP.get(ch, ch) for ch in chunk)
-                lines.append(f"Guia romaji: {romaji}")
+                lines.append(f"Romaji guide: {romaji}")
             activities.append(
                 GameActivity(
                     activity_id=f"{language}-{self.game_type}-{normalized_level}-{idx}",
@@ -164,12 +164,12 @@ class ScriptSpeedRoundService:
         )
         if self.allowed_languages is not None and attempt.language not in self.allowed_languages:
             logger.warning("evaluate_invalid game_type=%s language_not_allowed=%s", self.game_type, attempt.language)
-            raise ValueError(f"Idioma no soportado en {self.game_type}: {attempt.language}")
+            raise ValueError(f"Unsupported language in {self.game_type}: {attempt.language}")
 
         profile = self._profiles.get(attempt.language)
         if profile is None:
             logger.warning("evaluate_invalid game_type=%s unsupported_language=%s", self.game_type, attempt.language)
-            raise ValueError(f"Idioma no soportado en {self.game_type}: {attempt.language}")
+            raise ValueError(f"Unsupported language in {self.game_type}: {attempt.language}")
 
         normalized_level = self._normalize_level(attempt.level, profile.characters_by_level)
         expected_tokens = attempt.sequence_expected or self._tokenize_text(attempt.expected_text, attempt.language)
@@ -203,12 +203,12 @@ class ScriptSpeedRoundService:
             elapsed_seconds=elapsed_seconds,
             target_range=profile.target_items_per_minute_by_level[normalized_level],
         )
-        # Priorizamos exactitud de lectura frente a velocidad para evitar subir score por ir demasiado rapido.
+        # Prioritize reading accuracy over speed to avoid score inflation from rushing.
         score = round(((accuracy * 0.75) + (pace_score * 0.25)) * 100)
 
         alerts: list[str] = []
         if attempt.retry_count >= 3:
-            alerts.append("Aviso: desde el 3er reintento puede aumentar el consumo de tokens STT/TTS.")
+            alerts.append("Warning: from the 3rd retry onward, STT/TTS token usage may increase.")
 
         result = {
             "game_type": self.game_type,
@@ -304,7 +304,7 @@ class ScriptSpeedRoundService:
 
 
 class KanaSpeedRoundService(ScriptSpeedRoundService):
-    """Alias compatible: kana_speed_round para japones."""
+    """Compatible alias: kana_speed_round for Japanese."""
 
     def __init__(self) -> None:
         super().__init__(

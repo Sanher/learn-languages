@@ -26,13 +26,13 @@ class ScriptSpeedRoundServiceTests(unittest.TestCase):
         self.assertTrue(ja_activities)
         self.assertEqual(en_activities, [])
         self.assertEqual(ja_activities[0].game_type, ALIAS_GAME_TYPE_KANA_SPEED_ROUND)
-        self.assertIn("Guia romaji", ja_activities[0].prompt)
+        self.assertIn("Romaji guide", ja_activities[0].prompt)
 
     def test_kana_advanced_hides_romaji_guide(self) -> None:
         service = KanaSpeedRoundService()
         ja_activities = service.get_activities(language="ja", level=3)
         self.assertTrue(ja_activities)
-        self.assertNotIn("Guia romaji", ja_activities[0].prompt)
+        self.assertNotIn("Romaji guide", ja_activities[0].prompt)
 
     def test_evaluate_attempt(self) -> None:
         service = ScriptSpeedRoundService()

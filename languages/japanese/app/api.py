@@ -50,19 +50,19 @@ LOCAL_LANGUAGE_DATA_DIR = BASE_DIR / "data" / "japanese"
 DB_PATH = str((ADDON_LANGUAGE_DATA_DIR if Path("/data").exists() else LOCAL_LANGUAGE_DATA_DIR) / "progress.db")
 DEFAULT_LEARNER_ID = os.getenv("HA_DEFAULT_LEARNER_ID", "ha_default_user")
 AVAILABLE_LANGUAGES = ["ja"]
-GAME_NAME_ALIASES_ES = {
-    GAME_TYPE_KANJI_MATCH: "Emparejar Kanji",
-    ALIAS_GAME_TYPE_KANA_SPEED_ROUND: "Lectura Rapida Kana",
-    GAME_TYPE_GRAMMAR_PARTICLE_FIX: "Corregir Particulas",
-    GAME_TYPE_SENTENCE_ORDER: "Ordenar Frase",
-    GAME_TYPE_LISTENING_GAP_FILL: "Completar Huecos (Escucha)",
-    GAME_TYPE_PRONUNCIATION_MATCH: "Pronunciacion Guiada",
-    GAME_TYPE_CONTEXT_QUIZ: "Quiz de Contexto",
+GAME_NAME_ALIASES = {
+    GAME_TYPE_KANJI_MATCH: "Kanji Match",
+    ALIAS_GAME_TYPE_KANA_SPEED_ROUND: "Kana Speed Round",
+    GAME_TYPE_GRAMMAR_PARTICLE_FIX: "Grammar Particle Fix",
+    GAME_TYPE_SENTENCE_ORDER: "Sentence Order",
+    GAME_TYPE_LISTENING_GAP_FILL: "Listening Gap Fill",
+    GAME_TYPE_PRONUNCIATION_MATCH: "Guided Pronunciation",
+    GAME_TYPE_CONTEXT_QUIZ: "Context Quiz",
 }
 
 app = FastAPI(title="Japanese Daily Trainer")
 
-# Logger dedicado para que en HA se vean entradas con hora y contexto de endpoint.
+# Dedicated logger so HA shows endpoint traces with timestamps.
 logger = logging.getLogger("learn_languages.japanese.api")
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -244,7 +244,7 @@ def _choose_single_game(games: list[str], available_games: list[str], learner_id
 
 def _extract_kana_sequence(prompt: str) -> str:
     for line in prompt.splitlines():
-        if line.lower().startswith("lee rapido"):
+        if line.lower().startswith("read fast"):
             return line.split(":", 1)[1].strip() if ":" in line else line.strip()
     return prompt.strip()
 
@@ -386,7 +386,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         available_cards.append(
             {
                 "game_type": game,
-                "display_name": GAME_NAME_ALIASES_ES.get(game, game),
+                "display_name": GAME_NAME_ALIASES.get(game, game),
                 "activity_id": activity.activity_id,
                 "language": activity.language,
                 "prompt": activity.prompt,
@@ -415,7 +415,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         all_cards.append(
             {
                 "game_type": game,
-                "display_name": GAME_NAME_ALIASES_ES.get(game, game),
+                "display_name": GAME_NAME_ALIASES.get(game, game),
                 "activity_id": activity.activity_id,
                 "language": activity.language,
                 "prompt": activity.prompt,
@@ -470,7 +470,7 @@ def update_ui_language(req: LanguageUpdateRequest) -> dict:
     language = req.language.strip().lower()
     if language not in AVAILABLE_LANGUAGES:
         logger.warning("ui_language_invalid learner_id=%s requested=%s", req.learner_id, language)
-        return {"error": f"Idioma no soportado: {language}"}
+        return {"error": f"Unsupported language: {language}"}
 
     memory.load_or_create(req.learner_id)
     prefs = memory.load_or_create_preferences(req.learner_id)
@@ -538,17 +538,17 @@ async def generate_tts_audio(req: TextToSpeechRequest) -> dict:
     language = req.language.strip().lower()
     if language != "ja":
         logger.warning("tts_unsupported_language language=%s", language)
-        return {"error": f"Idioma no soportado para TTS: {language}"}
+        return {"error": f"Unsupported language for TTS: {language}"}
 
     text = req.text.strip()
     if not text:
-        return {"error": "Texto vacio para TTS"}
+        return {"error": "Empty text for TTS"}
 
     logger.info("tts_request language=%s text_len=%s", language, len(text))
     audio_bytes = await elevenlabs.tts_japanese(text)
     if not audio_bytes:
         logger.warning("tts_unavailable reason=missing_credentials_or_provider text_len=%s", len(text))
-        return {"error": "TTS no disponible. Revisa ELEVENLABS_API_KEY y ELEVENLABS_VOICE_ID."}
+        return {"error": "TTS unavailable. Check ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID."}
 
     encoded = base64.b64encode(audio_bytes).decode("ascii")
     return {
@@ -565,11 +565,11 @@ async def transcribe_audio(
     normalized_language = language.strip().lower()
     if normalized_language != "ja":
         logger.warning("stt_unsupported_language language=%s", normalized_language)
-        return {"error": f"Idioma no soportado para STT: {normalized_language}"}
+        return {"error": f"Unsupported language for STT: {normalized_language}"}
 
     audio_bytes = await audio_file.read()
     if not audio_bytes:
-        return {"error": "No se ha recibido audio para transcribir."}
+        return {"error": "No audio received for transcription."}
 
     mime_type = audio_file.content_type or "application/octet-stream"
     filename = audio_file.filename or "audio.webm"
@@ -589,9 +589,9 @@ async def transcribe_audio(
     )
     transcript = (result.get("transcript") or "").strip()
     if not transcript:
-        logger.warning("stt_failed language=%s detail=%s", normalized_language, result.get("error", "sin_detalle"))
+        logger.warning("stt_failed language=%s detail=%s", normalized_language, result.get("error", "no_detail"))
         return {
-            "error": result.get("error", "No se pudo transcribir audio."),
+            "error": result.get("error", "Audio transcription failed."),
             "details": result.get("details", []),
         }
 
@@ -615,7 +615,7 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
     service = game_services.get(req.game_type)
     if service is None:
         logger.warning("game_eval_unsupported game_type=%s", req.game_type)
-        return {"error": f"Juego no soportado: {req.game_type}"}
+        return {"error": f"Unsupported game: {req.game_type}"}
 
     try:
         if req.game_type == GAME_TYPE_GRAMMAR_PARTICLE_FIX:
@@ -699,13 +699,13 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
                 )
             )
         else:
-            result = {"error": f"Evaluacion no implementada para: {req.game_type}"}
+            result = {"error": f"Evaluation not implemented for: {req.game_type}"}
     except ValueError as exc:
         logger.warning("game_eval_invalid game_type=%s detail=%s", req.game_type, str(exc))
         return {"error": str(exc)}
     except Exception:
         logger.exception("game_eval_unhandled game_type=%s", req.game_type)
-        return {"error": "Error interno evaluando juego"}
+        return {"error": "Internal error while evaluating game"}
 
     if isinstance(result, dict) and "error" in result:
         logger.warning("game_eval_error game_type=%s detail=%s", req.game_type, result["error"])

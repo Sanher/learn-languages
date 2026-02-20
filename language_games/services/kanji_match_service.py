@@ -11,10 +11,10 @@ from .writing_support import writing_support_profile
 
 GAME_TYPE_KANJI_MATCH = "kanji_match"
 LANGUAGE_JAPANESE = "ja"
-# Trazas por servicio para observar flujo y resultados en HA.
+# Service traces to monitor flow and results in HA.
 logger = logging.getLogger("learn_languages.games.kanji_match")
 
-# Este juego se reserva para idiomas no basados en alfabeto latino.
+# This game is reserved for languages that do not use a western alphabet.
 WESTERN_ALPHABET_LANGUAGE_CODES = {
     "en",
     "es",
@@ -36,28 +36,28 @@ class KanjiPair:
 
 JAPANESE_KANJI_PAIRS_BY_LEVEL: dict[int, list[KanjiPair]] = {
     1: [
-        KanjiPair("日", "día/sol", "nichi / hi"),
-        KanjiPair("月", "mes/luna", "getsu / tsuki"),
-        KanjiPair("水", "agua", "sui / mizu"),
-        KanjiPair("火", "fuego", "ka / hi"),
-        KanjiPair("木", "árbol", "moku / ki"),
-        KanjiPair("山", "montaña", "san / yama"),
+        KanjiPair("日", "day/sun", "nichi / hi"),
+        KanjiPair("月", "month/moon", "getsu / tsuki"),
+        KanjiPair("水", "water", "sui / mizu"),
+        KanjiPair("火", "fire", "ka / hi"),
+        KanjiPair("木", "tree", "moku / ki"),
+        KanjiPair("山", "mountain", "san / yama"),
     ],
     2: [
-        KanjiPair("学", "estudiar", "gaku / mana"),
-        KanjiPair("校", "escuela", "kou"),
-        KanjiPair("先", "anterior", "sen / saki"),
-        KanjiPair("生", "vida/nacer", "sei / ikiru"),
-        KanjiPair("電", "electricidad", "den"),
-        KanjiPair("車", "coche", "sha / kuruma"),
+        KanjiPair("学", "study", "gaku / mana"),
+        KanjiPair("校", "school", "kou"),
+        KanjiPair("先", "previous", "sen / saki"),
+        KanjiPair("生", "life/birth", "sei / ikiru"),
+        KanjiPair("電", "electricity", "den"),
+        KanjiPair("車", "car", "sha / kuruma"),
     ],
     3: [
-        KanjiPair("働", "trabajar", "dou / hataraku"),
-        KanjiPair("験", "experiencia/examen", "ken"),
-        KanjiPair("説", "explicar/opinión", "setsu / toku"),
-        KanjiPair("続", "continuar", "zoku / tsudzuku"),
-        KanjiPair("準", "preparar/estándar", "jun"),
-        KanjiPair("環", "anillo/entorno", "kan"),
+        KanjiPair("働", "work", "dou / hataraku"),
+        KanjiPair("験", "experience/exam", "ken"),
+        KanjiPair("説", "explain/opinion", "setsu / toku"),
+        KanjiPair("続", "continue", "zoku / tsudzuku"),
+        KanjiPair("準", "prepare/standard", "jun"),
+        KanjiPair("環", "ring/environment", "kan"),
     ],
 }
 
@@ -73,7 +73,7 @@ class KanjiMatchAttempt:
 
 
 class KanjiMatchService:
-    """Servicio reusable de kanji match para idiomas no occidentales (ja inicial)."""
+    """Reusable kanji match service for non-western languages (initial Japanese implementation)."""
 
     game_type = GAME_TYPE_KANJI_MATCH
 
@@ -130,10 +130,10 @@ class KanjiMatchService:
         )
         if not self.is_language_eligible(attempt.language):
             logger.warning("evaluate_invalid western_language=%s", attempt.language)
-            raise ValueError(f"kanji_match no aplica a idiomas occidentales: {attempt.language}")
+            raise ValueError(f"kanji_match does not apply to western-alphabet languages: {attempt.language}")
         if attempt.language != LANGUAGE_JAPANESE:
             logger.warning("evaluate_invalid unsupported_language=%s", attempt.language)
-            raise ValueError(f"Idioma no soportado en kanji_match: {attempt.language}")
+            raise ValueError(f"Unsupported language in kanji_match: {attempt.language}")
 
         expected_meanings = {pair.symbol: pair.meaning for pair in attempt.expected_pairs}
         expected_readings = {pair.symbol: pair.reading_romaji for pair in attempt.expected_pairs}
@@ -152,7 +152,7 @@ class KanjiMatchService:
         require_meaning_input = bool(attempt.level >= 2)
         provided_readings = {symbol: (attempt.learner_readings.get(symbol, "") or "").strip() for symbol in expected_readings}
         provided_meanings = attempt.learner_meanings or attempt.learner_matches
-        # Compatibilidad: si llega payload antiguo sin lecturas, mantenemos evaluacion previa por significado exacto.
+        # Compatibility: if legacy payload arrives without readings, keep exact-meaning evaluation mode.
         has_reading_answers = any(value for value in provided_readings.values())
         if not has_reading_answers:
             return self._evaluate_legacy_meaning_mode(
@@ -204,9 +204,9 @@ class KanjiMatchService:
                     "status": meaning_status,
                 }
             )
-            if meaning_status == "correcto":
+            if meaning_status == "correct":
                 meaning_points += 1.0
-            elif meaning_status == "casi_correcto":
+            elif meaning_status == "almost_correct":
                 meaning_points += 0.5
                 mistakes.append(
                     {
@@ -325,15 +325,15 @@ class KanjiMatchService:
             readings = ", ".join(f"{pair.symbol}:{pair.reading_romaji}" for pair in group)
             meanings = ", ".join(pair.meaning for pair in group)
 
-            lines = [f"Empareja kanji: {symbols}"]
+            lines = [f"Match kanji: {symbols}"]
             if support.show_romanized_line:
-                lines.append(f"Lecturas (romaji): {readings}")
+                lines.append(f"Readings (romaji): {readings}")
             if support.show_options:
-                lines.append(f"Banco de significados: {meanings}")
+                lines.append(f"Meaning bank: {meanings}")
             else:
-                lines.append("Escribe el significado de cada kanji.")
+                lines.append("Write the meaning for each kanji.")
             if support.show_translation_hint and group:
-                lines.append(f"Pista de traduccion: {group[0].symbol} = {group[0].meaning}")
+                lines.append(f"Translation hint: {group[0].symbol} = {group[0].meaning}")
 
             activities.append(
                 GameActivity(
@@ -376,7 +376,7 @@ class KanjiMatchService:
     def _meaning_status(learner_meaning: str, expected_meaning: str) -> str:
         learner = KanjiMatchService._normalize_text(learner_meaning)
         if not learner:
-            return "incorrecto"
+            return "incorrect"
 
         candidates = [
             KanjiMatchService._normalize_text(part)
@@ -384,9 +384,9 @@ class KanjiMatchService:
             if part.strip()
         ]
         if not candidates:
-            return "incorrecto"
+            return "incorrect"
         if learner in candidates:
-            return "correcto"
+            return "correct"
 
         best_ratio = max(SequenceMatcher(a=learner, b=candidate).ratio() for candidate in candidates)
         learner_tokens = set(learner.split())
@@ -400,8 +400,8 @@ class KanjiMatchService:
                 best_overlap = max(best_overlap, overlap)
 
         if best_ratio >= 0.74 or best_overlap >= 0.5:
-            return "casi_correcto"
-        return "incorrecto"
+            return "almost_correct"
+        return "incorrect"
 
     @staticmethod
     def _normalize_text(value: str) -> str:
