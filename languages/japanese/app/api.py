@@ -82,6 +82,14 @@ openai_planner = OpenAIPlanner()
 elevenlabs = ElevenLabsService()
 registry = GameServiceRegistry()
 game_services: dict[str, Any] = {}
+logger.info(
+    "provider_config openai_key=%s openai_model=%s elevenlabs_key=%s elevenlabs_voice_id=%s elevenlabs_model_id=%s",
+    bool(openai_planner.api_key),
+    openai_planner.model,
+    bool(elevenlabs.api_key),
+    bool(elevenlabs.voice_id),
+    elevenlabs.model_id,
+)
 
 
 def _register_game(service: Any) -> None:

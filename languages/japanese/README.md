@@ -62,6 +62,9 @@ Notas de progresion:
 - `OPENAI_MODEL` (default: `gpt-4o-mini`)
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_VOICE_ID`
+- `ELEVENLABS_MODEL_ID` (default: `eleven_multilingual_v2`)
+
+Also supported in Home Assistant add-on options (`/data/options.json`) when env vars are not exported.
 
 Persistencia de progreso:
 - El progreso del usuario se guarda de forma persistente entre reinicios.

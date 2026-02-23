@@ -1,14 +1,31 @@
 from __future__ import annotations
 
-import os
-
 import httpx
+from .runtime_config import get_setting
 
 
 class ElevenLabsService:
-    def __init__(self, api_key: str | None = None, voice_id: str | None = None) -> None:
-        self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY", "")
-        self.voice_id = voice_id or os.getenv("ELEVENLABS_VOICE_ID", "")
+    def __init__(
+        self,
+        api_key: str | None = None,
+        voice_id: str | None = None,
+        model_id: str | None = None,
+    ) -> None:
+        self.api_key = api_key or get_setting(
+            env_names=("ELEVENLABS_API_KEY",),
+            option_names=("elevenlabs_api_key", "elevenlabs.key", "elevenlabs.api_key"),
+            default="",
+        )
+        self.voice_id = voice_id or get_setting(
+            env_names=("ELEVENLABS_VOICE_ID",),
+            option_names=("elevenlabs_voice_id", "elevenlabs.voice_id", "elevenlabs.voice"),
+            default="",
+        )
+        self.model_id = model_id or get_setting(
+            env_names=("ELEVENLABS_MODEL_ID",),
+            option_names=("elevenlabs_model_id", "elevenlabs.model_id", "elevenlabs.model"),
+            default="eleven_multilingual_v2",
+        )
 
     async def tts_japanese(self, text: str) -> bytes:
         if not self.api_key or not self.voice_id:
@@ -25,7 +42,7 @@ class ElevenLabsService:
                 },
                 json={
                     "text": text,
-                    "model_id": "eleven_multilingual_v2",
+                    "model_id": self.model_id,
                     "voice_settings": {"stability": 0.4, "similarity_boost": 0.75},
                 },
             )

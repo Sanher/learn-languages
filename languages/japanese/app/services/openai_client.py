@@ -1,16 +1,28 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
+from .runtime_config import get_setting
 
 
 class OpenAIPlanner:
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        raw_stt_models = os.getenv("OPENAI_STT_MODELS", "gpt-4o-mini-transcribe,whisper-1")
+        self.api_key = api_key or get_setting(
+            env_names=("OPENAI_API_KEY",),
+            option_names=("openai_api_key", "openai.key", "openai.api_key"),
+            default="",
+        )
+        self.model = model or get_setting(
+            env_names=("OPENAI_MODEL",),
+            option_names=("openai_model", "openai.model"),
+            default="gpt-4o-mini",
+        )
+        raw_stt_models = get_setting(
+            env_names=("OPENAI_STT_MODELS",),
+            option_names=("openai_stt_models", "openai.stt_models", "openai.stt.models"),
+            default="gpt-4o-mini-transcribe,whisper-1",
+        )
         self.stt_models = [model_name.strip() for model_name in raw_stt_models.split(",") if model_name.strip()]
 
     async def generate_daily_content(self, *, difficulty: int, games: list[str], learner_note: str) -> dict[str, Any]:

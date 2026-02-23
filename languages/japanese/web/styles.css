@@ -306,6 +306,24 @@ button {
   background: #020617;
 }
 
+.sentence-order-target {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.sentence-order-slot {
+  min-height: 58px;
+  border: 2px dashed #64748b;
+  border-radius: 10px;
+  background: #17233b;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .dnd-zone:empty::before {
   content: attr(data-placeholder);
   color: #64748b;

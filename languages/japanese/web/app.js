@@ -193,6 +193,19 @@ function renderSingleGame(game) {
       </div>`
       )
       .join('');
+    const slotItems = items
+      .map(
+        (_, index) => `
+          <span
+            class="sentence-order-slot dnd-zone"
+            data-single-slot="true"
+            data-slot-index="${index}"
+            data-bank-selector="#sentence-sourcezone"
+            data-placeholder="Slot ${index + 1}"
+          ></span>
+        `
+      )
+      .join('');
 
     controls = `
       <fieldset class="response-group">
@@ -200,7 +213,7 @@ function renderSingleGame(game) {
         <label>Available fragments</label>
         <div id="sentence-sourcezone" class="sentence-dropzone dnd-zone">${dndItems}</div>
         <label>Final order zone</label>
-        <div id="sentence-dropzone" class="sentence-dropzone dnd-zone"></div>
+        <div id="sentence-dropzone" class="sentence-order-target">${slotItems}</div>
       </fieldset>
     `;
   } else if (gameType === 'listening_gap_fill') {
@@ -533,9 +546,16 @@ function collectPayload(game) {
   }
 
   if (game.game_type === 'sentence_order') {
-    const ordered = Array.from(gameZoneEl.querySelectorAll('#sentence-dropzone .sentence-token'))
-      .map((el) => el.dataset.tokenText || '')
-      .filter(Boolean);
+    const slots = Array.from(gameZoneEl.querySelectorAll('.sentence-order-slot[data-slot-index]'))
+      .sort((a, b) => Number(a.dataset.slotIndex || 0) - Number(b.dataset.slotIndex || 0));
+    const ordered = (slots.length > 0 ? slots : Array.from(gameZoneEl.querySelectorAll('#sentence-dropzone .sentence-token')))
+      .map((el) => {
+        if (el.classList.contains('sentence-order-slot')) {
+          const token = el.querySelector('.sentence-token');
+          return token ? (token.dataset.tokenText || '') : '';
+        }
+        return el.dataset.tokenText || '';
+      });
     payload.ordered_tokens_by_user = ordered;
   }
   if (game.game_type === 'context_quiz') {
@@ -1089,14 +1109,35 @@ function initDragAndDropComponents() {
       if (!dragging) return;
       const singleSlot = zone.dataset.singleSlot === 'true';
       if (singleSlot) {
+        return;
+      }
+
+      const after = getDragAfterElement(zone, event.clientY);
+      if (!after) {
+        zone.appendChild(dragging);
+      } else {
+        zone.insertBefore(dragging, after);
+      }
+    });
+
+    zone.addEventListener('drop', (event) => {
+      event.preventDefault();
+      const dragging = gameZoneEl.querySelector('.dnd-token.dragging');
+      if (!dragging) return;
+      const singleSlot = zone.dataset.singleSlot === 'true';
+      if (singleSlot) {
         const current = zone.querySelector('.dnd-token:not(.dragging)');
-        if (current) {
+        if (current && current !== dragging) {
           const bankSelector = zone.dataset.bankSelector || '#gap-options-bank';
           const bank = gameZoneEl.querySelector(bankSelector);
-          if (!bank) return;
-          bank.appendChild(current);
+          if (bank) {
+            bank.appendChild(current);
+          }
         }
         zone.appendChild(dragging);
+        if (selectedGame && selectedGame.game_type === 'kanji_match') {
+          window.setTimeout(syncKanjiReadingPreview, 0);
+        }
         return;
       }
 
