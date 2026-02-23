@@ -176,6 +176,12 @@ class PronunciationMatchService:
 
         result["match_threshold"] = threshold
         result["is_match"] = confidence >= threshold
+        result["feedback_level"] = self._feedback_level(confidence=confidence, threshold=threshold)
+        result["feedback"] = self._feedback_text(
+            is_match=result["is_match"],
+            confidence=confidence,
+            threshold=threshold,
+        )
         result["retry_count"] = attempt.retry_count
         result["retry_available"] = True
         result["alerts"] = alerts
@@ -206,6 +212,28 @@ class PronunciationMatchService:
             threshold,
         )
         return result
+
+    @staticmethod
+    def _feedback_level(confidence: float, threshold: float) -> str:
+        if confidence >= max(0.9, threshold + 0.1):
+            return "excellent"
+        if confidence >= threshold:
+            return "good"
+        if confidence >= max(0.0, threshold - 0.1):
+            return "almost"
+        return "needs_practice"
+
+    @staticmethod
+    def _feedback_text(is_match: bool, confidence: float, threshold: float) -> str:
+        confidence_pct = round(confidence * 100)
+        threshold_pct = round(threshold * 100)
+        if is_match and confidence >= max(0.9, threshold + 0.1):
+            return f"Excellent pronunciation ({confidence_pct}%)."
+        if is_match:
+            return f"Good pronunciation ({confidence_pct}%). You met the {threshold_pct}% target."
+        if confidence >= max(0.0, threshold - 0.1):
+            return f"Almost there ({confidence_pct}%). You are close to the {threshold_pct}% target."
+        return f"Needs more practice ({confidence_pct}%). Target is {threshold_pct}%."
 
     @staticmethod
     def _normalize_level(level: int) -> int:

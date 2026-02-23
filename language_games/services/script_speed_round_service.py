@@ -203,6 +203,11 @@ class ScriptSpeedRoundService:
             elapsed_seconds=elapsed_seconds,
             target_range=profile.target_items_per_minute_by_level[normalized_level],
         )
+        expected_romaji = self._to_romaji(expected_tokens, attempt.language)
+        recognized_romaji = self._to_romaji(read_tokens, attempt.language)
+        mismatches = self._build_sequence_mismatches(expected_tokens, read_tokens)
+        expected_translation = self._sequence_translation(expected_tokens, expected_romaji, attempt.language)
+        recognized_translation = self._sequence_translation(read_tokens, recognized_romaji, attempt.language)
         # Prioritize reading accuracy over speed to avoid score inflation from rushing.
         score = round(((accuracy * 0.75) + (pace_score * 0.25)) * 100)
 
@@ -218,9 +223,19 @@ class ScriptSpeedRoundService:
                 "accuracy": round(accuracy, 2),
                 "pace_score": round(pace_score, 2),
             },
+            "expected_romaji": expected_romaji,
+            "recognized_romaji": recognized_romaji,
+            "expected_translation": expected_translation,
+            "recognized_translation": recognized_translation,
+            "sequence_mismatches": mismatches,
             "retry_count": attempt.retry_count,
             "retry_available": True,
             "alerts": alerts,
+            "feedback": (
+                "Great reading. Keep this rhythm."
+                if not mismatches
+                else "Review mismatches between expected and recognized sequence."
+            ),
         }
         if pronunciation_metrics is not None:
             result["metrics"]["pronunciation_confidence"] = pronunciation_metrics["pronunciation_confidence"]
@@ -238,6 +253,47 @@ class ScriptSpeedRoundService:
             pace_score,
         )
         return result
+
+    @staticmethod
+    def _to_romaji(tokens: list[str], language: str) -> str:
+        if not tokens:
+            return ""
+        if language != LANGUAGE_JAPANESE:
+            return " ".join(tokens)
+        romaji_tokens = []
+        for token in tokens:
+            parts = [KANA_ROMAJI_MAP.get(ch, ch) for ch in token if ch not in _JAPANESE_PUNCTUATION]
+            if parts:
+                romaji_tokens.append("".join(parts))
+        return " ".join(romaji_tokens)
+
+    @staticmethod
+    def _sequence_translation(tokens: list[str], romaji_text: str, language: str) -> str:
+        if not tokens:
+            return ""
+        if language == LANGUAGE_JAPANESE:
+            return f"Phonetic sequence (approx.): {romaji_text or 'n/a'}"
+        return " ".join(tokens)
+
+    @staticmethod
+    def _build_sequence_mismatches(expected: list[str], observed: list[str]) -> list[dict[str, str | int]]:
+        max_len = max(len(expected), len(observed))
+        mismatches: list[dict[str, str | int]] = []
+        for idx in range(max_len):
+            expected_token = expected[idx] if idx < len(expected) else ""
+            observed_token = observed[idx] if idx < len(observed) else ""
+            if expected_token == observed_token:
+                continue
+            mismatches.append(
+                {
+                    "position": idx + 1,
+                    "expected": expected_token,
+                    "recognized": observed_token,
+                }
+            )
+            if len(mismatches) >= 8:
+                break
+        return mismatches
 
     @staticmethod
     def _default_profiles() -> dict[str, ScriptSpeedProfile]:

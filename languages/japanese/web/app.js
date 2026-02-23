@@ -181,6 +181,7 @@ function renderSingleGame(game) {
     const sourceTokens = (payload.tokens_scrambled && payload.tokens_scrambled.length > 0)
       ? payload.tokens_scrambled
       : fallbackTokens;
+    const orderedTokens = Array.isArray(payload.ordered_tokens) ? payload.ordered_tokens : [];
     const items = sourceTokens.map((token, index) => ({
       id: `frag-${index}`,
       token,
@@ -201,6 +202,7 @@ function renderSingleGame(game) {
             data-single-slot="true"
             data-slot-index="${index}"
             data-bank-selector="#sentence-sourcezone"
+            data-expected-token="${escapeHtml(orderedTokens[index] || '')}"
             data-placeholder="Slot ${index + 1}"
           ></span>
         `
@@ -608,6 +610,39 @@ function kanjiRowBySymbol(symbol) {
   return rows.find((row) => row.dataset.symbol === symbol) || null;
 }
 
+function setTokenLocked(token, locked) {
+  if (!token) return;
+  token.dataset.locked = locked ? 'true' : 'false';
+  token.draggable = !locked;
+  token.classList.toggle('dnd-token-locked', locked);
+}
+
+function setSingleSlotLocked(zone, locked) {
+  if (!zone) return;
+  zone.dataset.locked = locked ? 'true' : 'false';
+  zone.classList.toggle('locked', locked);
+}
+
+function syncSentenceOrderLocks() {
+  if (!selectedGame || selectedGame.game_type !== 'sentence_order') return;
+  const slots = Array.from(gameZoneEl.querySelectorAll('.sentence-order-slot[data-slot-index]'));
+  slots.forEach((slot) => {
+    const expectedToken = String(slot.dataset.expectedToken || '').trim();
+    const token = slot.querySelector('.dnd-token');
+    if (!token || !expectedToken) {
+      setSingleSlotLocked(slot, false);
+      slot.classList.remove('sentence-slot-correct');
+      if (token) setTokenLocked(token, false);
+      return;
+    }
+    const tokenText = String(token.dataset.tokenText || token.textContent || '').trim();
+    const isCorrect = tokenText === expectedToken;
+    setSingleSlotLocked(slot, isCorrect);
+    setTokenLocked(token, isCorrect);
+    slot.classList.toggle('sentence-slot-correct', isCorrect);
+  });
+}
+
 function syncKanjiReadingPreview() {
   if (!selectedGame || selectedGame.game_type !== 'kanji_match') return;
   const rows = Array.from(gameZoneEl.querySelectorAll('.kanji-match-row[data-symbol]'));
@@ -620,6 +655,14 @@ function syncKanjiReadingPreview() {
     const preview = row.querySelector('[data-meaning-preview-for]');
     if (preview) {
       preview.textContent = isMatch ? meaning : '';
+    }
+    const zone = row.querySelector('.kanji-reading-dropzone');
+    if (zone) {
+      setSingleSlotLocked(zone, Boolean(isMatch));
+      zone.classList.toggle('kanji-slot-correct', Boolean(isMatch));
+    }
+    if (token) {
+      setTokenLocked(token, Boolean(isMatch));
     }
     row.classList.toggle('kanji-reading-ok', Boolean(isMatch));
     row.classList.toggle('kanji-reading-miss', Boolean(learnerReading) && !isMatch);
@@ -645,6 +688,15 @@ function applyKanjiEvaluationFeedback(data) {
     const row = kanjiRowBySymbol(symbol);
     if (!row) return;
     const isCorrect = Boolean(result.is_correct);
+    const zone = row.querySelector('.kanji-reading-dropzone');
+    const token = row.querySelector('.kanji-reading-dropzone .dnd-token');
+    if (zone) {
+      setSingleSlotLocked(zone, isCorrect);
+      zone.classList.toggle('kanji-slot-correct', isCorrect);
+    }
+    if (token) {
+      setTokenLocked(token, isCorrect);
+    }
     row.classList.toggle('kanji-eval-correct', isCorrect);
     row.classList.toggle('kanji-eval-wrong', !isCorrect);
   });
@@ -670,6 +722,27 @@ function applyKanjiEvaluationFeedback(data) {
   });
 }
 
+function renderMismatchesHtml(mismatches) {
+  if (!Array.isArray(mismatches) || mismatches.length === 0) return '';
+  const rows = mismatches
+    .map((item) => {
+      const position = Number(item.position || 0);
+      const expected = String(item.expected || '').trim() || '∅';
+      const recognized = String(item.recognized || '').trim() || '∅';
+      return `<li>#${position} expected: <strong>${escapeHtml(expected)}</strong> / recognized: <strong>${escapeHtml(recognized)}</strong></li>`;
+    })
+    .join('');
+  return `<div class="result-block"><p><strong>Mismatches</strong></p><ul class="result-list">${rows}</ul></div>`;
+}
+
+function renderWordFeedbackHtml(wordFeedback) {
+  if (!Array.isArray(wordFeedback) || wordFeedback.length === 0) return '';
+  const rows = wordFeedback
+    .map((item) => `<li><strong>${escapeHtml(item.word || '')}</strong>: ${escapeHtml(item.issue || '')}. ${escapeHtml(item.hint || '')}</li>`)
+    .join('');
+  return `<div class="result-block"><p><strong>Word feedback</strong></p><ul class="result-list">${rows}</ul></div>`;
+}
+
 function renderEvaluation(data) {
   const resultEl = document.getElementById('game-result');
   if (!resultEl) return;
@@ -687,16 +760,36 @@ function renderEvaluation(data) {
   const meaningAccuracyHtml = data.meaning_accuracy != null
     ? `<p><strong>Meaning:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
     : '';
+  const pronunciationSummaryHtml = (data.is_match != null)
+    ? `<p><strong>Match:</strong> ${data.is_match ? 'Yes' : 'No'}${data.match_threshold != null ? ` (target ${Math.round(Number(data.match_threshold) * 100)}%)` : ''}</p>`
+    : '';
+  const kanaRomanizedHtml = data.expected_romaji || data.recognized_romaji
+    ? `
+      <div class="result-block">
+        <p><strong>Expected (romanized):</strong> ${escapeHtml(data.expected_romaji || '-')}</p>
+        <p><strong>Recognized (romanized):</strong> ${escapeHtml(data.recognized_romaji || '-')}</p>
+        <p><strong>Expected translation:</strong> ${escapeHtml(data.expected_translation || '-')}</p>
+        <p><strong>Recognized translation:</strong> ${escapeHtml(data.recognized_translation || '-')}</p>
+      </div>
+    `
+    : '';
+  const mismatchHtml = renderMismatchesHtml(data.sequence_mismatches);
+  const wordFeedbackHtml = renderWordFeedbackHtml(data.word_feedback);
+  const nextStepHtml = data.next_step ? `<p><strong>Next step:</strong> ${escapeHtml(data.next_step)}</p>` : '';
 
-  let displayHtml = '';
-  if (data.display) {
-    displayHtml += `<pre>${escapeHtml(JSON.stringify(data.display, null, 2))}</pre>`;
-  }
-  if (data.retry_state) {
-    displayHtml += `<pre>${escapeHtml(JSON.stringify(data.retry_state, null, 2))}</pre>`;
-  }
-
-  resultEl.innerHTML = `${alertsHtml}${scoreHtml}${readingAccuracyHtml}${meaningAccuracyHtml}${feedbackHtml}${translationHtml}${displayHtml}`;
+  resultEl.innerHTML = `
+    ${alertsHtml}
+    ${scoreHtml}
+    ${pronunciationSummaryHtml}
+    ${readingAccuracyHtml}
+    ${meaningAccuracyHtml}
+    ${feedbackHtml}
+    ${translationHtml}
+    ${kanaRomanizedHtml}
+    ${mismatchHtml}
+    ${wordFeedbackHtml}
+    ${nextStepHtml}
+  `;
   applyKanjiEvaluationFeedback(data);
 }
 
@@ -1083,6 +1176,7 @@ function wireGameActions() {
   shadowingStopRecordBtn?.addEventListener('click', stopShadowingRecording);
   initDragAndDropComponents();
   syncKanjiReadingPreview();
+  syncSentenceOrderLocks();
 }
 
 function initDragAndDropComponents() {
@@ -1091,13 +1185,20 @@ function initDragAndDropComponents() {
 
   const tokens = gameZoneEl.querySelectorAll('.dnd-token');
   tokens.forEach((token) => {
-    token.addEventListener('dragstart', () => {
+    token.addEventListener('dragstart', (event) => {
+      if (token.dataset.locked === 'true') {
+        event.preventDefault();
+        return;
+      }
       token.classList.add('dragging');
     });
     token.addEventListener('dragend', () => {
       token.classList.remove('dragging');
       if (selectedGame && selectedGame.game_type === 'kanji_match') {
         window.setTimeout(syncKanjiReadingPreview, 0);
+      }
+      if (selectedGame && selectedGame.game_type === 'sentence_order') {
+        window.setTimeout(syncSentenceOrderLocks, 0);
       }
     });
   });
@@ -1109,6 +1210,7 @@ function initDragAndDropComponents() {
       if (!dragging) return;
       const singleSlot = zone.dataset.singleSlot === 'true';
       if (singleSlot) {
+        if (zone.dataset.locked === 'true') return;
         return;
       }
 
@@ -1126,6 +1228,7 @@ function initDragAndDropComponents() {
       if (!dragging) return;
       const singleSlot = zone.dataset.singleSlot === 'true';
       if (singleSlot) {
+        if (zone.dataset.locked === 'true') return;
         const current = zone.querySelector('.dnd-token:not(.dragging)');
         if (current && current !== dragging) {
           const bankSelector = zone.dataset.bankSelector || '#gap-options-bank';
@@ -1138,6 +1241,9 @@ function initDragAndDropComponents() {
         if (selectedGame && selectedGame.game_type === 'kanji_match') {
           window.setTimeout(syncKanjiReadingPreview, 0);
         }
+        if (selectedGame && selectedGame.game_type === 'sentence_order') {
+          window.setTimeout(syncSentenceOrderLocks, 0);
+        }
         return;
       }
 
@@ -1146,6 +1252,9 @@ function initDragAndDropComponents() {
         zone.appendChild(dragging);
       } else {
         zone.insertBefore(dragging, after);
+      }
+      if (selectedGame && selectedGame.game_type === 'sentence_order') {
+        window.setTimeout(syncSentenceOrderLocks, 0);
       }
     });
   });

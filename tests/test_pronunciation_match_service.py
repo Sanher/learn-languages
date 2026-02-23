@@ -76,6 +76,8 @@ class PronunciationMatchServiceTests(unittest.TestCase):
         self.assertEqual(result["activity_type"], GAME_TYPE_PRONUNCIATION_MATCH)
         self.assertIn("is_match", result)
         self.assertIn("match_threshold", result)
+        self.assertIn("feedback", result)
+        self.assertIn("feedback_level", result)
         self.assertIn("literal_translation", result)
         self.assertEqual(result["display"]["romanized_line"], view["romanized_line"])
         self.assertTrue(result["display"]["show_literal_translation"])

@@ -280,7 +280,10 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
             rnd.shuffle(scrambled)
             if scrambled == item.ordered_tokens and len(scrambled) > 1:
                 scrambled[0], scrambled[1] = scrambled[1], scrambled[0]
-            return {"tokens_scrambled": scrambled}
+            return {
+                "tokens_scrambled": scrambled,
+                "ordered_tokens": item.ordered_tokens,
+            }
 
     if game_type == GAME_TYPE_LISTENING_GAP_FILL:
         items = service.get_items(language=language, level=level)

@@ -211,6 +211,12 @@ button {
   cursor: grabbing;
 }
 
+.dnd-token-locked {
+  cursor: not-allowed;
+  opacity: 0.9;
+  border-color: #10b981;
+}
+
 .gap-option-token {
   background: #26344d;
   border: 1px solid #7084a8;
@@ -324,6 +330,12 @@ button {
   justify-content: center;
 }
 
+.sentence-order-slot.locked,
+.sentence-order-slot.sentence-slot-correct {
+  border-color: #10b981;
+  background: #123526;
+}
+
 .dnd-zone:empty::before {
   content: attr(data-placeholder);
   color: #64748b;
@@ -389,6 +401,12 @@ button {
   align-items: center;
 }
 
+.kanji-reading-dropzone.locked,
+.kanji-reading-dropzone.kanji-slot-correct {
+  border-color: #10b981;
+  background: #123526;
+}
+
 .kanji-meaning-preview {
   color: #bfdbfe;
   min-height: 24px;
@@ -438,6 +456,26 @@ button {
   margin-top: 12px;
   border-top: 1px solid #334155;
   padding-top: 12px;
+}
+
+.result-block {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #020617;
+}
+
+.result-block p {
+  margin: 4px 0;
+}
+
+.result-list {
+  margin: 6px 0 0 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 pre {
