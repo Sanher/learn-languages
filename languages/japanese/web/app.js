@@ -20,6 +20,8 @@ let todayScoreTotal = 0;
 let todayScoreCount = 0;
 const retryCounters = new Map();
 const ttsAudioCache = new Map();
+const ttsPlayCounters = new Map();
+const ttsWarningShownByGame = new Set();
 let activeAudio = null;
 let activeRecorder = null;
 let activeRecorderStream = null;
@@ -84,6 +86,17 @@ function updateTopbar() {
   if (todayScoreEl) {
     todayScoreEl.textContent = `Today's score: ${score}`;
   }
+}
+
+function gameAttemptKey(game) {
+  if (!game) return '';
+  return `${game.game_type || ''}:${game.activity_id || ''}:${game.language || ''}`;
+}
+
+function appendResultAlert(message) {
+  const resultEl = document.getElementById('game-result');
+  if (!resultEl || !message) return;
+  resultEl.innerHTML = `<p class="alert">${escapeHtml(message)}</p>${resultEl.innerHTML}`;
 }
 
 function stopKanaElapsedTicker() {
@@ -261,8 +274,16 @@ function renderSingleGame(game) {
         ${promptLines.map((line) => `<p class="listening-line">${escapeHtml(line)}</p>`).join('')}
       </div>
     `;
+    const listenButton = payload.tts_text
+      ? `
+        <div class="audio-actions">
+          <button id="listening-play-audio-btn" type="button" class="ghost-btn">Play full sentence (TTS)</button>
+        </div>
+      `
+      : '';
     controls = `
       <div class="listening-controls">
+        ${listenButton}
         <label>Available fragments</label>
         <div id="gap-options-bank" class="sentence-dropzone gap-options-bank dnd-zone" data-placeholder="Available options">
           ${optionTokens}
@@ -821,10 +842,23 @@ async function evaluateSelectedGame(isRetry) {
   renderEvaluation(data);
 }
 
-async function playKanaAudio(game) {
-  if (!game || game.game_type !== 'kana_speed_round') return;
-  const text = game.payload?.tts_text || game.payload?.expected_text || extractKanaSequenceFromPrompt(game.prompt || '');
+function resolveTtsText(game) {
+  if (!game) return '';
+  if (game.payload?.tts_text) return String(game.payload.tts_text);
+  if (game.game_type === 'kana_speed_round') {
+    return game.payload?.expected_text || extractKanaSequenceFromPrompt(game.prompt || '');
+  }
+  return '';
+}
+
+async function playTtsAudio(game) {
+  if (!game) return;
+  const text = resolveTtsText(game);
   if (!text) return;
+  const gameKey = gameAttemptKey(game);
+  const currentPlays = ttsPlayCounters.get(gameKey) || 0;
+  const playCount = currentPlays + 1;
+  ttsPlayCounters.set(gameKey, playCount);
 
   const cacheKey = `${game.language || currentLanguage}:${text}`;
   let audioDataUrl = ttsAudioCache.get(cacheKey);
@@ -835,9 +869,14 @@ async function playKanaAudio(game) {
       body: JSON.stringify({
         text,
         language: game.language || currentLanguage,
+        play_count: playCount,
       }),
     });
     const data = await res.json();
+    if (data.warning && gameKey && !ttsWarningShownByGame.has(gameKey)) {
+      appendResultAlert(data.warning);
+      ttsWarningShownByGame.add(gameKey);
+    }
     if (!res.ok || !data.audio_data_url) {
       const resultEl = document.getElementById('game-result');
       if (resultEl) {
@@ -847,6 +886,10 @@ async function playKanaAudio(game) {
     }
     audioDataUrl = data.audio_data_url;
     ttsAudioCache.set(cacheKey, audioDataUrl);
+  }
+  if (playCount > 3 && gameKey && !ttsWarningShownByGame.has(gameKey)) {
+    appendResultAlert('Warning: repeated TTS playback may increase token usage.');
+    ttsWarningShownByGame.add(gameKey);
   }
 
   if (activeAudio) {
@@ -1159,6 +1202,7 @@ function wireGameActions() {
   const evaluateBtn = document.getElementById('evaluate-btn');
   const retryBtn = document.getElementById('retry-btn');
   const kanaPlayBtn = document.getElementById('kana-play-audio-btn');
+  const listeningPlayBtn = document.getElementById('listening-play-audio-btn');
   const kanaRecordBtn = document.getElementById('kana-record-btn');
   const kanaStopRecordBtn = document.getElementById('kana-stop-record-btn');
   const pronunciationRecordBtn = document.getElementById('pronunciation-record-btn');
@@ -1167,7 +1211,8 @@ function wireGameActions() {
   const shadowingStopRecordBtn = document.getElementById('shadowing-stop-record-btn');
   evaluateBtn?.addEventListener('click', () => evaluateSelectedGame(false));
   retryBtn?.addEventListener('click', () => evaluateSelectedGame(true));
-  kanaPlayBtn?.addEventListener('click', () => playKanaAudio(selectedGame));
+  kanaPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
+  listeningPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
   kanaRecordBtn?.addEventListener('click', startKanaRecording);
   kanaStopRecordBtn?.addEventListener('click', stopKanaRecording);
   pronunciationRecordBtn?.addEventListener('click', startPronunciationRecording);

@@ -138,6 +138,7 @@ class PronunciationRequest(BaseModel):
 class TextToSpeechRequest(BaseModel):
     text: str
     language: str = "ja"
+    play_count: int = Field(default=0, ge=0)
 
 
 class GameEvaluateRequest(BaseModel):
@@ -293,6 +294,7 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
                 "tokens": item.tokens,
                 "gap_positions": item.gap_positions,
                 "options": item.options,
+                "tts_text": item.script_line if language == "ja" else "",
             }
 
     if game_type == GAME_TYPE_CONTEXT_QUIZ:
@@ -547,25 +549,46 @@ async def evaluate_pronunciation(req: PronunciationRequest) -> dict:
 @app.post("/api/audio/tts")
 async def generate_tts_audio(req: TextToSpeechRequest) -> dict:
     language = req.language.strip().lower()
+    text = req.text.strip()
+    warning_message = ""
+    if req.play_count > 3:
+        warning_message = "Warning: repeated TTS playback may increase token usage."
+        logger.warning(
+            "tts_replay_warning language=%s play_count=%s text_len=%s",
+            language,
+            req.play_count,
+            len(text),
+        )
     if language != "ja":
         logger.warning("tts_unsupported_language language=%s", language)
-        return {"error": f"Unsupported language for TTS: {language}"}
+        response = {"error": f"Unsupported language for TTS: {language}"}
+        if warning_message:
+            response["warning"] = warning_message
+        return response
 
-    text = req.text.strip()
     if not text:
-        return {"error": "Empty text for TTS"}
+        response = {"error": "Empty text for TTS"}
+        if warning_message:
+            response["warning"] = warning_message
+        return response
 
     logger.info("tts_request language=%s text_len=%s", language, len(text))
     audio_bytes = await elevenlabs.tts_japanese(text)
     if not audio_bytes:
         logger.warning("tts_unavailable reason=missing_credentials_or_provider text_len=%s", len(text))
-        return {"error": "TTS unavailable. Check ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID."}
+        response = {"error": "TTS unavailable. Check ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID."}
+        if warning_message:
+            response["warning"] = warning_message
+        return response
 
     encoded = base64.b64encode(audio_bytes).decode("ascii")
-    return {
+    response = {
         "mime_type": "audio/mpeg",
         "audio_data_url": f"data:audio/mpeg;base64,{encoded}",
     }
+    if warning_message:
+        response["warning"] = warning_message
+    return response
 
 
 @app.post("/api/audio/stt")

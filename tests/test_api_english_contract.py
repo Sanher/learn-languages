@@ -36,6 +36,33 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["error"], "Unsupported language for TTS: en")
 
+    def test_tts_warning_is_returned_after_more_than_three_replays(self) -> None:
+        response = self.client.post(
+            "/api/audio/tts",
+            json={
+                "language": "ja",
+                "text": "こんにちは",
+                "play_count": 4,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json().get("warning"),
+            "Warning: repeated TTS playback may increase token usage.",
+        )
+
+    def test_tts_warning_is_not_returned_on_third_replay(self) -> None:
+        response = self.client.post(
+            "/api/audio/tts",
+            json={
+                "language": "ja",
+                "text": "こんにちは",
+                "play_count": 3,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("warning", response.json())
+
     def test_unsupported_game_returns_english_error(self) -> None:
         response = self.client.post(
             "/api/games/evaluate",
@@ -63,6 +90,18 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertIn("Listening Gap Fill", display_names)
         self.assertIn("Guided Pronunciation", display_names)
         self.assertIn("Context Quiz", display_names)
+
+    def test_listening_gap_fill_payload_contains_tts_text(self) -> None:
+        response = self.client.post("/api/games/daily", json={"learner_id": "test-user"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        listening_card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "listening_gap_fill"),
+            None,
+        )
+        self.assertIsNotNone(listening_card)
+        payload = listening_card.get("payload", {})
+        self.assertTrue(payload.get("tts_text"))
 
 
 if __name__ == "__main__":
