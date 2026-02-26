@@ -33,6 +33,13 @@ from .listening_gap_fill_service import (
     ListeningGapFillItem,
     ListeningGapFillService,
 )
+from .mora_romanization_service import (
+    GAME_TYPE_MORA_ROMANIZATION,
+    JAPANESE_MORA_ROMANIZATION_ITEMS_BY_LEVEL,
+    MoraRomanizationAttempt,
+    MoraRomanizationItem,
+    MoraRomanizationService,
+)
 from .pronunciation_match_service import (
     GAME_TYPE_PRONUNCIATION_MATCH,
     JAPANESE_PRONUNCIATION_PHRASES_BY_LEVEL,
@@ -97,6 +104,11 @@ __all__ = [
     "GAME_TYPE_LISTENING_GAP_FILL",
     "JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL",
     "ENGLISH_LISTENING_GAP_FILL_ITEMS_BY_LEVEL",
+    "MoraRomanizationItem",
+    "MoraRomanizationAttempt",
+    "MoraRomanizationService",
+    "GAME_TYPE_MORA_ROMANIZATION",
+    "JAPANESE_MORA_ROMANIZATION_ITEMS_BY_LEVEL",
     "PronunciationMatchAttempt",
     "PronunciationMatchService",
     "GAME_TYPE_PRONUNCIATION_MATCH",

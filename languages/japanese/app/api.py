@@ -20,6 +20,7 @@ from language_games.services import (
     GAME_TYPE_GRAMMAR_PARTICLE_FIX,
     GAME_TYPE_KANJI_MATCH,
     GAME_TYPE_LISTENING_GAP_FILL,
+    GAME_TYPE_MORA_ROMANIZATION,
     GAME_TYPE_PRONUNCIATION_MATCH,
     GAME_TYPE_SENTENCE_ORDER,
     ContextQuizAttempt,
@@ -31,6 +32,8 @@ from language_games.services import (
     KanjiMatchService,
     ListeningGapFillAttempt,
     ListeningGapFillService,
+    MoraRomanizationAttempt,
+    MoraRomanizationService,
     PronunciationMatchAttempt,
     PronunciationMatchService,
     ScriptSpeedAttempt,
@@ -55,6 +58,7 @@ GAME_NAME_ALIASES = {
     ALIAS_GAME_TYPE_KANA_SPEED_ROUND: "Kana Speed Round",
     GAME_TYPE_GRAMMAR_PARTICLE_FIX: "Grammar Particle Fix",
     GAME_TYPE_SENTENCE_ORDER: "Sentence Order",
+    GAME_TYPE_MORA_ROMANIZATION: "Mora Romanization",
     GAME_TYPE_LISTENING_GAP_FILL: "Listening Gap Fill",
     GAME_TYPE_PRONUNCIATION_MATCH: "Guided Pronunciation",
     GAME_TYPE_CONTEXT_QUIZ: "Context Quiz",
@@ -101,6 +105,7 @@ _register_game(KanjiMatchService())
 _register_game(KanaSpeedRoundService())
 _register_game(GrammarParticleFixService())
 _register_game(SentenceOrderService())
+_register_game(MoraRomanizationService())
 _register_game(ListeningGapFillService())
 _register_game(PronunciationMatchService())
 _register_game(ContextQuizService())
@@ -296,6 +301,33 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
                 "options": item.options,
                 "tts_text": item.script_line if language == "ja" else "",
             }
+
+    if game_type == GAME_TYPE_MORA_ROMANIZATION:
+        items = service.get_items(language=language, level=level)
+        item = next((it for it in items if it.item_id == activity_id), None)
+        if item:
+            beginner_mode = level <= 1
+            payload = {
+                "mode": "beginner" if beginner_mode else "advanced",
+                "mora_kana_tokens": item.mora_kana if beginner_mode else [],
+                "mora_romaji_tokens": item.mora_romaji if beginner_mode else [],
+                "japanese_text": "" if beginner_mode else item.japanese_text,
+                "literal_translation": item.literal_translation,
+            }
+            logger.info(
+                "payload_mora_romanization_ready language=%s level=%s activity_id=%s mode=%s",
+                language,
+                level,
+                activity_id,
+                payload["mode"],
+            )
+            return payload
+        logger.warning(
+            "payload_mora_romanization_missing language=%s level=%s activity_id=%s",
+            language,
+            level,
+            activity_id,
+        )
 
     if game_type == GAME_TYPE_CONTEXT_QUIZ:
         items = service.get_items(language=language, level=level)
@@ -676,6 +708,15 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
                     language=req.language,
                     item_id=req.payload.get("item_id", ""),
                     user_gap_tokens=req.payload.get("user_gap_tokens", []),
+                    level=req.level,
+                )
+            )
+        elif req.game_type == GAME_TYPE_MORA_ROMANIZATION:
+            result = service.evaluate_attempt(
+                MoraRomanizationAttempt(
+                    language=req.language,
+                    item_id=req.payload.get("item_id", ""),
+                    user_romanized_text=req.payload.get("user_romanized_text", ""),
                     level=req.level,
                 )
             )

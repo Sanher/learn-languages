@@ -8,6 +8,7 @@ from typing import Iterable, List
 GAME_POOL = [
     "kanji_match",
     "kana_speed_round",
+    "mora_romanization",
     "grammar_particle_fix",
     "sentence_order",
     "listening_gap_fill",

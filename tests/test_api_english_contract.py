@@ -87,6 +87,7 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertIn("Kana Speed Round", display_names)
         self.assertIn("Grammar Particle Fix", display_names)
         self.assertIn("Sentence Order", display_names)
+        self.assertIn("Mora Romanization", display_names)
         self.assertIn("Listening Gap Fill", display_names)
         self.assertIn("Guided Pronunciation", display_names)
         self.assertIn("Context Quiz", display_names)
@@ -102,6 +103,105 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertIsNotNone(listening_card)
         payload = listening_card.get("payload", {})
         self.assertTrue(payload.get("tts_text"))
+
+    def test_mora_romanization_payload_beginner_contains_mora_guides(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user", "level_override_today": 1},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "mora_romanization"),
+            None,
+        )
+        self.assertIsNotNone(card)
+        payload = card.get("payload", {})
+        self.assertEqual(payload.get("mode"), "beginner")
+        self.assertTrue(payload.get("mora_kana_tokens"))
+        self.assertTrue(payload.get("mora_romaji_tokens"))
+        self.assertEqual(payload.get("japanese_text"), "")
+
+    def test_mora_romanization_payload_advanced_contains_japanese_text_only(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user", "level_override_today": 2},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "mora_romanization"),
+            None,
+        )
+        self.assertIsNotNone(card)
+        payload = card.get("payload", {})
+        self.assertEqual(payload.get("mode"), "advanced")
+        self.assertFalse(payload.get("mora_kana_tokens"))
+        self.assertFalse(payload.get("mora_romaji_tokens"))
+        self.assertTrue(payload.get("japanese_text"))
+
+    def test_mora_romanization_evaluate_advanced_hides_kanji_when_incorrect(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user", "level_override_today": 2},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "mora_romanization"),
+            None,
+        )
+        self.assertIsNotNone(card)
+
+        eval_response = self.client.post(
+            "/api/games/evaluate",
+            json={
+                "game_type": "mora_romanization",
+                "language": "ja",
+                "level": 2,
+                "retry_count": 0,
+                "payload": {
+                    "item_id": card["activity_id"],
+                    "user_romanized_text": "kyouwasushiotabemasu",
+                },
+            },
+        )
+        self.assertEqual(eval_response.status_code, 200)
+        eval_data = eval_response.json()
+        self.assertIn("is_correct", eval_data)
+        self.assertFalse(eval_data["is_correct"])
+        self.assertIsNone(eval_data.get("kanji_mora_line"))
+
+    def test_mora_romanization_evaluate_advanced_shows_kanji_when_correct(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user", "level_override_today": 2},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "mora_romanization"),
+            None,
+        )
+        self.assertIsNotNone(card)
+
+        eval_response = self.client.post(
+            "/api/games/evaluate",
+            json={
+                "game_type": "mora_romanization",
+                "language": "ja",
+                "level": 2,
+                "retry_count": 0,
+                "payload": {
+                    "item_id": card["activity_id"],
+                    "user_romanized_text": "kyou wa sushi o tabemasu",
+                },
+            },
+        )
+        self.assertEqual(eval_response.status_code, 200)
+        eval_data = eval_response.json()
+        self.assertTrue(eval_data["is_correct"])
+        self.assertTrue(eval_data.get("kanji_mora_line"))
 
 
 if __name__ == "__main__":

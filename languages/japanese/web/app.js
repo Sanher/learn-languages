@@ -231,6 +231,31 @@ function renderSingleGame(game) {
         <div id="sentence-dropzone" class="sentence-order-target">${slotItems}</div>
       </fieldset>
     `;
+  } else if (gameType === 'mora_romanization') {
+    // The backend controls assistance mode per level: beginner exposes mora guides.
+    const mode = payload.mode || (Number(game.level || 1) <= 1 ? 'beginner' : 'advanced');
+    const moraKanaLine = Array.isArray(payload.mora_kana_tokens) ? payload.mora_kana_tokens.join(' | ') : '';
+    const moraRomajiLine = Array.isArray(payload.mora_romaji_tokens) ? payload.mora_romaji_tokens.join(' ') : '';
+    const japaneseText = payload.japanese_text || '';
+    const metaLines = [];
+    if (mode === 'beginner') {
+      if (moraKanaLine) metaLines.push(`Mora (kana): ${moraKanaLine}`);
+      if (moraRomajiLine) metaLines.push(`Mora (romaji): ${moraRomajiLine}`);
+    } else if (japaneseText) {
+      metaLines.push(`Japanese text: ${japaneseText}`);
+    }
+    promptHtml = `
+      <div class="prompt game-meta">
+        ${metaLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
+      </div>
+    `;
+    controls = `
+      <fieldset class="response-group">
+        <legend>Answer</legend>
+        <label>Romanized words</label>
+        <input data-k="user_romanized_text" placeholder="watashi wa gakusei desu" />
+      </fieldset>
+    `;
   } else if (gameType === 'listening_gap_fill') {
     const tokens = payload.tokens || [];
     const gapPositions = payload.gap_positions || [];
@@ -781,6 +806,15 @@ function renderEvaluation(data) {
   const meaningAccuracyHtml = data.meaning_accuracy != null
     ? `<p><strong>Meaning:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
     : '';
+  const romanizationAccuracyHtml = data.romanization_accuracy != null
+    ? `<p><strong>Romanization:</strong> ${escapeHtml(Math.round(Number(data.romanization_accuracy) * 100))}%</p>`
+    : '';
+  const segmentationAccuracyHtml = data.segmentation_accuracy != null
+    ? `<p><strong>Segmentation:</strong> ${escapeHtml(Math.round(Number(data.segmentation_accuracy) * 100))}%</p>`
+    : '';
+  const kanjiMoraHtml = data.kanji_mora_line
+    ? `<div class="result-block"><p><strong>Kanji (mora):</strong> ${escapeHtml(data.kanji_mora_line)}</p></div>`
+    : '';
   const pronunciationSummaryHtml = (data.is_match != null)
     ? `<p><strong>Match:</strong> ${data.is_match ? 'Yes' : 'No'}${data.match_threshold != null ? ` (target ${Math.round(Number(data.match_threshold) * 100)}%)` : ''}</p>`
     : '';
@@ -804,8 +838,11 @@ function renderEvaluation(data) {
     ${pronunciationSummaryHtml}
     ${readingAccuracyHtml}
     ${meaningAccuracyHtml}
+    ${romanizationAccuracyHtml}
+    ${segmentationAccuracyHtml}
     ${feedbackHtml}
     ${translationHtml}
+    ${kanjiMoraHtml}
     ${kanaRomanizedHtml}
     ${mismatchHtml}
     ${wordFeedbackHtml}
