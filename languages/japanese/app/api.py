@@ -45,6 +45,7 @@ from .game_engine import DailyGamePlanner, LearnerSnapshot
 from .memory import ProgressMemory
 from .services.elevenlabs_client import ElevenLabsService
 from .services.openai_client import OpenAIPlanner
+from .topic_flow import TopicDefinition, topic_for_day
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
@@ -123,6 +124,12 @@ class DailyGamesRequest(BaseModel):
     level_override_today: int | None = Field(default=None, ge=1, le=3)
 
 
+class DailyLessonCompleteRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
+    topic_key: str | None = None
+
+
 class LanguageUpdateRequest(BaseModel):
     learner_id: str = DEFAULT_LEARNER_ID
     language: str
@@ -147,6 +154,7 @@ class TextToSpeechRequest(BaseModel):
 
 
 class GameEvaluateRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
     game_type: str
     language: str = "ja"
     level: int = 1
@@ -254,6 +262,49 @@ def _choose_single_game(games: list[str], available_games: list[str], learner_id
     seed = f"{learner_id}:{date.today().isoformat()}:{language}:{today_level}:{','.join(games)}"
     rnd = Random(seed)
     return available_games[rnd.randrange(len(available_games))]
+
+
+def _daily_progress_payload(progress, daily_game_types: list[str]) -> dict[str, Any]:
+    completed = [game for game in progress.completed_daily_games() if game in daily_game_types]
+    total_required = len(daily_game_types)
+    extras_unlocked = bool(progress.lesson_completed) and len(completed) >= total_required
+    return {
+        "topic_key": progress.topic_key,
+        "lesson_completed": bool(progress.lesson_completed),
+        "completed_daily_games": completed,
+        "daily_games_required": daily_game_types,
+        "daily_games_completed_count": len(completed),
+        "daily_games_total": total_required,
+        "extras_unlocked": extras_unlocked,
+    }
+
+
+def _daily_topic_for(learner_id: str, language: str) -> tuple[TopicDefinition, Any, str]:
+    today = date.today()
+    topic = topic_for_day(learner_id=learner_id, language=language, target_day=today)
+    progress = memory.load_or_create_daily_topic_progress(
+        learner_id=learner_id,
+        day_iso=today.isoformat(),
+        language=language,
+        topic_key=topic.topic_key,
+    )
+    return topic, progress, today.isoformat()
+
+
+def _topic_lesson_payload(topic: TopicDefinition, level: int) -> dict[str, Any]:
+    lesson = topic.lesson_for_level(level)
+    return {
+        "topic_key": topic.topic_key,
+        "topic_title": topic.title,
+        "topic_description": topic.description,
+        "level": level,
+        "title": lesson.title,
+        "objective": lesson.objective,
+        "theory_points": list(lesson.theory_points),
+        "example_script": lesson.example_script,
+        "example_romanized": lesson.example_romanized,
+        "example_literal_translation": lesson.example_literal_translation,
+    }
 
 
 def _extract_kana_sequence(prompt: str) -> str:
@@ -391,6 +442,41 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
     return {}
 
 
+def _build_card_for_activity(game_type: str, language: str, level: int, activity_id: str) -> dict[str, Any] | None:
+    service = game_services.get(game_type)
+    if service is None:
+        logger.warning("topic_card_missing_service game_type=%s", game_type)
+        return None
+
+    activities = service.get_activities(language=language, level=level)
+    activity = next((item for item in activities if item.activity_id == activity_id), None)
+    if activity is None:
+        logger.warning(
+            "topic_card_missing_activity game_type=%s language=%s level=%s activity_id=%s",
+            game_type,
+            language,
+            level,
+            activity_id,
+        )
+        return None
+
+    return {
+        "game_type": game_type,
+        "display_name": GAME_NAME_ALIASES.get(game_type, game_type),
+        "activity_id": activity.activity_id,
+        "language": activity.language,
+        "prompt": activity.prompt,
+        "level": activity.level,
+        "payload": _game_payload(
+            game_type=game_type,
+            language=language,
+            level=level,
+            activity_id=activity.activity_id,
+            prompt=activity.prompt,
+        ),
+    }
+
+
 @app.post("/api/games/daily")
 def get_daily_games(req: DailyGamesRequest) -> dict:
     logger.info(
@@ -419,37 +505,59 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
     if current_level != stored_level:
         memory.set_language_level(req.learner_id, preferred_language, current_level)
 
-    today_level = req.level_override_today or current_level
-    today_level = min(max(1, today_level), 3)
+    requested_level = req.level_override_today
+    if requested_level is None:
+        today_level = current_level
+    else:
+        today_level = min(max(1, requested_level), 3)
+    level_up_blocked = bool(requested_level is not None and requested_level > current_level)
+    if level_up_blocked:
+        today_level = current_level
 
-    games = planner.choose_games(snapshot, date.today())
-    daily_activities = registry.get_daily_activities(
-        language=preferred_language,
-        games=games,
-        level=today_level,
-    )
-
-    available_games = [game for game in games if game in daily_activities]
-    available_cards: list[dict[str, Any]] = []
-    for game in available_games:
-        activity = daily_activities[game]
-        available_cards.append(
-            {
-                "game_type": game,
-                "display_name": GAME_NAME_ALIASES.get(game, game),
-                "activity_id": activity.activity_id,
-                "language": activity.language,
-                "prompt": activity.prompt,
-                "level": activity.level,
-                "payload": _game_payload(
-                    game_type=game,
-                    language=preferred_language,
-                    level=today_level,
-                    activity_id=activity.activity_id,
-                    prompt=activity.prompt,
-                ),
-            }
+    topic, progress, _today_iso = _daily_topic_for(learner_id=req.learner_id, language=preferred_language)
+    daily_plan = topic.daily_plan_for_level(today_level)
+    daily_cards: list[dict[str, Any]] = []
+    for game_type, activity_id in daily_plan:
+        card = _build_card_for_activity(
+            game_type=game_type,
+            language=preferred_language,
+            level=today_level,
+            activity_id=activity_id,
         )
+        if card is not None:
+            daily_cards.append(card)
+
+    daily_game_types = [card["game_type"] for card in daily_cards]
+    daily_progress = _daily_progress_payload(progress, daily_game_types=daily_game_types)
+    extra_plan = topic.extra_plan_for_level(today_level)
+    extra_cards: list[dict[str, Any]] = []
+    for game_type, activity_id in extra_plan:
+        card = _build_card_for_activity(
+            game_type=game_type,
+            language=preferred_language,
+            level=today_level,
+            activity_id=activity_id,
+        )
+        if card is not None:
+            extra_cards.append(card)
+
+    available_cards = daily_cards + (extra_cards if daily_progress["extras_unlocked"] else [])
+
+    selected_game: dict[str, Any] | None = None
+    if daily_progress["lesson_completed"]:
+        completed_games = set(daily_progress["completed_daily_games"])
+        selected_game = next((card for card in daily_cards if card["game_type"] not in completed_games), None)
+        if selected_game is None:
+            available_games = [card["game_type"] for card in available_cards]
+            selected = _choose_single_game(
+                games=daily_game_types,
+                available_games=available_games,
+                learner_id=req.learner_id,
+                language=preferred_language,
+                today_level=today_level,
+            )
+            if selected is not None:
+                selected_game = next((card for card in available_cards if card["game_type"] == selected), None)
 
     all_game_types = registry.list_game_types()
     all_daily_activities = registry.get_daily_activities(
@@ -480,18 +588,6 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
             }
         )
 
-    selected = _choose_single_game(
-        games=games,
-        available_games=available_games,
-        learner_id=req.learner_id,
-        language=preferred_language,
-        today_level=today_level,
-    )
-
-    selected_game: dict[str, Any] | None = None
-    if selected is not None:
-        selected_game = next((card for card in available_cards if card["game_type"] == selected), None)
-
     response = _ui_state(
         learner_id=req.learner_id,
         preferred_language=preferred_language,
@@ -499,20 +595,76 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         today_level=today_level,
         overridden=req.level_override_today is not None,
     )
+    response["topic"] = {
+        "topic_key": topic.topic_key,
+        "title": topic.title,
+        "description": topic.description,
+    }
+    response["lesson"] = _topic_lesson_payload(topic=topic, level=today_level)
+    response["daily_progress"] = daily_progress
+    response["daily_games"] = daily_cards
+    response["extra_games"] = extra_cards
+    response["level_up_blocked"] = level_up_blocked
     response["selected_game"] = selected_game
     response["available_games"] = available_cards
     response["all_games"] = all_cards
     logger.info(
-        "daily_games_ready learner_id=%s language=%s current_level=%s today_level=%s selected_game=%s available=%s all=%s",
+        "daily_games_ready learner_id=%s language=%s topic=%s current_level=%s today_level=%s selected_game=%s daily=%s extras=%s available=%s all=%s lesson_completed=%s level_up_blocked=%s",
         req.learner_id,
         preferred_language,
+        topic.topic_key,
         current_level,
         today_level,
-        selected,
+        None if selected_game is None else selected_game["game_type"],
+        len(daily_cards),
+        len(extra_cards),
         len(available_cards),
         len(all_cards),
+        daily_progress["lesson_completed"],
+        level_up_blocked,
     )
     return response
+
+
+@app.post("/api/games/lesson/complete")
+def complete_daily_lesson(req: DailyLessonCompleteRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("lesson_complete_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+
+    topic, _progress, today_iso = _daily_topic_for(learner_id=learner_id, language=language)
+    requested_topic = (req.topic_key or "").strip()
+    if requested_topic and requested_topic != topic.topic_key:
+        logger.warning(
+            "lesson_complete_topic_mismatch learner_id=%s requested=%s expected=%s",
+            learner_id,
+            requested_topic,
+            topic.topic_key,
+        )
+        return {"error": f"Topic mismatch for today: {requested_topic}"}
+
+    progress = memory.mark_lesson_completed(
+        learner_id=learner_id,
+        day_iso=today_iso,
+        language=language,
+        topic_key=topic.topic_key,
+    )
+    current_level = memory.level_for_language(learner_id, language, default_level=1)
+    daily_game_types = [game_type for game_type, _activity_id in topic.daily_plan_for_level(current_level)]
+    daily_progress = _daily_progress_payload(progress, daily_game_types=daily_game_types)
+    logger.info(
+        "lesson_complete learner_id=%s language=%s topic=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+    )
+    return {
+        "saved": True,
+        "topic_key": topic.topic_key,
+        "daily_progress": daily_progress,
+    }
 
 
 @app.post("/api/ui/language")
@@ -673,10 +825,38 @@ async def transcribe_audio(
     }
 
 
+def _mark_daily_game_progress(
+    learner_id: str,
+    language: str,
+    level: int,
+    game_type: str,
+    item_id: str,
+) -> dict[str, Any] | None:
+    if language not in AVAILABLE_LANGUAGES:
+        return None
+
+    topic, _progress, today_iso = _daily_topic_for(learner_id=learner_id, language=language)
+    daily_plan = dict(topic.daily_plan_for_level(level))
+    expected_item_id = daily_plan.get(game_type)
+    if expected_item_id is None or expected_item_id != item_id:
+        return None
+
+    progress = memory.mark_daily_game_completed(
+        learner_id=learner_id,
+        day_iso=today_iso,
+        language=language,
+        topic_key=topic.topic_key,
+        game_type=game_type,
+    )
+    daily_game_types = list(daily_plan.keys())
+    return _daily_progress_payload(progress, daily_game_types=daily_game_types)
+
+
 @app.post("/api/games/evaluate")
 def evaluate_game(req: GameEvaluateRequest) -> dict:
     logger.info(
-        "game_eval_start game_type=%s language=%s level=%s retry_count=%s payload_keys=%s",
+        "game_eval_start learner_id=%s game_type=%s language=%s level=%s retry_count=%s payload_keys=%s",
+        req.learner_id,
         req.game_type,
         req.language,
         req.level,
@@ -790,6 +970,17 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
     if isinstance(result, dict) and "error" in result:
         logger.warning("game_eval_error game_type=%s detail=%s", req.game_type, result["error"])
     else:
+        item_id = str(req.payload.get("item_id", "")).strip()
+        if item_id:
+            daily_progress = _mark_daily_game_progress(
+                learner_id=req.learner_id,
+                language=req.language,
+                level=req.level,
+                game_type=req.game_type,
+                item_id=item_id,
+            )
+            if daily_progress is not None and isinstance(result, dict):
+                result["daily_progress"] = daily_progress
         score = result.get("score") if isinstance(result, dict) else None
         logger.info("game_eval_done game_type=%s score=%s", req.game_type, score)
     return result

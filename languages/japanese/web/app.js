@@ -10,12 +10,18 @@ const LANGUAGE_ALIASES = {
 };
 
 let availableLanguages = ['ja'];
+let learnerId = 'ha_default_user';
 let currentLanguage = 'ja';
 let currentLevel = 1;
 let todayLevel = 1;
 let todayLevelOverride = null;
 let selectedGame = null;
 let availableGameCards = [];
+let dailyGameCards = [];
+let extraGameCards = [];
+let dailyTopic = null;
+let dailyLesson = null;
+let dailyProgress = null;
 let todayScoreTotal = 0;
 let todayScoreCount = 0;
 const retryCounters = new Map();
@@ -130,10 +136,83 @@ function startKanaElapsedTicker() {
   }, 100);
 }
 
+function isLessonCompleted() {
+  return Boolean(dailyProgress && dailyProgress.lesson_completed);
+}
+
+function areExtrasUnlocked() {
+  return Boolean(dailyProgress && dailyProgress.extras_unlocked);
+}
+
+function refreshAvailableGameCards() {
+  availableGameCards = areExtrasUnlocked()
+    ? [...dailyGameCards, ...extraGameCards]
+    : [...dailyGameCards];
+}
+
+function nextPendingDailyGame() {
+  const completed = new Set((dailyProgress && dailyProgress.completed_daily_games) || []);
+  const pending = dailyGameCards.find((card) => !completed.has(card.game_type));
+  return pending || null;
+}
+
+function renderLessonPanel() {
+  if (!dailyLesson) return '';
+
+  const points = (dailyLesson.theory_points || [])
+    .map((point) => `<li>${escapeHtml(point)}</li>`)
+    .join('');
+  const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
+  const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 3);
+  const lessonDone = isLessonCompleted();
+  const lessonButton = lessonDone
+    ? '<button id="complete-lesson-btn" type="button" class="ghost-btn" disabled>Lesson completed</button>'
+    : '<button id="complete-lesson-btn" type="button" class="ghost-btn">Complete lesson and start games</button>';
+  const unlockLine = areExtrasUnlocked()
+    ? '<p class="muted">Extra games for this topic are unlocked.</p>'
+    : '<p class="muted">Finish lesson + 3 daily games to unlock extra topic games.</p>';
+
+  return `
+    <section class="lesson-card">
+      <h2>${escapeHtml(dailyLesson.title || 'Daily lesson')}</h2>
+      <p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>
+      <p class="muted">${escapeHtml(dailyLesson.objective || '')}</p>
+      ${points ? `<ul class="lesson-points">${points}</ul>` : ''}
+      <div class="lesson-example">
+        <p><strong>Example:</strong> ${escapeHtml(dailyLesson.example_script || '')}</p>
+        <p><strong>Romanized:</strong> ${escapeHtml(dailyLesson.example_romanized || '')}</p>
+        <p><strong>Literal:</strong> ${escapeHtml(dailyLesson.example_literal_translation || '')}</p>
+      </div>
+      <div class="lesson-actions">
+        ${lessonButton}
+      </div>
+      <p class="muted">Daily progress: ${completedCount}/${totalCount} games completed.</p>
+      ${unlockLine}
+    </section>
+  `;
+}
+
 function renderSingleGame(game) {
+  const lessonHtml = renderLessonPanel();
+  if (!isLessonCompleted()) {
+    gameZoneEl.classList.remove('hidden');
+    gameZoneEl.innerHTML = `
+      ${lessonHtml}
+      <section class="game-card-locked">
+        <p class="muted">Complete the lesson to unlock today's 3 topic games.</p>
+      </section>
+    `;
+    return;
+  }
+
   if (!game) {
     gameZoneEl.classList.remove('hidden');
-    gameZoneEl.innerHTML = '<p class="muted">No game available for today.</p>';
+    gameZoneEl.innerHTML = `
+      ${lessonHtml}
+      <section class="game-card-locked">
+        <p class="muted">No game available for today.</p>
+      </section>
+    `;
     return;
   }
 
@@ -487,30 +566,64 @@ function renderSingleGame(game) {
 
   gameZoneEl.classList.remove('hidden');
   gameZoneEl.innerHTML = `
-    <h2>${escapeHtml(displayName)}</h2>
-    ${promptHtml}
-    ${controls}
-    <div class="actions">
-      <button id="evaluate-btn">${evaluateLabel}</button>
-      <button id="retry-btn" class="ghost-btn">Retry</button>
-    </div>
-    <div id="game-result" class="result"></div>
+    ${lessonHtml}
+    <section class="game-card">
+      <h2>${escapeHtml(displayName)}</h2>
+      ${promptHtml}
+      ${controls}
+      <div class="actions">
+        <button id="evaluate-btn">${evaluateLabel}</button>
+        <button id="retry-btn" class="ghost-btn">Retry</button>
+      </div>
+      <div id="game-result" class="result"></div>
+    </section>
   `;
 }
 
 function renderSidebar(games) {
   if (!gamesSidebarEl) return;
-  const list = (games || [])
+  const lessonDone = isLessonCompleted();
+  const extrasUnlocked = areExtrasUnlocked();
+  const dailyList = (dailyGameCards || [])
     .map((game) => {
       const active = selectedGame && selectedGame.game_type === game.game_type ? 'active-game' : '';
-      return `<button class="sidebar-game ${active}" data-action="pick-game" data-game="${escapeHtml(game.game_type)}">${escapeHtml(game.display_name || game.game_type)}</button>`;
+      const done = (dailyProgress && dailyProgress.completed_daily_games || []).includes(game.game_type);
+      const doneTag = done ? ' <span class="done-tag">Done</span>' : '';
+      const disabled = lessonDone ? '' : 'disabled';
+      return `
+        <button class="sidebar-game ${active}" data-action="pick-game" data-game="${escapeHtml(game.game_type)}" ${disabled}>
+          ${escapeHtml(game.display_name || game.game_type)}${doneTag}
+        </button>
+      `;
     })
     .join('');
 
+  const extraList = (extraGameCards || [])
+    .map((game) => {
+      const active = selectedGame && selectedGame.game_type === game.game_type ? 'active-game' : '';
+      const disabled = extrasUnlocked ? '' : 'disabled';
+      return `
+        <button class="sidebar-game ${active}" data-action="pick-game" data-game="${escapeHtml(game.game_type)}" ${disabled}>
+          ${escapeHtml(game.display_name || game.game_type)}
+        </button>
+      `;
+    })
+    .join('');
+
+  const extraSection = extraGameCards.length === 0
+    ? ''
+    : `
+      <h4>Extra topic games</h4>
+      ${extrasUnlocked ? '' : '<p class="muted">Locked until lesson + 3 daily games.</p>'}
+      <div class="sidebar-list">${extraList}</div>
+    `;
+
   gamesSidebarEl.innerHTML = `
-    <h3>Available games</h3>
-    <p class="muted">Select one to try it.</p>
-    <div class="sidebar-list">${list || '<p class="muted">No games available.</p>'}</div>
+    <h3>Topic flow</h3>
+    <p class="muted">${escapeHtml((dailyTopic && dailyTopic.title) || 'Daily topic')}</p>
+    <h4>Daily games</h4>
+    <div class="sidebar-list">${dailyList || '<p class="muted">No games available.</p>'}</div>
+    ${extraSection}
   `;
 }
 
@@ -858,6 +971,7 @@ function renderEvaluation(data) {
 
 async function evaluateSelectedGame(isRetry) {
   if (!selectedGame) return;
+  if (!isLessonCompleted()) return;
   const key = `${selectedGame.game_type}:${selectedGame.activity_id}`;
   const currentRetry = retryCounters.get(key) || 0;
   const nextRetry = isRetry ? currentRetry + 1 : currentRetry;
@@ -868,6 +982,7 @@ async function evaluateSelectedGame(isRetry) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      learner_id: learnerId,
       game_type: selectedGame.game_type,
       language: selectedGame.language || currentLanguage,
       level: todayLevel,
@@ -876,6 +991,14 @@ async function evaluateSelectedGame(isRetry) {
     }),
   });
   const data = await res.json();
+  if (data.daily_progress) {
+    dailyProgress = data.daily_progress;
+    refreshAvailableGameCards();
+    renderSidebar(availableGameCards);
+    if (!selectedGame && availableGameCards.length > 0) {
+      selectedGame = nextPendingDailyGame() || availableGameCards[0];
+    }
+  }
   if (typeof data.score === 'number') {
     todayScoreTotal += data.score;
     todayScoreCount += 1;
@@ -1240,9 +1363,38 @@ function stopShadowingRecording() {
   activeRecorder.stop();
 }
 
+async function completeDailyLesson() {
+  if (!dailyLesson || isLessonCompleted()) return;
+
+  const res = await fetch(apiUrl('api/games/lesson/complete'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      learner_id: learnerId,
+      language: currentLanguage,
+      topic_key: dailyLesson.topic_key || (dailyTopic && dailyTopic.topic_key) || '',
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    window.alert(data.error || 'Could not mark lesson as completed.');
+    return;
+  }
+
+  if (data.daily_progress) {
+    dailyProgress = data.daily_progress;
+  }
+  refreshAvailableGameCards();
+  selectedGame = nextPendingDailyGame() || availableGameCards[0] || null;
+  renderSidebar(availableGameCards);
+  renderSingleGame(selectedGame);
+  wireGameActions();
+}
+
 function wireGameActions() {
   const evaluateBtn = document.getElementById('evaluate-btn');
   const retryBtn = document.getElementById('retry-btn');
+  const completeLessonBtn = document.getElementById('complete-lesson-btn');
   const kanaPlayBtn = document.getElementById('kana-play-audio-btn');
   const listeningPlayBtn = document.getElementById('listening-play-audio-btn');
   const kanaRecordBtn = document.getElementById('kana-record-btn');
@@ -1251,6 +1403,7 @@ function wireGameActions() {
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
   const shadowingRecordBtn = document.getElementById('shadowing-record-btn');
   const shadowingStopRecordBtn = document.getElementById('shadowing-stop-record-btn');
+  completeLessonBtn?.addEventListener('click', completeDailyLesson);
   evaluateBtn?.addEventListener('click', () => evaluateSelectedGame(false));
   retryBtn?.addEventListener('click', () => evaluateSelectedGame(true));
   kanaPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
@@ -1364,7 +1517,7 @@ function getDragAfterElement(container, y) {
 }
 
 async function loadDailyGame() {
-  const body = {};
+  const body = { learner_id: learnerId };
   if (todayLevelOverride != null) {
     body.level_override_today = todayLevelOverride;
   }
@@ -1376,12 +1529,28 @@ async function loadDailyGame() {
   });
   const data = await res.json();
 
+  learnerId = data.learner_id || learnerId;
   availableLanguages = data.available_languages || ['ja'];
   currentLanguage = data.language || 'ja';
   currentLevel = Number(data.current_level || 1);
   todayLevel = Number(data.today_level || currentLevel);
+  dailyTopic = data.topic || null;
+  dailyLesson = data.lesson || null;
+  dailyProgress = data.daily_progress || null;
+  dailyGameCards = data.daily_games || [];
+  extraGameCards = data.extra_games || [];
+  refreshAvailableGameCards();
   selectedGame = data.selected_game || null;
-  availableGameCards = data.all_games || data.available_games || (selectedGame ? [selectedGame] : []);
+  if (!selectedGame && isLessonCompleted()) {
+    selectedGame = nextPendingDailyGame() || availableGameCards[0] || null;
+  }
+  if (!isLessonCompleted()) {
+    selectedGame = null;
+  }
+
+  if (data.level_up_blocked) {
+    window.alert('Level increase is not allowed. Keeping your current level.');
+  }
 
   if (todayLevel === currentLevel) {
     todayLevelOverride = null;
@@ -1404,7 +1573,7 @@ async function changeLanguage() {
   await fetch(apiUrl('api/ui/language'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ language }),
+    body: JSON.stringify({ learner_id: learnerId, language }),
   });
 
   todayLevelOverride = null;
@@ -1412,7 +1581,7 @@ async function changeLanguage() {
 }
 
 async function changeLevelForToday() {
-  const value = prompt('Level for today (1, 2, 3). Leave empty to return to base level.', String(todayLevel));
+  const value = prompt(`Level for today (1-${currentLevel}). Leave empty to return to base level.`, String(todayLevel));
   if (value == null) return;
   const trimmed = value.trim();
   if (!trimmed) {
@@ -1423,6 +1592,10 @@ async function changeLevelForToday() {
 
   const parsed = Number(trimmed);
   if (![1, 2, 3].includes(parsed)) return;
+  if (parsed > currentLevel) {
+    window.alert(`You cannot increase level above ${currentLevel}.`);
+    return;
+  }
   todayLevelOverride = parsed;
   await loadDailyGame();
 }
@@ -1432,6 +1605,7 @@ changeLevelBtn?.addEventListener('click', changeLevelForToday);
 gamesSidebarEl?.addEventListener('click', (event) => {
   const target = event.target;
   if (!target || !target.dataset || target.dataset.action !== 'pick-game') return;
+  if (!isLessonCompleted()) return;
   const gameType = target.dataset.game;
   const found = availableGameCards.find((g) => g.game_type === gameType);
   if (!found) return;

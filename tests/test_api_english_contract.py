@@ -2,6 +2,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+from languages.japanese.app import api
 from languages.japanese.app.api import app
 
 
@@ -123,9 +124,11 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertEqual(payload.get("japanese_text"), "")
 
     def test_mora_romanization_payload_intermediate_keeps_mora_romaji(self) -> None:
+        learner_id = "test-user-level2"
+        api.memory.set_language_level(learner_id, "ja", 2)
         response = self.client.post(
             "/api/games/daily",
-            json={"learner_id": "test-user", "level_override_today": 2},
+            json={"learner_id": learner_id, "level_override_today": 2},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -141,9 +144,11 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertEqual(payload.get("japanese_text"), "")
 
     def test_mora_romanization_payload_advanced_contains_japanese_text_only(self) -> None:
+        learner_id = "test-user-level3"
+        api.memory.set_language_level(learner_id, "ja", 3)
         response = self.client.post(
             "/api/games/daily",
-            json={"learner_id": "test-user", "level_override_today": 3},
+            json={"learner_id": learner_id, "level_override_today": 3},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -159,9 +164,11 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertTrue(payload.get("japanese_text"))
 
     def test_mora_romanization_evaluate_advanced_hides_kanji_when_incorrect(self) -> None:
+        learner_id = "test-user-level3-hide"
+        api.memory.set_language_level(learner_id, "ja", 3)
         response = self.client.post(
             "/api/games/daily",
-            json={"learner_id": "test-user", "level_override_today": 3},
+            json={"learner_id": learner_id, "level_override_today": 3},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -192,9 +199,11 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertTrue(eval_data.get("sequence_mismatches"))
 
     def test_mora_romanization_evaluate_advanced_shows_kanji_when_correct(self) -> None:
+        learner_id = "test-user-level3-show"
+        api.memory.set_language_level(learner_id, "ja", 3)
         response = self.client.post(
             "/api/games/daily",
-            json={"learner_id": "test-user", "level_override_today": 3},
+            json={"learner_id": learner_id, "level_override_today": 3},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
