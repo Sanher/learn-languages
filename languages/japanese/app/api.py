@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import logging
 import os
-from datetime import date
+from datetime import date, timedelta
+from math import log2
 from pathlib import Path
 from random import Random
 from time import perf_counter
@@ -45,7 +46,7 @@ from .game_engine import DailyGamePlanner, LearnerSnapshot
 from .memory import ProgressMemory
 from .services.elevenlabs_client import ElevenLabsService
 from .services.openai_client import OpenAIPlanner
-from .topic_flow import TopicDefinition, topic_for_day
+from .topic_flow import TOPICS_BY_LANGUAGE, TopicDefinition, topic_for_day
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
@@ -130,6 +131,38 @@ class DailyLessonCompleteRequest(BaseModel):
     topic_key: str | None = None
 
 
+class ExtraGameLoadRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    game_type: str
+    language: str = "ja"
+    topic_key: str | None = None
+
+
+class WeeklyExamRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
+    topic_key: str | None = None
+    exam_score: int | None = Field(default=None, ge=0, le=300)
+
+
+class LevelExamRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
+    target_level: int | None = Field(default=None, ge=2, le=3)
+    exam_score: int | None = Field(default=None, ge=0, le=300)
+
+
+class ClosedTopicsRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
+
+
+class TopicReviewRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
+    topic_key: str
+
+
 class LanguageUpdateRequest(BaseModel):
     learner_id: str = DEFAULT_LEARNER_ID
     language: str
@@ -159,6 +192,7 @@ class GameEvaluateRequest(BaseModel):
     language: str = "ja"
     level: int = 1
     retry_count: int = 0
+    review_mode: bool = False
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -268,6 +302,7 @@ def _daily_progress_payload(progress, daily_game_types: list[str]) -> dict[str, 
     completed = [game for game in progress.completed_daily_games() if game in daily_game_types]
     total_required = len(daily_game_types)
     extras_unlocked = bool(progress.lesson_completed) and len(completed) >= total_required
+    score_map = {game: int(progress.daily_game_scores().get(game, 0)) for game in daily_game_types}
     return {
         "topic_key": progress.topic_key,
         "lesson_completed": bool(progress.lesson_completed),
@@ -275,6 +310,10 @@ def _daily_progress_payload(progress, daily_game_types: list[str]) -> dict[str, 
         "daily_games_required": daily_game_types,
         "daily_games_completed_count": len(completed),
         "daily_games_total": total_required,
+        "level_state": int(progress.level_state),
+        "daily_score": int(progress.daily_score),
+        "daily_score_max": 300,
+        "daily_scores_by_game": score_map,
         "extras_unlocked": extras_unlocked,
     }
 
@@ -305,6 +344,168 @@ def _topic_lesson_payload(topic: TopicDefinition, level: int) -> dict[str, Any]:
         "example_romanized": lesson.example_romanized,
         "example_literal_translation": lesson.example_literal_translation,
     }
+
+
+def _target_score_for_topic_day(topic_day_index: int) -> int:
+    # Logarithmic progression: day 1 -> 150, day 2 -> ~180, then slower growth.
+    normalized_day = max(1, int(topic_day_index))
+    target = 150 + (30 * log2(normalized_day))
+    return int(min(300, round(target)))
+
+
+def _weekly_exam_due(last_exam_day_iso: str | None, today_iso: str) -> bool:
+    if not last_exam_day_iso:
+        return True
+    try:
+        last_day = date.fromisoformat(last_exam_day_iso)
+        today = date.fromisoformat(today_iso)
+    except ValueError:
+        return True
+    return (today - last_day) >= timedelta(days=7)
+
+
+def _level_exam_flags(
+    *,
+    current_level: int,
+    weekly_passed_count: int,
+    high_score_days: int,
+    retention_ratio: float | None,
+    topic_failures: dict[str, int],
+    level_1_to_2_passed: bool,
+    level_2_to_3_passed: bool,
+) -> dict[str, bool]:
+    failure_total = sum(int(value) for value in topic_failures.values())
+    ready_to_2 = (
+        current_level == 1
+        and not level_1_to_2_passed
+        and weekly_passed_count >= 1
+        and high_score_days >= 1
+        and (retention_ratio is None or retention_ratio >= 70.0)
+        and failure_total <= 12
+    )
+    ready_to_3 = (
+        current_level == 2
+        and not level_2_to_3_passed
+        and weekly_passed_count >= 2
+        and high_score_days >= 5
+        and (retention_ratio is not None and retention_ratio >= 80.0)
+        and failure_total <= 8
+    )
+    return {
+        "ready_to_level_2": bool(ready_to_2),
+        "ready_to_level_3": bool(ready_to_3),
+    }
+
+
+def _topic_title(language: str, topic_key: str) -> str:
+    for topic in TOPICS_BY_LANGUAGE.get(language, ()):
+        if topic.topic_key == topic_key:
+            return topic.title
+    return topic_key
+
+
+def _topic_definition_for_key(language: str, topic_key: str) -> TopicDefinition | None:
+    normalized = str(topic_key or "").strip()
+    if not normalized:
+        return None
+    for topic in TOPICS_BY_LANGUAGE.get(language, ()):
+        if topic.topic_key == normalized:
+            return topic
+    return None
+
+
+def _is_success_result(result: dict[str, Any]) -> bool | None:
+    if "is_correct" in result:
+        return bool(result.get("is_correct"))
+    if "is_match" in result:
+        return bool(result.get("is_match"))
+    score = result.get("score")
+    try:
+        numeric_score = float(score)
+    except (TypeError, ValueError):
+        return None
+    return numeric_score >= 80.0
+
+
+def _progress_insights(
+    *,
+    learner_id: str,
+    language: str,
+    topic_key: str,
+    today_iso: str,
+    current_level: int,
+    daily_score: int,
+) -> dict[str, Any]:
+    topic_days_count = memory.count_days_on_topic(learner_id=learner_id, language=language, topic_key=topic_key)
+    topic_day_target_score = _target_score_for_topic_day(topic_days_count)
+    topic_day_target_reached = int(daily_score) >= int(topic_day_target_score)
+    high_score_days_over_240 = memory.count_high_score_days(learner_id=learner_id, language=language, threshold=240)
+    retention_ratio_percent = memory.retention_ratio(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+        current_day_iso=today_iso,
+        gap_days=3,
+    )
+    topic_failure_totals = memory.aggregate_topic_failures(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+    )
+    assessment = memory.load_or_create_assessment_state(learner_id)
+    level_1_to_2_passed = memory.level_exam_passed(learner_id, language, from_level=1, to_level=2)
+    level_2_to_3_passed = memory.level_exam_passed(learner_id, language, from_level=2, to_level=3)
+    level_exam_ready_flags = _level_exam_flags(
+        current_level=current_level,
+        weekly_passed_count=int(assessment.weekly_exam_passed_count),
+        high_score_days=high_score_days_over_240,
+        retention_ratio=retention_ratio_percent,
+        topic_failures=topic_failure_totals,
+        level_1_to_2_passed=level_1_to_2_passed,
+        level_2_to_3_passed=level_2_to_3_passed,
+    )
+    weekly_exam_due = _weekly_exam_due(assessment.weekly_exam_last_day_iso, today_iso=today_iso)
+    closed_topics_count = memory.count_closed_topics(learner_id=learner_id, language=language)
+    return {
+        "topic_days_count": int(topic_days_count),
+        "topic_days_message": f"You have worked on this topic for {topic_days_count} day(s).",
+        "topic_day_target_score": int(topic_day_target_score),
+        "topic_day_target_reached": bool(topic_day_target_reached),
+        "high_score_days_over_240": int(high_score_days_over_240),
+        "retention_ratio_percent": retention_ratio_percent,
+        "topic_failure_totals": topic_failure_totals,
+        "weekly_exam_due": bool(weekly_exam_due),
+        "weekly_exam_last_day_iso": assessment.weekly_exam_last_day_iso,
+        "weekly_exam_passed_count": int(assessment.weekly_exam_passed_count),
+        "level_exam_passed_1_to_2": bool(level_1_to_2_passed),
+        "level_exam_passed_2_to_3": bool(level_2_to_3_passed),
+        "ready_to_level_2": bool(level_exam_ready_flags["ready_to_level_2"]),
+        "ready_to_level_3": bool(level_exam_ready_flags["ready_to_level_3"]),
+        "closed_topics_count": int(closed_topics_count),
+    }
+
+
+def _enrich_daily_progress_payload(
+    *,
+    learner_id: str,
+    language: str,
+    current_level: int,
+    topic_key: str,
+    today_iso: str,
+    daily_progress: dict[str, Any],
+) -> dict[str, Any]:
+    enriched = dict(daily_progress)
+    enriched.update(
+        _progress_insights(
+            learner_id=learner_id,
+            language=language,
+            topic_key=topic_key,
+            today_iso=today_iso,
+            current_level=current_level,
+            daily_score=int(daily_progress.get("daily_score", 0)),
+        )
+    )
+    return enriched
 
 
 def _extract_kana_sequence(prompt: str) -> str:
@@ -477,6 +678,47 @@ def _build_card_for_activity(game_type: str, language: str, level: int, activity
     }
 
 
+def _build_card_for_game_type(game_type: str, language: str, level: int) -> dict[str, Any] | None:
+    service = game_services.get(game_type)
+    if service is None:
+        return None
+    activities = service.get_activities(language=language, level=level)
+    if not activities:
+        return None
+    return _build_card_for_activity(
+        game_type=game_type,
+        language=language,
+        level=level,
+        activity_id=activities[0].activity_id,
+    )
+
+
+def _extra_game_cards_metadata(
+    *,
+    daily_game_types: list[str],
+    language: str,
+    level: int,
+) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for game_type in registry.list_game_types():
+        if game_type in daily_game_types:
+            continue
+        # Only expose games that actually have activities for current language/level.
+        candidate = _build_card_for_game_type(game_type=game_type, language=language, level=level)
+        if candidate is None:
+            continue
+        cards.append(
+            {
+                "game_type": game_type,
+                "display_name": GAME_NAME_ALIASES.get(game_type, game_type),
+                "language": language,
+                "level": level,
+                "deferred_load": True,
+            }
+        )
+    return cards
+
+
 @app.post("/api/games/daily")
 def get_daily_games(req: DailyGamesRequest) -> dict:
     logger.info(
@@ -506,15 +748,18 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         memory.set_language_level(req.learner_id, preferred_language, current_level)
 
     requested_level = req.level_override_today
-    if requested_level is None:
-        today_level = current_level
-    else:
-        today_level = min(max(1, requested_level), 3)
-    level_up_blocked = bool(requested_level is not None and requested_level > current_level)
-    if level_up_blocked:
-        today_level = current_level
+    today_level = current_level
+    # Daily level override is disabled; users can review past topics instead.
+    level_up_blocked = bool(requested_level is not None and int(requested_level) != int(current_level))
 
-    topic, progress, _today_iso = _daily_topic_for(learner_id=req.learner_id, language=preferred_language)
+    topic, progress, today_iso = _daily_topic_for(learner_id=req.learner_id, language=preferred_language)
+    progress = memory.set_daily_level_state(
+        learner_id=req.learner_id,
+        day_iso=today_iso,
+        language=preferred_language,
+        topic_key=topic.topic_key,
+        level_state=today_level,
+    )
     daily_plan = topic.daily_plan_for_level(today_level)
     daily_cards: list[dict[str, Any]] = []
     for game_type, activity_id in daily_plan:
@@ -528,18 +773,20 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
             daily_cards.append(card)
 
     daily_game_types = [card["game_type"] for card in daily_cards]
-    daily_progress = _daily_progress_payload(progress, daily_game_types=daily_game_types)
-    extra_plan = topic.extra_plan_for_level(today_level)
-    extra_cards: list[dict[str, Any]] = []
-    for game_type, activity_id in extra_plan:
-        card = _build_card_for_activity(
-            game_type=game_type,
-            language=preferred_language,
-            level=today_level,
-            activity_id=activity_id,
-        )
-        if card is not None:
-            extra_cards.append(card)
+    daily_progress = _daily_progress_payload(progress=progress, daily_game_types=daily_game_types)
+    daily_progress = _enrich_daily_progress_payload(
+        learner_id=req.learner_id,
+        language=preferred_language,
+        current_level=current_level,
+        topic_key=topic.topic_key,
+        today_iso=today_iso,
+        daily_progress=daily_progress,
+    )
+    extra_cards = _extra_game_cards_metadata(
+        daily_game_types=daily_game_types,
+        language=preferred_language,
+        level=today_level,
+    )
 
     available_cards = daily_cards + (extra_cards if daily_progress["extras_unlocked"] else [])
 
@@ -593,7 +840,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         preferred_language=preferred_language,
         difficulty=difficulty,
         today_level=today_level,
-        overridden=req.level_override_today is not None,
+        overridden=False,
     )
     response["topic"] = {
         "topic_key": topic.topic_key,
@@ -609,7 +856,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
     response["available_games"] = available_cards
     response["all_games"] = all_cards
     logger.info(
-        "daily_games_ready learner_id=%s language=%s topic=%s current_level=%s today_level=%s selected_game=%s daily=%s extras=%s available=%s all=%s lesson_completed=%s level_up_blocked=%s",
+        "daily_games_ready learner_id=%s language=%s topic=%s current_level=%s today_level=%s selected_game=%s daily=%s extras=%s available=%s all=%s lesson_completed=%s level_up_blocked=%s level_override_requested=%s",
         req.learner_id,
         preferred_language,
         topic.topic_key,
@@ -622,6 +869,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         len(all_cards),
         daily_progress["lesson_completed"],
         level_up_blocked,
+        requested_level,
     )
     return response
 
@@ -652,8 +900,17 @@ def complete_daily_lesson(req: DailyLessonCompleteRequest) -> dict:
         topic_key=topic.topic_key,
     )
     current_level = memory.level_for_language(learner_id, language, default_level=1)
-    daily_game_types = [game_type for game_type, _activity_id in topic.daily_plan_for_level(current_level)]
+    level_state = int(progress.level_state or current_level)
+    daily_game_types = [game_type for game_type, _activity_id in topic.daily_plan_for_level(level_state)]
     daily_progress = _daily_progress_payload(progress, daily_game_types=daily_game_types)
+    daily_progress = _enrich_daily_progress_payload(
+        learner_id=learner_id,
+        language=language,
+        current_level=current_level,
+        topic_key=topic.topic_key,
+        today_iso=today_iso,
+        daily_progress=daily_progress,
+    )
     logger.info(
         "lesson_complete learner_id=%s language=%s topic=%s",
         learner_id,
@@ -664,6 +921,460 @@ def complete_daily_lesson(req: DailyLessonCompleteRequest) -> dict:
         "saved": True,
         "topic_key": topic.topic_key,
         "daily_progress": daily_progress,
+    }
+
+
+@app.post("/api/games/extra/load")
+async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    game_type = req.game_type.strip()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("extra_game_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+
+    topic, progress, _today_iso = _daily_topic_for(learner_id=learner_id, language=language)
+    requested_topic = (req.topic_key or "").strip()
+    if requested_topic and requested_topic != topic.topic_key:
+        logger.warning(
+            "extra_game_topic_mismatch learner_id=%s requested=%s expected=%s",
+            learner_id,
+            requested_topic,
+            topic.topic_key,
+        )
+        return {"error": f"Topic mismatch for today: {requested_topic}"}
+
+    today_level = int(progress.level_state or memory.level_for_language(learner_id, language, default_level=1))
+    daily_game_types = [game_type_key for game_type_key, _ in topic.daily_plan_for_level(today_level)]
+    daily_progress = _daily_progress_payload(progress=progress, daily_game_types=daily_game_types)
+    daily_progress = _enrich_daily_progress_payload(
+        learner_id=learner_id,
+        language=language,
+        current_level=today_level,
+        topic_key=topic.topic_key,
+        today_iso=_today_iso,
+        daily_progress=daily_progress,
+    )
+    if not daily_progress["extras_unlocked"]:
+        logger.warning(
+            "extra_game_locked learner_id=%s language=%s topic=%s game_type=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            game_type,
+        )
+        return {"error": "Extra games are locked. Complete lesson and daily games first."}
+
+    available_extra_cards = _extra_game_cards_metadata(
+        daily_game_types=daily_game_types,
+        language=language,
+        level=today_level,
+    )
+    allowed_extra_types = {card["game_type"] for card in available_extra_cards}
+    if game_type not in allowed_extra_types:
+        logger.warning(
+            "extra_game_not_allowed learner_id=%s language=%s topic=%s game_type=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            game_type,
+        )
+        return {"error": f"Extra game not available: {game_type}"}
+
+    topic_extra_map = dict(topic.extra_plan_for_level(today_level))
+    preferred_activity_id = topic_extra_map.get(game_type)
+    if preferred_activity_id:
+        card = _build_card_for_activity(
+            game_type=game_type,
+            language=language,
+            level=today_level,
+            activity_id=preferred_activity_id,
+        )
+    else:
+        card = _build_card_for_game_type(game_type=game_type, language=language, level=today_level)
+
+    if card is None:
+        logger.warning(
+            "extra_game_card_missing learner_id=%s language=%s topic=%s game_type=%s level=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            game_type,
+            today_level,
+        )
+        return {"error": f"No activity available for extra game: {game_type}"}
+
+    try:
+        ai_prompt_result = await openai_planner.generate_extra_game_prompt(
+            language=language,
+            topic_title=topic.title,
+            game_type=game_type,
+            level=today_level,
+        )
+    except Exception:
+        logger.exception(
+            "extra_game_ai_prompt_failed learner_id=%s language=%s topic=%s game_type=%s level=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            game_type,
+            today_level,
+        )
+        ai_prompt_result = {
+            "source": "fallback",
+            "text": f"Topic: {topic.title}. Try this {game_type} activity at level {today_level}.",
+        }
+    ai_prompt = str(ai_prompt_result.get("text", "")).strip()
+    if ai_prompt:
+        card["prompt"] = f"{ai_prompt}\n\n{card.get('prompt', '')}".strip()
+    card["ai_generated_prompt"] = ai_prompt
+    card["ai_prompt_source"] = ai_prompt_result.get("source", "fallback")
+    logger.info(
+        "extra_game_loaded learner_id=%s language=%s topic=%s game_type=%s level=%s ai_source=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        game_type,
+        today_level,
+        card["ai_prompt_source"],
+    )
+    return {
+        "card": card,
+        "daily_progress": daily_progress,
+    }
+
+
+@app.post("/api/topics/closed")
+def list_closed_topics(req: ClosedTopicsRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("closed_topics_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+
+    closed = memory.list_closed_topics(learner_id=learner_id, language=language)
+    topics = [
+        {
+            "topic_key": item.topic_key,
+            "topic_title": _topic_title(language=language, topic_key=item.topic_key),
+            "closed_day_iso": item.closed_day_iso,
+            "closed_level": int(item.closed_level),
+            "reason": item.reason,
+        }
+        for item in closed
+    ]
+    logger.info(
+        "closed_topics_listed learner_id=%s language=%s count=%s",
+        learner_id,
+        language,
+        len(topics),
+    )
+    return {
+        "learner_id": learner_id,
+        "language": language,
+        "closed_topics": topics,
+        "closed_topics_count": len(topics),
+    }
+
+
+@app.post("/api/topics/review")
+def load_topic_review(req: TopicReviewRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("topic_review_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+
+    topic = _topic_definition_for_key(language=language, topic_key=req.topic_key)
+    if topic is None:
+        logger.warning(
+            "topic_review_not_found learner_id=%s language=%s topic_key=%s",
+            learner_id,
+            language,
+            req.topic_key,
+        )
+        return {"error": f"Unknown topic: {req.topic_key}"}
+
+    # Review mode is restricted to topics that were already closed/learned.
+    closed_topic_keys = {
+        item.topic_key
+        for item in memory.list_closed_topics(learner_id=learner_id, language=language)
+    }
+    logger.info(
+        "topic_review_gate learner_id=%s language=%s requested_topic=%s closed_topics_count=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        len(closed_topic_keys),
+    )
+    if topic.topic_key not in closed_topic_keys:
+        logger.warning(
+            "topic_review_not_closed learner_id=%s language=%s topic_key=%s closed_topics_count=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            len(closed_topic_keys),
+        )
+        return {"error": f"Topic is not closed yet: {topic.topic_key}"}
+
+    current_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
+    plans = topic.daily_plan_for_level(current_level) + topic.extra_plan_for_level(current_level)
+    seen_game_types: set[str] = set()
+    review_cards: list[dict[str, Any]] = []
+    for game_type, activity_id in plans:
+        if game_type in seen_game_types:
+            continue
+        card = _build_card_for_activity(
+            game_type=game_type,
+            language=language,
+            level=current_level,
+            activity_id=activity_id,
+        )
+        if card is None:
+            continue
+        seen_game_types.add(game_type)
+        review_cards.append(card)
+
+    logger.info(
+        "topic_review_loaded learner_id=%s language=%s topic=%s level=%s games=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        current_level,
+        len(review_cards),
+    )
+    return {
+        "learner_id": learner_id,
+        "language": language,
+        "topic": {
+            "topic_key": topic.topic_key,
+            "title": topic.title,
+            "description": topic.description,
+        },
+        "lesson": _topic_lesson_payload(topic=topic, level=current_level),
+        "review_mode": True,
+        "review_games": review_cards,
+        "selected_game": review_cards[0] if review_cards else None,
+    }
+
+
+@app.post("/api/exams/weekly")
+def take_weekly_exam(req: WeeklyExamRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("weekly_exam_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+
+    topic, progress, today_iso = _daily_topic_for(learner_id=learner_id, language=language)
+    requested_topic = (req.topic_key or "").strip()
+    if requested_topic and requested_topic != topic.topic_key:
+        logger.warning(
+            "weekly_exam_topic_mismatch learner_id=%s requested=%s expected=%s",
+            learner_id,
+            requested_topic,
+            topic.topic_key,
+        )
+        return {"error": f"Topic mismatch for today: {requested_topic}"}
+
+    current_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
+    daily_game_types = [game for game, _activity_id in topic.daily_plan_for_level(int(progress.level_state or current_level))]
+    base_daily = _daily_progress_payload(progress=progress, daily_game_types=daily_game_types)
+    insights = _enrich_daily_progress_payload(
+        learner_id=learner_id,
+        language=language,
+        current_level=current_level,
+        topic_key=topic.topic_key,
+        today_iso=today_iso,
+        daily_progress=base_daily,
+    )
+    if not insights.get("weekly_exam_due"):
+        logger.info("weekly_exam_not_due learner_id=%s language=%s topic=%s", learner_id, language, topic.topic_key)
+        return {
+            "error": "Weekly mini-exam is not due yet.",
+            "daily_progress": insights,
+        }
+
+    lesson_and_daily_done = bool(progress.lesson_completed) and len(base_daily["completed_daily_games"]) >= len(daily_game_types)
+    target_score = int(insights["topic_day_target_score"])
+    exam_score = int(req.exam_score) if req.exam_score is not None else int(base_daily["daily_score"])
+    failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
+    min_pass_score = max(120, int(round(target_score * 0.85)))
+    passed = bool(lesson_and_daily_done and exam_score >= min_pass_score and failure_total <= 16)
+
+    memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
+    refreshed_daily = _enrich_daily_progress_payload(
+        learner_id=learner_id,
+        language=language,
+        current_level=current_level,
+        topic_key=topic.topic_key,
+        today_iso=today_iso,
+        daily_progress=base_daily,
+    )
+    logger.info(
+        "weekly_exam_done learner_id=%s language=%s topic=%s passed=%s exam_score=%s min_pass=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        passed,
+        exam_score,
+        min_pass_score,
+    )
+    return {
+        "passed": passed,
+        "exam_score": exam_score,
+        "min_pass_score": min_pass_score,
+        "feedback": (
+            "Weekly mini-exam passed. You can keep building toward the level exam."
+            if passed
+            else "Weekly mini-exam failed. Complete daily games and improve consistency before retrying next week."
+        ),
+        "daily_progress": refreshed_daily,
+    }
+
+
+@app.post("/api/exams/level")
+def take_level_exam(req: LevelExamRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("level_exam_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+
+    topic, progress, today_iso = _daily_topic_for(learner_id=learner_id, language=language)
+    current_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
+    target_level = int(req.target_level or (current_level + 1))
+    if target_level <= current_level:
+        return {"error": f"Target level must be above current level ({current_level})."}
+    if target_level > 3:
+        return {"error": "Target level is not supported."}
+
+    already_passed = memory.level_exam_passed(
+        learner_id=learner_id,
+        language=language,
+        from_level=current_level,
+        to_level=target_level,
+    )
+    if already_passed:
+        return {"error": "This level transition has already been passed."}
+
+    daily_game_types = [game for game, _activity_id in topic.daily_plan_for_level(int(progress.level_state or current_level))]
+    base_daily = _daily_progress_payload(progress=progress, daily_game_types=daily_game_types)
+    insights = _enrich_daily_progress_payload(
+        learner_id=learner_id,
+        language=language,
+        current_level=current_level,
+        topic_key=topic.topic_key,
+        today_iso=today_iso,
+        daily_progress=base_daily,
+    )
+    ready_flag = "ready_to_level_2" if target_level == 2 else "ready_to_level_3"
+    if not bool(insights.get(ready_flag)):
+        logger.info(
+            "level_exam_not_ready learner_id=%s language=%s current_level=%s target_level=%s",
+            learner_id,
+            language,
+            current_level,
+            target_level,
+        )
+        return {
+            "error": "Level exam is not unlocked yet.",
+            "target_level": target_level,
+            "daily_progress": insights,
+        }
+
+    exam_score = int(req.exam_score) if req.exam_score is not None else int(base_daily["daily_score"])
+    target_score = int(insights["topic_day_target_score"])
+    pass_threshold = min(300, max(170 if target_level == 2 else 210, int(round(target_score * 0.95))))
+    failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
+    retention = insights.get("retention_ratio_percent")
+    retention_ok = retention is None if target_level == 2 else retention is not None
+    if target_level == 2 and retention is not None:
+        retention_ok = retention >= 70.0
+    if target_level == 3 and retention is not None:
+        retention_ok = retention >= 80.0
+
+    failure_limit = 12 if target_level == 2 else 8
+    passed = bool(exam_score >= pass_threshold and failure_total <= failure_limit and retention_ok)
+    promoted = False
+    if passed:
+        memory.mark_level_exam_passed(
+            learner_id=learner_id,
+            language=language,
+            from_level=current_level,
+            to_level=target_level,
+        )
+        memory.set_language_level(learner_id=learner_id, language=language, level=target_level)
+        memory.mark_topic_closed(
+            learner_id=learner_id,
+            language=language,
+            topic_key=topic.topic_key,
+            closed_day_iso=today_iso,
+            closed_level=target_level,
+            reason=f"level_exam_{current_level}_to_{target_level}",
+        )
+        promoted = True
+
+    refreshed_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
+    refreshed_progress = memory.load_or_create_daily_topic_progress(
+        learner_id=learner_id,
+        day_iso=today_iso,
+        language=language,
+        topic_key=topic.topic_key,
+    )
+    if promoted:
+        # Keep level state aligned with the newly promoted level in this response.
+        refreshed_progress = memory.set_daily_level_state(
+            learner_id=learner_id,
+            day_iso=today_iso,
+            language=language,
+            topic_key=topic.topic_key,
+            level_state=refreshed_level,
+        )
+    refreshed_daily_game_types = [
+        game for game, _activity_id in topic.daily_plan_for_level(int(refreshed_progress.level_state or refreshed_level))
+    ]
+    refreshed_base_daily = _daily_progress_payload(progress=refreshed_progress, daily_game_types=refreshed_daily_game_types)
+    refreshed_daily = _enrich_daily_progress_payload(
+        learner_id=learner_id,
+        language=language,
+        current_level=refreshed_level,
+        topic_key=topic.topic_key,
+        today_iso=today_iso,
+        daily_progress=refreshed_base_daily,
+    )
+    logger.info(
+        "level_exam_refresh learner_id=%s language=%s promoted=%s refreshed_level=%s refreshed_level_state=%s refreshed_daily_score=%s",
+        learner_id,
+        language,
+        promoted,
+        refreshed_level,
+        int(refreshed_progress.level_state),
+        int(refreshed_progress.daily_score),
+    )
+    logger.info(
+        "level_exam_done learner_id=%s language=%s current_level=%s target_level=%s passed=%s exam_score=%s threshold=%s",
+        learner_id,
+        language,
+        current_level,
+        target_level,
+        passed,
+        exam_score,
+        pass_threshold,
+    )
+    return {
+        "passed": passed,
+        "promoted": promoted,
+        "current_level": refreshed_level,
+        "target_level": target_level,
+        "exam_score": exam_score,
+        "pass_threshold": pass_threshold,
+        "feedback": (
+            f"Level exam passed. Promoted to level {target_level}."
+            if passed
+            else "Level exam failed. Keep training and retry when metrics improve."
+        ),
+        "daily_progress": refreshed_daily,
     }
 
 
@@ -831,6 +1542,8 @@ def _mark_daily_game_progress(
     level: int,
     game_type: str,
     item_id: str,
+    score: int | None = None,
+    register_failure: bool = False,
 ) -> dict[str, Any] | None:
     if language not in AVAILABLE_LANGUAGES:
         return None
@@ -848,8 +1561,37 @@ def _mark_daily_game_progress(
         topic_key=topic.topic_key,
         game_type=game_type,
     )
+    if register_failure:
+        progress = memory.increment_daily_game_failure(
+            learner_id=learner_id,
+            day_iso=today_iso,
+            language=language,
+            topic_key=topic.topic_key,
+            game_type=game_type,
+            increment=1,
+        )
     daily_game_types = list(daily_plan.keys())
-    return _daily_progress_payload(progress, daily_game_types=daily_game_types)
+    if score is not None:
+        progress = memory.upsert_daily_game_score(
+            learner_id=learner_id,
+            day_iso=today_iso,
+            language=language,
+            topic_key=topic.topic_key,
+            game_type=game_type,
+            score=score,
+            allowed_daily_games=daily_game_types,
+            max_total_score=300,
+        )
+    payload = _daily_progress_payload(progress=progress, daily_game_types=daily_game_types)
+    current_level = memory.level_for_language(learner_id, language, default_level=1)
+    return _enrich_daily_progress_payload(
+        learner_id=learner_id,
+        language=language,
+        current_level=current_level,
+        topic_key=topic.topic_key,
+        today_iso=today_iso,
+        daily_progress=payload,
+    )
 
 
 @app.post("/api/games/evaluate")
@@ -887,6 +1629,10 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
                     level=req.level,
                 )
             )
+            placement_penalty = max(0, min(100, int(req.payload.get("sentence_order_penalty", 0) or 0)))
+            base_score = int(result.get("score", 0))
+            result["sentence_order_penalty"] = placement_penalty
+            result["score"] = max(0, base_score - placement_penalty)
         elif req.game_type == GAME_TYPE_LISTENING_GAP_FILL:
             result = service.evaluate_attempt(
                 ListeningGapFillAttempt(
@@ -971,16 +1717,32 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
         logger.warning("game_eval_error game_type=%s detail=%s", req.game_type, result["error"])
     else:
         item_id = str(req.payload.get("item_id", "")).strip()
-        if item_id:
+        if item_id and not req.review_mode:
+            result_score = None
+            if isinstance(result, dict) and "score" in result:
+                try:
+                    result_score = int(result.get("score"))
+                except (TypeError, ValueError):
+                    result_score = None
+            result_success = _is_success_result(result) if isinstance(result, dict) else None
             daily_progress = _mark_daily_game_progress(
                 learner_id=req.learner_id,
                 language=req.language,
                 level=req.level,
                 game_type=req.game_type,
                 item_id=item_id,
+                score=result_score,
+                register_failure=(result_success is False),
             )
             if daily_progress is not None and isinstance(result, dict):
                 result["daily_progress"] = daily_progress
+        elif item_id and req.review_mode:
+            logger.info(
+                "game_eval_review_mode learner_id=%s game_type=%s item_id=%s",
+                req.learner_id,
+                req.game_type,
+                item_id,
+            )
         score = result.get("score") if isinstance(result, dict) else None
         logger.info("game_eval_done game_type=%s score=%s", req.game_type, score)
     return result

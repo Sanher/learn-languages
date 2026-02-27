@@ -4,7 +4,6 @@ const todayScoreEl = document.getElementById('today-score');
 const gameZoneEl = document.getElementById('game-zone');
 const gamesSidebarEl = document.getElementById('games-sidebar');
 const changeLanguageBtn = document.getElementById('change-language-btn');
-const changeLevelBtn = document.getElementById('change-level-btn');
 const LANGUAGE_ALIASES = {
   ja: 'Japanese',
 };
@@ -14,7 +13,6 @@ let learnerId = 'ha_default_user';
 let currentLanguage = 'ja';
 let currentLevel = 1;
 let todayLevel = 1;
-let todayLevelOverride = null;
 let selectedGame = null;
 let availableGameCards = [];
 let dailyGameCards = [];
@@ -22,9 +20,13 @@ let extraGameCards = [];
 let dailyTopic = null;
 let dailyLesson = null;
 let dailyProgress = null;
-let todayScoreTotal = 0;
-let todayScoreCount = 0;
+let closedTopics = [];
+let closedTopicsVisible = false;
+let isReviewMode = false;
 const retryCounters = new Map();
+const extraGameCardsByType = new Map();
+const extraLoadedCards = new Map();
+const sentenceOrderPenaltyByAttempt = new Map();
 const ttsAudioCache = new Map();
 const ttsPlayCounters = new Map();
 const ttsWarningShownByGame = new Set();
@@ -39,8 +41,6 @@ let kanaElapsedApproximate = true;
 let kanaElapsedTicker = null;
 const PRONUNCIATION_DEFAULT_AUDIO_SECONDS = 2.0;
 let pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
-const SHADOWING_DEFAULT_AUDIO_SECONDS = 2.0;
-let shadowingElapsedSeconds = SHADOWING_DEFAULT_AUDIO_SECONDS;
 
 function apiUrl(path) {
   const cleanPath = String(path || '').replace(/^\/+/, '');
@@ -84,13 +84,14 @@ function resolveLanguageCode(input) {
 
 function updateTopbar() {
   currentLanguageEl.textContent = languageLabel(currentLanguage);
-  currentLevelEl.textContent = String(todayLevel);
+  currentLevelEl.textContent = String(currentLevel);
   if (changeLanguageBtn) {
     changeLanguageBtn.hidden = availableLanguages.length <= 1;
   }
-  const score = todayScoreCount > 0 ? Math.round(todayScoreTotal / todayScoreCount) : 0;
+  const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
+  const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
   if (todayScoreEl) {
-    todayScoreEl.textContent = `Today's score: ${score}`;
+    todayScoreEl.textContent = `Today's score: ${score}/${scoreMax}`;
   }
 }
 
@@ -137,10 +138,12 @@ function startKanaElapsedTicker() {
 }
 
 function isLessonCompleted() {
+  if (isReviewMode) return true;
   return Boolean(dailyProgress && dailyProgress.lesson_completed);
 }
 
 function areExtrasUnlocked() {
+  if (isReviewMode) return true;
   return Boolean(dailyProgress && dailyProgress.extras_unlocked);
 }
 
@@ -159,6 +162,19 @@ function nextPendingDailyGame() {
 function renderLessonPanel() {
   if (!dailyLesson) return '';
 
+  if (isReviewMode) {
+    return `
+      <section class="lesson-card">
+        <h2>Review mode</h2>
+        <p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>
+        <p class="muted">Practice this learned topic. Review attempts do not modify daily score or progression.</p>
+        <div class="lesson-progress-actions">
+          <button id="exit-review-btn" class="ghost-btn" type="button">Back to today's topic</button>
+        </div>
+      </section>
+    `;
+  }
+
   const points = (dailyLesson.theory_points || [])
     .map((point) => `<li>${escapeHtml(point)}</li>`)
     .join('');
@@ -171,6 +187,51 @@ function renderLessonPanel() {
   const unlockLine = areExtrasUnlocked()
     ? '<p class="muted">Extra games for this topic are unlocked.</p>'
     : '<p class="muted">Finish lesson + 3 daily games to unlock extra topic games.</p>';
+  const topicDays = Number((dailyProgress && dailyProgress.topic_days_count) || 0);
+  const targetScore = Number((dailyProgress && dailyProgress.topic_day_target_score) || 150);
+  const targetReached = Boolean(dailyProgress && dailyProgress.topic_day_target_reached);
+  const highScoreDays = Number((dailyProgress && dailyProgress.high_score_days_over_240) || 0);
+  const retention = (dailyProgress && dailyProgress.retention_ratio_percent);
+  const failures = (dailyProgress && dailyProgress.topic_failure_totals) || {};
+  const failureSummary = Object.keys(failures).length > 0
+    ? Object.entries(failures).map(([game, count]) => `${game}: ${count}`).join(' | ')
+    : 'No failures registered yet.';
+  const weeklyDue = Boolean(dailyProgress && dailyProgress.weekly_exam_due);
+  const weeklyExamUnlocked = weeklyDue && lessonDone && completedCount >= totalCount;
+  const weeklyButtonLabel = weeklyExamUnlocked ? 'Take weekly mini-exam' : 'Weekly mini-exam locked';
+  const weeklyDisabled = weeklyExamUnlocked ? '' : 'disabled';
+  const readyTo2 = Boolean(dailyProgress && dailyProgress.ready_to_level_2);
+  const readyTo3 = Boolean(dailyProgress && dailyProgress.ready_to_level_3);
+  const levelExamReady = readyTo2 || readyTo3;
+  const levelExamLabel = readyTo2 ? 'Take level exam (1 -> 2)' : (readyTo3 ? 'Take level exam (2 -> 3)' : 'Level exam locked');
+  const levelExamDisabled = (levelExamReady && lessonDone && completedCount >= totalCount) ? '' : 'disabled';
+  const closedTopicsCount = Number((dailyProgress && dailyProgress.closed_topics_count) || 0);
+  const closedTopicsHtml = closedTopicsVisible
+    ? `
+      <div class="lesson-closed-topics">
+        ${
+          closedTopics.length === 0
+            ? '<p class="muted">No learned topics yet.</p>'
+            : `
+              <ul class="lesson-closed-list">
+                ${closedTopics.map((topic) => `
+                  <li class="lesson-closed-item">
+                    <span>${escapeHtml(topic.topic_title || topic.topic_key)} · ${escapeHtml(topic.closed_day_iso || '')} · level ${escapeHtml(topic.closed_level || '')}</span>
+                    <button
+                      type="button"
+                      class="ghost-btn closed-topic-review-btn"
+                      data-topic-key="${escapeHtml(topic.topic_key || '')}"
+                    >
+                      Review topic
+                    </button>
+                  </li>
+                `).join('')}
+              </ul>
+            `
+        }
+      </div>
+    `
+    : '';
 
   return `
     <section class="lesson-card">
@@ -187,9 +248,50 @@ function renderLessonPanel() {
         ${lessonButton}
       </div>
       <p class="muted">Daily progress: ${completedCount}/${totalCount} games completed.</p>
+      <p class="muted">Days on this topic: ${topicDays}.</p>
+      <p class="muted">Target score for this day: ${targetScore}/300 (${targetReached ? 'reached' : 'pending'}).</p>
+      <p class="muted">High-score days (>240): ${highScoreDays}.</p>
+      <p class="muted">Retention (vs previous days): ${retention == null ? 'n/a' : `${retention}%`}.</p>
+      <p class="muted">Failures by game: ${escapeHtml(failureSummary)}</p>
       ${unlockLine}
+      <div class="lesson-progress-actions">
+        <button id="weekly-exam-btn" class="ghost-btn" type="button" ${weeklyDisabled}>${weeklyButtonLabel}</button>
+        <button id="level-exam-btn" class="ghost-btn" type="button" ${levelExamDisabled}>${levelExamLabel}</button>
+        <button id="closed-topics-btn" class="ghost-btn" type="button">
+          ${closedTopicsVisible ? 'Hide learned topics' : `Show learned topics (${closedTopicsCount})`}
+        </button>
+      </div>
+      ${closedTopicsHtml}
     </section>
   `;
+}
+
+function sentenceOrderState(game) {
+  if (!game) return null;
+  const key = gameAttemptKey(game);
+  if (!key) return null;
+  if (!sentenceOrderPenaltyByAttempt.has(key)) {
+    sentenceOrderPenaltyByAttempt.set(key, {
+      penalty: 0,
+      wrongBySlot: {},
+      autoEvaluated: false,
+    });
+  }
+  return sentenceOrderPenaltyByAttempt.get(key);
+}
+
+function sentenceOrderPenaltyForGame(game) {
+  const state = sentenceOrderState(game);
+  return state ? Number(state.penalty || 0) : 0;
+}
+
+function updateSentenceOrderStatusLine() {
+  if (!selectedGame || selectedGame.game_type !== 'sentence_order') return;
+  const statusEl = document.getElementById('sentence-order-status');
+  if (!statusEl) return;
+  const penalty = sentenceOrderPenaltyForGame(selectedGame);
+  const score = Math.max(0, 100 - penalty);
+  statusEl.textContent = `Current penalty: -${penalty}. Potential score: ${score}/100`;
 }
 
 function renderSingleGame(game) {
@@ -220,6 +322,14 @@ function renderSingleGame(game) {
   const gameType = game.game_type;
   const displayName = game.display_name || gameType;
   let promptHtml = `<p class="prompt">${escapeHtml(game.prompt || '')}</p>`;
+  if (game.ai_generated_prompt) {
+    promptHtml = `
+      <div class="prompt game-meta">
+        <p class="game-meta-line"><strong>AI prompt:</strong> ${escapeHtml(game.ai_generated_prompt)}</p>
+        <p class="game-meta-line">${escapeHtml(game.prompt || '')}</p>
+      </div>
+    `;
+  }
   if (gameType !== 'kana_speed_round') {
     stopKanaElapsedTicker();
   }
@@ -308,6 +418,7 @@ function renderSingleGame(game) {
         <div id="sentence-sourcezone" class="sentence-dropzone dnd-zone">${dndItems}</div>
         <label>Final order zone</label>
         <div id="sentence-dropzone" class="sentence-order-target">${slotItems}</div>
+        <small id="sentence-order-status" class="muted">Place all fragments to get your final score.</small>
       </fieldset>
     `;
   } else if (gameType === 'mora_romanization') {
@@ -532,37 +643,14 @@ function renderSingleGame(game) {
         <input data-k="recognized_text" placeholder="recognized text" />
       </fieldset>
     `;
-  } else if (gameType === 'shadowing_score') {
-    const expectedText = payload.expected_text || game.prompt || '';
-    shadowingElapsedSeconds = SHADOWING_DEFAULT_AUDIO_SECONDS;
-    const promptLines = [`Target sentence: ${expectedText}`];
-    if (payload.show_romanized_line && payload.romanized_line) {
-      promptLines.push(`Romanized: ${payload.romanized_line}`);
-    }
-    promptHtml = `
-      <div class="prompt game-meta">
-        ${promptLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
-      </div>
-    `;
-    controls = `
-      <div class="audio-actions">
-        <button id="shadowing-record-btn" type="button" class="ghost-btn">Record</button>
-        <button id="shadowing-stop-record-btn" type="button" class="ghost-btn" disabled>Stop</button>
-      </div>
-      <small id="shadowing-record-status" class="muted kana-status-line">Microphone inactive.</small>
-      <fieldset class="response-group">
-        <legend>Answer</legend>
-        <label>Pronounced text (with punctuation)</label>
-        <input data-k="learner_text" placeholder="pronounced text" />
-      </fieldset>
-    `;
   } else {
     controls = '<p class="muted">Game renderer not implemented.</p>';
   }
 
-  const evaluateLabel = (gameType === 'pronunciation_match' || gameType === 'shadowing_score' || gameType === 'kana_speed_round')
+  const evaluateLabel = (gameType === 'pronunciation_match' || gameType === 'kana_speed_round')
     ? 'Evaluate audio'
     : 'Evaluate';
+  const showEvaluateButton = gameType !== 'sentence_order';
 
   gameZoneEl.classList.remove('hidden');
   gameZoneEl.innerHTML = `
@@ -572,7 +660,7 @@ function renderSingleGame(game) {
       ${promptHtml}
       ${controls}
       <div class="actions">
-        <button id="evaluate-btn">${evaluateLabel}</button>
+        ${showEvaluateButton ? `<button id="evaluate-btn">${evaluateLabel}</button>` : ''}
         <button id="retry-btn" class="ghost-btn">Retry</button>
       </div>
       <div id="game-result" class="result"></div>
@@ -582,6 +670,24 @@ function renderSingleGame(game) {
 
 function renderSidebar(games) {
   if (!gamesSidebarEl) return;
+  if (isReviewMode) {
+    const reviewList = (dailyGameCards || [])
+      .map((game) => {
+        const active = selectedGame && selectedGame.game_type === game.game_type ? 'active-game' : '';
+        return `
+          <button class="sidebar-game ${active}" data-action="pick-game" data-game="${escapeHtml(game.game_type)}">
+            ${escapeHtml(game.display_name || game.game_type)}
+          </button>
+        `;
+      })
+      .join('');
+    gamesSidebarEl.innerHTML = `
+      <h3>Topic review</h3>
+      <p class="muted">${escapeHtml((dailyTopic && dailyTopic.title) || 'Review topic')}</p>
+      <div class="sidebar-list">${reviewList || '<p class="muted">No review games available.</p>'}</div>
+    `;
+    return;
+  }
   const lessonDone = isLessonCompleted();
   const extrasUnlocked = areExtrasUnlocked();
   const dailyList = (dailyGameCards || [])
@@ -723,6 +829,7 @@ function collectPayload(game) {
         return el.dataset.tokenText || '';
       });
     payload.ordered_tokens_by_user = ordered;
+    payload.sentence_order_penalty = sentenceOrderPenaltyForGame(game);
   }
   if (game.game_type === 'context_quiz') {
     const checked = gameZoneEl.querySelector('input[name="context-option"]:checked');
@@ -760,12 +867,6 @@ function collectPayload(game) {
     payload.pause_seconds = 0.2;
     payload.pitch_track_hz = [150.0, 151.0, 149.0];
   }
-  if (game.game_type === 'shadowing_score') {
-    payload.expected_text = game.payload?.expected_text || game.prompt;
-    payload.audio_duration_seconds = shadowingElapsedSeconds;
-    payload.pause_seconds = 0.2;
-  }
-
   return payload;
 }
 
@@ -789,22 +890,47 @@ function setSingleSlotLocked(zone, locked) {
 
 function syncSentenceOrderLocks() {
   if (!selectedGame || selectedGame.game_type !== 'sentence_order') return;
+  const state = sentenceOrderState(selectedGame);
+  if (!state) return;
   const slots = Array.from(gameZoneEl.querySelectorAll('.sentence-order-slot[data-slot-index]'));
+  let allFilled = slots.length > 0;
+  let allCorrect = slots.length > 0;
   slots.forEach((slot) => {
     const expectedToken = String(slot.dataset.expectedToken || '').trim();
     const token = slot.querySelector('.dnd-token');
+    const slotIndex = String(slot.dataset.slotIndex || '');
     if (!token || !expectedToken) {
+      allFilled = false;
+      allCorrect = false;
       setSingleSlotLocked(slot, false);
       slot.classList.remove('sentence-slot-correct');
+      state.wrongBySlot[slotIndex] = '';
       if (token) setTokenLocked(token, false);
       return;
     }
     const tokenText = String(token.dataset.tokenText || token.textContent || '').trim();
     const isCorrect = tokenText === expectedToken;
+    if (!isCorrect) {
+      allCorrect = false;
+      const wrongSignature = `${slotIndex}:${tokenText}`;
+      if (state.wrongBySlot[slotIndex] !== wrongSignature) {
+        state.penalty = Math.min(100, Number(state.penalty || 0) + 10);
+        state.wrongBySlot[slotIndex] = wrongSignature;
+      }
+    } else {
+      state.wrongBySlot[slotIndex] = '';
+    }
     setSingleSlotLocked(slot, isCorrect);
     setTokenLocked(token, isCorrect);
     slot.classList.toggle('sentence-slot-correct', isCorrect);
   });
+  sentenceOrderPenaltyByAttempt.set(gameAttemptKey(selectedGame), state);
+  updateSentenceOrderStatusLine();
+  if (allFilled && allCorrect && !state.autoEvaluated) {
+    state.autoEvaluated = true;
+    sentenceOrderPenaltyByAttempt.set(gameAttemptKey(selectedGame), state);
+    evaluateSelectedGame(false);
+  }
 }
 
 function syncKanjiReadingPreview() {
@@ -985,25 +1111,20 @@ async function evaluateSelectedGame(isRetry) {
       learner_id: learnerId,
       game_type: selectedGame.game_type,
       language: selectedGame.language || currentLanguage,
-      level: todayLevel,
+      // Use card level first to avoid backend item lookup mismatches in review/extra flows.
+      level: Number(selectedGame.level || todayLevel || currentLevel || 1),
       retry_count: nextRetry,
+      review_mode: isReviewMode,
       payload,
     }),
   });
   const data = await res.json();
-  if (data.daily_progress) {
+  if (!isReviewMode && data.daily_progress) {
     dailyProgress = data.daily_progress;
     refreshAvailableGameCards();
     renderSidebar(availableGameCards);
-    if (!selectedGame && availableGameCards.length > 0) {
-      selectedGame = nextPendingDailyGame() || availableGameCards[0];
-    }
   }
-  if (typeof data.score === 'number') {
-    todayScoreTotal += data.score;
-    todayScoreCount += 1;
-    updateTopbar();
-  }
+  updateTopbar();
   renderEvaluation(data);
 }
 
@@ -1268,102 +1389,8 @@ function stopPronunciationRecording() {
   activeRecorder.stop();
 }
 
-function setShadowingRecordStatus(message, isError = false) {
-  const statusEl = document.getElementById('shadowing-record-status');
-  if (!statusEl) return;
-  statusEl.textContent = message;
-  statusEl.classList.toggle('alert', Boolean(isError));
-}
-
-function updateShadowingRecordButtons(isRecording) {
-  const recordBtn = document.getElementById('shadowing-record-btn');
-  const stopBtn = document.getElementById('shadowing-stop-record-btn');
-  if (recordBtn) recordBtn.disabled = isRecording;
-  if (stopBtn) stopBtn.disabled = !isRecording;
-}
-
-async function transcribeShadowingRecording(blob, durationSeconds) {
-  if (!selectedGame || selectedGame.game_type !== 'shadowing_score') return;
-
-  const formData = new FormData();
-  formData.append('language', selectedGame.language || currentLanguage);
-  formData.append('audio_file', blob, `shadowing-${Date.now()}.webm`);
-
-  const res = await fetch(apiUrl('api/audio/stt'), {
-    method: 'POST',
-    body: formData,
-  });
-  const data = await res.json();
-  if (!res.ok || !data.transcript) {
-    setShadowingRecordStatus(data.error || 'Audio transcription failed.', true);
-    return;
-  }
-
-  const learnerInput = gameZoneEl.querySelector('input[data-k="learner_text"]');
-  if (learnerInput) {
-    learnerInput.value = data.transcript;
-  }
-  shadowingElapsedSeconds = durationSeconds;
-  setShadowingRecordStatus(`Transcript ready (${durationSeconds.toFixed(1)}s).`);
-}
-
-async function startShadowingRecording() {
-  if (!selectedGame || selectedGame.game_type !== 'shadowing_score') return;
-  if (activeRecorder) return;
-
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setShadowingRecordStatus('This browser does not support microphone access.', true);
-    return;
-  }
-  if (typeof MediaRecorder === 'undefined') {
-    setShadowingRecordStatus('MediaRecorder is not available in this browser.', true);
-    return;
-  }
-
-  try {
-    activeRecorderStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
-    const mimeType = candidates.find((candidate) => typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported(candidate));
-    activeRecorder = mimeType ? new MediaRecorder(activeRecorderStream, { mimeType }) : new MediaRecorder(activeRecorderStream);
-    recorderChunks = [];
-    recordingStartedAtMs = Date.now();
-    shadowingElapsedSeconds = 0.1;
-
-    activeRecorder.addEventListener('dataavailable', (event) => {
-      if (event.data && event.data.size > 0) {
-        recorderChunks.push(event.data);
-      }
-    });
-    activeRecorder.addEventListener('stop', async () => {
-      try {
-        const durationSeconds = Math.max(0.1, (Date.now() - recordingStartedAtMs) / 1000);
-        shadowingElapsedSeconds = durationSeconds;
-        const blobType = (recorderChunks[0] && recorderChunks[0].type) || activeRecorder.mimeType || 'audio/webm';
-        const blob = new Blob(recorderChunks, { type: blobType });
-        await transcribeShadowingRecording(blob, durationSeconds);
-      } finally {
-        cleanupRecorder();
-        updateShadowingRecordButtons(false);
-      }
-    });
-
-    activeRecorder.start();
-    updateShadowingRecordButtons(true);
-    setShadowingRecordStatus('Recording... press Stop to transcribe.');
-  } catch (error) {
-    cleanupRecorder();
-    updateShadowingRecordButtons(false);
-    setShadowingRecordStatus('Could not open microphone (check permissions).', true);
-  }
-}
-
-function stopShadowingRecording() {
-  if (!activeRecorder) return;
-  setShadowingRecordStatus('Processing audio...');
-  activeRecorder.stop();
-}
-
 async function completeDailyLesson() {
+  if (isReviewMode) return;
   if (!dailyLesson || isLessonCompleted()) return;
 
   const res = await fetch(apiUrl('api/games/lesson/complete'), {
@@ -1386,9 +1413,166 @@ async function completeDailyLesson() {
   }
   refreshAvailableGameCards();
   selectedGame = nextPendingDailyGame() || availableGameCards[0] || null;
+  updateTopbar();
   renderSidebar(availableGameCards);
   renderSingleGame(selectedGame);
   wireGameActions();
+}
+
+async function loadClosedTopics() {
+  const res = await fetch(apiUrl('api/topics/closed'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      learner_id: learnerId,
+      language: currentLanguage,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    window.alert(data.error || 'Could not load learned topics.');
+    return false;
+  }
+  closedTopics = Array.isArray(data.closed_topics) ? data.closed_topics : [];
+  return true;
+}
+
+async function toggleClosedTopics() {
+  if (!closedTopicsVisible) {
+    const ok = await loadClosedTopics();
+    if (!ok) return;
+    closedTopicsVisible = true;
+  } else {
+    closedTopicsVisible = false;
+  }
+  renderSingleGame(selectedGame);
+  wireGameActions();
+}
+
+async function startTopicReview(topicKey) {
+  const normalizedTopic = String(topicKey || '').trim();
+  if (!normalizedTopic) return;
+
+  const res = await fetch(apiUrl('api/topics/review'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      learner_id: learnerId,
+      language: currentLanguage,
+      topic_key: normalizedTopic,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    window.alert(data.error || 'Could not start topic review.');
+    return;
+  }
+
+  isReviewMode = true;
+  closedTopicsVisible = false;
+  dailyTopic = data.topic || dailyTopic;
+  dailyLesson = data.lesson || dailyLesson;
+  dailyGameCards = Array.isArray(data.review_games) ? data.review_games : [];
+  extraGameCards = [];
+  extraGameCardsByType.clear();
+  extraLoadedCards.clear();
+  availableGameCards = [...dailyGameCards];
+  selectedGame = data.selected_game || dailyGameCards[0] || null;
+  retryCounters.clear();
+  sentenceOrderPenaltyByAttempt.clear();
+  updateTopbar();
+  renderSidebar(availableGameCards);
+  renderSingleGame(selectedGame);
+  wireGameActions();
+}
+
+async function exitReviewMode() {
+  if (!isReviewMode) return;
+  isReviewMode = false;
+  await loadDailyGame();
+}
+
+async function takeWeeklyExam() {
+  const res = await fetch(apiUrl('api/exams/weekly'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      learner_id: learnerId,
+      language: currentLanguage,
+      topic_key: (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '',
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    window.alert(data.error || 'Weekly mini-exam request failed.');
+  } else {
+    window.alert(data.feedback || 'Weekly mini-exam completed.');
+  }
+  if (data.daily_progress) {
+    dailyProgress = data.daily_progress;
+  }
+  updateTopbar();
+  renderSingleGame(selectedGame);
+  wireGameActions();
+}
+
+async function takeLevelExam() {
+  const res = await fetch(apiUrl('api/exams/level'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      learner_id: learnerId,
+      language: currentLanguage,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    window.alert(data.error || 'Level exam request failed.');
+  } else {
+    window.alert(data.feedback || 'Level exam completed.');
+  }
+  if (data.daily_progress) {
+    dailyProgress = data.daily_progress;
+  }
+  if (data.promoted) {
+    await loadDailyGame();
+    return;
+  }
+  updateTopbar();
+  renderSingleGame(selectedGame);
+  wireGameActions();
+}
+
+async function loadExtraGameCard(gameType) {
+  if (isReviewMode) return null;
+  if (!gameType) return null;
+  if (extraLoadedCards.has(gameType)) {
+    return extraLoadedCards.get(gameType);
+  }
+  const extraMeta = extraGameCardsByType.get(gameType);
+  if (!extraMeta) return null;
+
+  const res = await fetch(apiUrl('api/games/extra/load'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      learner_id: learnerId,
+      game_type: gameType,
+      language: currentLanguage,
+      topic_key: (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '',
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error || !data.card) {
+    window.alert(data.error || 'Could not load this extra game.');
+    return null;
+  }
+  if (data.daily_progress) {
+    dailyProgress = data.daily_progress;
+  }
+  extraLoadedCards.set(gameType, data.card);
+  updateTopbar();
+  return data.card;
 }
 
 function wireGameActions() {
@@ -1401,22 +1585,39 @@ function wireGameActions() {
   const kanaStopRecordBtn = document.getElementById('kana-stop-record-btn');
   const pronunciationRecordBtn = document.getElementById('pronunciation-record-btn');
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
-  const shadowingRecordBtn = document.getElementById('shadowing-record-btn');
-  const shadowingStopRecordBtn = document.getElementById('shadowing-stop-record-btn');
+  const weeklyExamBtn = document.getElementById('weekly-exam-btn');
+  const levelExamBtn = document.getElementById('level-exam-btn');
+  const closedTopicsBtn = document.getElementById('closed-topics-btn');
+  const exitReviewBtn = document.getElementById('exit-review-btn');
+  const reviewTopicBtns = Array.from(document.querySelectorAll('.closed-topic-review-btn'));
   completeLessonBtn?.addEventListener('click', completeDailyLesson);
   evaluateBtn?.addEventListener('click', () => evaluateSelectedGame(false));
-  retryBtn?.addEventListener('click', () => evaluateSelectedGame(true));
+  retryBtn?.addEventListener('click', () => {
+    if (selectedGame && selectedGame.game_type === 'sentence_order') {
+      sentenceOrderPenaltyByAttempt.delete(gameAttemptKey(selectedGame));
+      renderSingleGame(selectedGame);
+      wireGameActions();
+      return;
+    }
+    evaluateSelectedGame(true);
+  });
   kanaPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
   listeningPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
   kanaRecordBtn?.addEventListener('click', startKanaRecording);
   kanaStopRecordBtn?.addEventListener('click', stopKanaRecording);
   pronunciationRecordBtn?.addEventListener('click', startPronunciationRecording);
   pronunciationStopRecordBtn?.addEventListener('click', stopPronunciationRecording);
-  shadowingRecordBtn?.addEventListener('click', startShadowingRecording);
-  shadowingStopRecordBtn?.addEventListener('click', stopShadowingRecording);
+  weeklyExamBtn?.addEventListener('click', takeWeeklyExam);
+  levelExamBtn?.addEventListener('click', takeLevelExam);
+  closedTopicsBtn?.addEventListener('click', toggleClosedTopics);
+  exitReviewBtn?.addEventListener('click', exitReviewMode);
+  reviewTopicBtns.forEach((btn) => {
+    btn.addEventListener('click', () => startTopicReview(btn.dataset.topicKey || ''));
+  });
   initDragAndDropComponents();
   syncKanjiReadingPreview();
   syncSentenceOrderLocks();
+  updateSentenceOrderStatusLine();
 }
 
 function initDragAndDropComponents() {
@@ -1517,15 +1718,10 @@ function getDragAfterElement(container, y) {
 }
 
 async function loadDailyGame() {
-  const body = { learner_id: learnerId };
-  if (todayLevelOverride != null) {
-    body.level_override_today = todayLevelOverride;
-  }
-
   const res = await fetch(apiUrl('api/games/daily'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ learner_id: learnerId }),
   });
   const data = await res.json();
 
@@ -1534,11 +1730,17 @@ async function loadDailyGame() {
   currentLanguage = data.language || 'ja';
   currentLevel = Number(data.current_level || 1);
   todayLevel = Number(data.today_level || currentLevel);
+  isReviewMode = false;
   dailyTopic = data.topic || null;
   dailyLesson = data.lesson || null;
   dailyProgress = data.daily_progress || null;
   dailyGameCards = data.daily_games || [];
   extraGameCards = data.extra_games || [];
+  extraGameCardsByType.clear();
+  extraGameCards.forEach((card) => {
+    extraGameCardsByType.set(card.game_type, card);
+  });
+  extraLoadedCards.clear();
   refreshAvailableGameCards();
   selectedGame = data.selected_game || null;
   if (!selectedGame && isLessonCompleted()) {
@@ -1549,14 +1751,13 @@ async function loadDailyGame() {
   }
 
   if (data.level_up_blocked) {
-    window.alert('Level increase is not allowed. Keeping your current level.');
-  }
-
-  if (todayLevel === currentLevel) {
-    todayLevelOverride = null;
+    window.alert('Temporary level override is disabled. Use topic review instead.');
   }
 
   retryCounters.clear();
+  sentenceOrderPenaltyByAttempt.clear();
+  closedTopicsVisible = false;
+  closedTopics = [];
   updateTopbar();
   renderSidebar(availableGameCards);
   renderSingleGame(selectedGame);
@@ -1576,44 +1777,33 @@ async function changeLanguage() {
     body: JSON.stringify({ learner_id: learnerId, language }),
   });
 
-  todayLevelOverride = null;
-  await loadDailyGame();
-}
-
-async function changeLevelForToday() {
-  const value = prompt(`Level for today (1-${currentLevel}). Leave empty to return to base level.`, String(todayLevel));
-  if (value == null) return;
-  const trimmed = value.trim();
-  if (!trimmed) {
-    todayLevelOverride = null;
-    await loadDailyGame();
-    return;
-  }
-
-  const parsed = Number(trimmed);
-  if (![1, 2, 3].includes(parsed)) return;
-  if (parsed > currentLevel) {
-    window.alert(`You cannot increase level above ${currentLevel}.`);
-    return;
-  }
-  todayLevelOverride = parsed;
   await loadDailyGame();
 }
 
 changeLanguageBtn?.addEventListener('click', changeLanguage);
-changeLevelBtn?.addEventListener('click', changeLevelForToday);
 gamesSidebarEl?.addEventListener('click', (event) => {
   const target = event.target;
   if (!target || !target.dataset || target.dataset.action !== 'pick-game') return;
   if (!isLessonCompleted()) return;
   const gameType = target.dataset.game;
-  const found = availableGameCards.find((g) => g.game_type === gameType);
-  if (!found) return;
-  selectedGame = found;
-  retryCounters.clear();
-  renderSidebar(availableGameCards);
-  renderSingleGame(selectedGame);
-  wireGameActions();
+  const openSelected = async () => {
+    let found = availableGameCards.find((g) => g.game_type === gameType);
+    if (!found) return;
+    if (found.deferred_load) {
+      const loadedCard = await loadExtraGameCard(gameType);
+      if (!loadedCard) return;
+      found = loadedCard;
+      availableGameCards = availableGameCards.map((card) => (
+        card.game_type === gameType ? loadedCard : card
+      ));
+    }
+    selectedGame = found;
+    retryCounters.clear();
+    renderSidebar(availableGameCards);
+    renderSingleGame(selectedGame);
+    wireGameActions();
+  };
+  openSelected();
 });
 
 loadDailyGame();
