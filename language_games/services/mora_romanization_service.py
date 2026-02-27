@@ -98,12 +98,11 @@ class MoraRomanizationService:
         if not items:
             return []
 
-        # Beginner shows mora-by-mora scaffolding; advanced removes that help.
-        beginner_mode = level <= 1
+        mode = self._mode_for_level(level)
         activities: list[GameActivity] = []
         for item in items:
             lines = ["Romanize and group mora into western words."]
-            if beginner_mode:
+            if mode in {"beginner", "intermediate"}:
                 lines.append(f"Mora (kana): {' | '.join(item.mora_kana)}")
                 lines.append(f"Mora (romaji): {' '.join(item.mora_romaji)}")
             else:
@@ -159,6 +158,7 @@ class MoraRomanizationService:
         score = 100 if is_correct else round(((romanization_accuracy * 0.6) + (segmentation_accuracy * 0.4)) * 100)
         # In advanced levels, reveal kanji mora line only for correct answers.
         show_kanji = attempt.level <= 1 or is_correct
+        sequence_mismatches = self._build_sequence_mismatches(expected_words, user_words)
         feedback = self._feedback(
             is_correct=is_correct,
             romanization_accuracy=romanization_accuracy,
@@ -175,6 +175,7 @@ class MoraRomanizationService:
             "segmentation_accuracy": round(segmentation_accuracy, 2),
             "expected_words": expected_words,
             "user_words": user_words,
+            "sequence_mismatches": sequence_mismatches,
             "feedback": feedback,
             "literal_translation": item.literal_translation,
             "show_kanji_mora_line": show_kanji,
@@ -245,3 +246,31 @@ class MoraRomanizationService:
         if romanization_accuracy < 0.65:
             return "Romanization differs from the expected mora sequence."
         return "Good attempt. Review mora grouping and try again."
+
+    @staticmethod
+    def _mode_for_level(level: int) -> str:
+        if level <= 1:
+            return "beginner"
+        if level == 2:
+            return "intermediate"
+        return "advanced"
+
+    @staticmethod
+    def _build_sequence_mismatches(expected_words: list[str], user_words: list[str]) -> list[dict[str, str | int]]:
+        max_len = max(len(expected_words), len(user_words))
+        mismatches: list[dict[str, str | int]] = []
+        for idx in range(max_len):
+            expected_token = expected_words[idx] if idx < len(expected_words) else ""
+            user_token = user_words[idx] if idx < len(user_words) else ""
+            if expected_token == user_token:
+                continue
+            mismatches.append(
+                {
+                    "position": idx + 1,
+                    "expected": expected_token,
+                    "recognized": user_token,
+                }
+            )
+            if len(mismatches) >= 8:
+                break
+        return mismatches

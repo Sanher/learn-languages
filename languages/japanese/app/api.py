@@ -306,12 +306,17 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
         items = service.get_items(language=language, level=level)
         item = next((it for it in items if it.item_id == activity_id), None)
         if item:
-            beginner_mode = level <= 1
+            if level <= 1:
+                mode = "beginner"
+            elif level == 2:
+                mode = "intermediate"
+            else:
+                mode = "advanced"
             payload = {
-                "mode": "beginner" if beginner_mode else "advanced",
-                "mora_kana_tokens": item.mora_kana if beginner_mode else [],
-                "mora_romaji_tokens": item.mora_romaji if beginner_mode else [],
-                "japanese_text": "" if beginner_mode else item.japanese_text,
+                "mode": mode,
+                "mora_kana_tokens": item.mora_kana if mode in {"beginner", "intermediate"} else [],
+                "mora_romaji_tokens": item.mora_romaji if mode in {"beginner", "intermediate"} else [],
+                "japanese_text": item.japanese_text if mode == "advanced" else "",
                 "literal_translation": item.literal_translation,
             }
             logger.info(

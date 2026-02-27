@@ -19,9 +19,17 @@ class MoraRomanizationServiceTests(unittest.TestCase):
         self.assertIn("Mora (kana):", prompt)
         self.assertIn("Mora (romaji):", prompt)
 
-    def test_advanced_activity_hides_mora_romaji_and_shows_plain_japanese(self) -> None:
+    def test_intermediate_activity_keeps_mora_romaji(self) -> None:
         service = MoraRomanizationService()
         activities = service.get_activities(language="ja", level=2)
+        self.assertTrue(activities)
+        prompt = activities[0].prompt
+        self.assertIn("Mora (romaji):", prompt)
+        self.assertNotIn("Japanese text:", prompt)
+
+    def test_advanced_activity_hides_mora_romaji_and_shows_plain_japanese(self) -> None:
+        service = MoraRomanizationService()
+        activities = service.get_activities(language="ja", level=3)
         self.assertTrue(activities)
         prompt = activities[0].prompt
         self.assertNotIn("Mora (romaji):", prompt)
@@ -43,27 +51,41 @@ class MoraRomanizationServiceTests(unittest.TestCase):
 
     def test_advanced_shows_kanji_only_when_correct(self) -> None:
         service = MoraRomanizationService()
-        item = service.get_items(language="ja", level=2)[0]
+        item = service.get_items(language="ja", level=3)[0]
         wrong = service.evaluate_attempt(
             MoraRomanizationAttempt(
                 language="ja",
                 item_id=item.item_id,
-                user_romanized_text="kyouwasushiotabemasu",
-                level=2,
+                user_romanized_text="ashitatomodachitoeigaomimasu",
+                level=3,
             )
         )
         correct = service.evaluate_attempt(
             MoraRomanizationAttempt(
                 language="ja",
                 item_id=item.item_id,
-                user_romanized_text="kyou wa sushi o tabemasu",
-                level=2,
+                user_romanized_text="ashita tomodachi to eiga o mimasu",
+                level=3,
             )
         )
         self.assertFalse(wrong["is_correct"])
         self.assertIsNone(wrong["kanji_mora_line"])
         self.assertTrue(correct["is_correct"])
         self.assertTrue(correct["kanji_mora_line"])
+
+    def test_incorrect_attempt_reports_mismatches(self) -> None:
+        service = MoraRomanizationService()
+        item = service.get_items(language="ja", level=1)[0]
+        result = service.evaluate_attempt(
+            MoraRomanizationAttempt(
+                language="ja",
+                item_id=item.item_id,
+                user_romanized_text="watashiwagakuseidesu",
+                level=1,
+            )
+        )
+        self.assertFalse(result["is_correct"])
+        self.assertTrue(result["sequence_mismatches"])
 
     def test_service_is_reusable_through_registry(self) -> None:
         registry = GameServiceRegistry()

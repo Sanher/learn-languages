@@ -233,17 +233,22 @@ function renderSingleGame(game) {
     `;
   } else if (gameType === 'mora_romanization') {
     // The backend controls assistance mode per level: beginner exposes mora guides.
-    const mode = payload.mode || (Number(game.level || 1) <= 1 ? 'beginner' : 'advanced');
+    const numericLevel = Number(game.level || 1);
+    const fallbackMode = numericLevel <= 1 ? 'beginner' : (numericLevel === 2 ? 'intermediate' : 'advanced');
+    const mode = payload.mode || fallbackMode;
     const moraKanaLine = Array.isArray(payload.mora_kana_tokens) ? payload.mora_kana_tokens.join(' | ') : '';
     const moraRomajiLine = Array.isArray(payload.mora_romaji_tokens) ? payload.mora_romaji_tokens.join(' ') : '';
     const japaneseText = payload.japanese_text || '';
     const metaLines = [];
-    if (mode === 'beginner') {
+    if (mode === 'beginner' || mode === 'intermediate') {
       if (moraKanaLine) metaLines.push(`Mora (kana): ${moraKanaLine}`);
       if (moraRomajiLine) metaLines.push(`Mora (romaji): ${moraRomajiLine}`);
     } else if (japaneseText) {
       metaLines.push(`Japanese text: ${japaneseText}`);
     }
+    const inputPlaceholder = mode === 'beginner'
+      ? ' placeholder="watashi wa gakusei desu"'
+      : '';
     promptHtml = `
       <div class="prompt game-meta">
         ${metaLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
@@ -253,7 +258,7 @@ function renderSingleGame(game) {
       <fieldset class="response-group">
         <legend>Answer</legend>
         <label>Romanized words</label>
-        <input data-k="user_romanized_text" placeholder="watashi wa gakusei desu" />
+        <input data-k="user_romanized_text"${inputPlaceholder} />
       </fieldset>
     `;
   } else if (gameType === 'listening_gap_fill') {

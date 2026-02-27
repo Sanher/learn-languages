@@ -122,10 +122,28 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertTrue(payload.get("mora_romaji_tokens"))
         self.assertEqual(payload.get("japanese_text"), "")
 
-    def test_mora_romanization_payload_advanced_contains_japanese_text_only(self) -> None:
+    def test_mora_romanization_payload_intermediate_keeps_mora_romaji(self) -> None:
         response = self.client.post(
             "/api/games/daily",
             json={"learner_id": "test-user", "level_override_today": 2},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "mora_romanization"),
+            None,
+        )
+        self.assertIsNotNone(card)
+        payload = card.get("payload", {})
+        self.assertEqual(payload.get("mode"), "intermediate")
+        self.assertTrue(payload.get("mora_kana_tokens"))
+        self.assertTrue(payload.get("mora_romaji_tokens"))
+        self.assertEqual(payload.get("japanese_text"), "")
+
+    def test_mora_romanization_payload_advanced_contains_japanese_text_only(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user", "level_override_today": 3},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -143,7 +161,7 @@ class ApiEnglishContractTests(unittest.TestCase):
     def test_mora_romanization_evaluate_advanced_hides_kanji_when_incorrect(self) -> None:
         response = self.client.post(
             "/api/games/daily",
-            json={"learner_id": "test-user", "level_override_today": 2},
+            json={"learner_id": "test-user", "level_override_today": 3},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -158,11 +176,11 @@ class ApiEnglishContractTests(unittest.TestCase):
             json={
                 "game_type": "mora_romanization",
                 "language": "ja",
-                "level": 2,
+                "level": 3,
                 "retry_count": 0,
                 "payload": {
                     "item_id": card["activity_id"],
-                    "user_romanized_text": "kyouwasushiotabemasu",
+                    "user_romanized_text": "ashitatomodachitoeigaomimasu",
                 },
             },
         )
@@ -171,11 +189,12 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertIn("is_correct", eval_data)
         self.assertFalse(eval_data["is_correct"])
         self.assertIsNone(eval_data.get("kanji_mora_line"))
+        self.assertTrue(eval_data.get("sequence_mismatches"))
 
     def test_mora_romanization_evaluate_advanced_shows_kanji_when_correct(self) -> None:
         response = self.client.post(
             "/api/games/daily",
-            json={"learner_id": "test-user", "level_override_today": 2},
+            json={"learner_id": "test-user", "level_override_today": 3},
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -190,11 +209,11 @@ class ApiEnglishContractTests(unittest.TestCase):
             json={
                 "game_type": "mora_romanization",
                 "language": "ja",
-                "level": 2,
+                "level": 3,
                 "retry_count": 0,
                 "payload": {
                     "item_id": card["activity_id"],
-                    "user_romanized_text": "kyou wa sushi o tabemasu",
+                    "user_romanized_text": "ashita tomodachi to eiga o mimasu",
                 },
             },
         )
