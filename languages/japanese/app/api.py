@@ -43,7 +43,7 @@ from language_games.services import (
 )
 from language_games.services.registry import GameServiceRegistry
 from .game_engine import DailyGamePlanner, LearnerSnapshot
-from .memory import ProgressMemory
+from .memory import ItemReviewState, ProgressMemory
 from .services.elevenlabs_client import ElevenLabsService
 from .services.openai_client import OpenAIPlanner
 from .topic_flow import TOPICS_BY_LANGUAGE, TopicDefinition, topic_for_day
@@ -55,6 +55,10 @@ LOCAL_LANGUAGE_DATA_DIR = BASE_DIR / "data" / "japanese"
 DB_PATH = str((ADDON_LANGUAGE_DATA_DIR if Path("/data").exists() else LOCAL_LANGUAGE_DATA_DIR) / "progress.db")
 DEFAULT_LEARNER_ID = os.getenv("HA_DEFAULT_LEARNER_ID", "ha_default_user")
 AVAILABLE_LANGUAGES = ["ja"]
+SRS_DEFAULT_EASE = 2.5
+SRS_MIN_EASE = 1.3
+WEEKLY_EXAM_MODE = os.getenv("LEARN_LANGUAGES_WEEKLY_EXAM_MODE", "legacy").strip().lower()
+WEEKLY_EXAM_FORCE_LEGACY = WEEKLY_EXAM_MODE != "cumulative"
 GAME_NAME_ALIASES = {
     GAME_TYPE_KANJI_MATCH: "Kanji Match",
     ALIAS_GAME_TYPE_KANA_SPEED_ROUND: "Kana Speed Round",
@@ -89,12 +93,13 @@ elevenlabs = ElevenLabsService()
 registry = GameServiceRegistry()
 game_services: dict[str, Any] = {}
 logger.info(
-    "provider_config openai_key=%s openai_model=%s elevenlabs_key=%s elevenlabs_voice_id=%s elevenlabs_model_id=%s",
+    "provider_config openai_key=%s openai_model=%s elevenlabs_key=%s elevenlabs_voice_id=%s elevenlabs_model_id=%s weekly_exam_mode=%s",
     bool(openai_planner.api_key),
     openai_planner.model,
     bool(elevenlabs.api_key),
     bool(elevenlabs.voice_id),
     elevenlabs.model_id,
+    "legacy" if WEEKLY_EXAM_FORCE_LEGACY else "cumulative",
 )
 
 
@@ -143,6 +148,8 @@ class WeeklyExamRequest(BaseModel):
     language: str = "ja"
     topic_key: str | None = None
     exam_score: int | None = Field(default=None, ge=0, le=300)
+    question_count: int = Field(default=10, ge=3, le=20)
+    answers: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LevelExamRequest(BaseModel):
@@ -318,6 +325,15 @@ def _daily_progress_payload(progress, daily_game_types: list[str]) -> dict[str, 
     }
 
 
+def _learning_contract_payload(*, daily_required_games: int) -> dict[str, Any]:
+    return {
+        "daily_required_games": int(daily_required_games),
+        "daily_score_cap": 300,
+        "srs_mode": "item_sm2_lite",
+        "srs_tracking_enabled": True,
+    }
+
+
 def _daily_topic_for(learner_id: str, language: str) -> tuple[TopicDefinition, Any, str]:
     today = date.today()
     topic = topic_for_day(learner_id=learner_id, language=language, target_day=today)
@@ -425,6 +441,120 @@ def _is_success_result(result: dict[str, Any]) -> bool | None:
     except (TypeError, ValueError):
         return None
     return numeric_score >= 80.0
+
+
+def _srs_quality_from_score(score: int) -> int:
+    normalized = max(0, min(100, int(score)))
+    if normalized >= 90:
+        return 5
+    if normalized >= 80:
+        return 4
+    if normalized >= 65:
+        return 3
+    if normalized >= 50:
+        return 2
+    return 1
+
+
+def _next_srs_state(previous: ItemReviewState | None, score: int) -> tuple[int, float, int, int, int]:
+    prev_interval = int(previous.interval_days) if previous is not None else 1
+    prev_ease = float(previous.ease) if previous is not None else SRS_DEFAULT_EASE
+    prev_repetitions = int(previous.repetitions) if previous is not None else 0
+    prev_lapses = int(previous.lapses) if previous is not None else 0
+    quality = _srs_quality_from_score(score)
+
+    if quality >= 3:
+        repetitions = prev_repetitions + 1
+        if repetitions == 1:
+            interval = 1
+        elif repetitions == 2:
+            interval = 3
+        else:
+            interval = max(4, int(round(prev_interval * prev_ease)))
+        ease_delta = 0.1 - ((5 - quality) * (0.08 + ((5 - quality) * 0.02)))
+        ease = max(SRS_MIN_EASE, round(prev_ease + ease_delta, 2))
+        lapses = prev_lapses
+    else:
+        repetitions = 0
+        lapses = prev_lapses + 1
+        interval = 1 if quality <= 1 else 2
+        ease = max(SRS_MIN_EASE, round(prev_ease - 0.2, 2))
+
+    return interval, ease, repetitions, lapses, quality
+
+
+def _resolve_attempt_topic_key(learner_id: str, language: str, payload: dict[str, Any]) -> str | None:
+    # Contract MVP (daily 3 games + extras): if topic is not explicit, bind attempt to today's active topic.
+    explicit_topic = str(payload.get("topic_key", "")).strip()
+    if explicit_topic:
+        return explicit_topic
+    try:
+        today_topic = topic_for_day(learner_id=learner_id, language=language, target_day=date.today())
+    except ValueError:
+        return None
+    return today_topic.topic_key
+
+
+def _update_item_review_state(
+    *,
+    learner_id: str,
+    language: str,
+    game_type: str,
+    item_id: str,
+    payload: dict[str, Any],
+    score: int,
+) -> None:
+    if language not in AVAILABLE_LANGUAGES:
+        return
+    topic_key = _resolve_attempt_topic_key(learner_id=learner_id, language=language, payload=payload)
+    if not topic_key:
+        logger.warning(
+            "srs_update_skipped_missing_topic learner_id=%s language=%s game_type=%s item_id=%s",
+            learner_id,
+            language,
+            game_type,
+            item_id,
+        )
+        return
+    today_iso = date.today().isoformat()
+    previous = memory.load_item_review_state(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+        game_type=game_type,
+        item_id=item_id,
+    )
+    interval, ease, repetitions, lapses, quality = _next_srs_state(previous=previous, score=score)
+    due_day_iso = (date.fromisoformat(today_iso) + timedelta(days=interval)).isoformat()
+    memory.upsert_item_review_state(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+        game_type=game_type,
+        item_id=item_id,
+        due_day_iso=due_day_iso,
+        interval_days=interval,
+        ease=ease,
+        repetitions=repetitions,
+        lapses=lapses,
+        last_score=score,
+        last_seen_day_iso=today_iso,
+    )
+    logger.info(
+        "srs_update_done learner_id=%s language=%s topic=%s game_type=%s item_id=%s score=%s quality=%s due=%s interval=%s reps=%s lapses=%s ease=%.2f",
+        learner_id,
+        language,
+        topic_key,
+        game_type,
+        item_id,
+        int(score),
+        quality,
+        due_day_iso,
+        interval,
+        repetitions,
+        lapses,
+        ease,
+    )
 
 
 def _progress_insights(
@@ -693,6 +823,246 @@ def _build_card_for_game_type(game_type: str, language: str, level: int) -> dict
     )
 
 
+def _build_card_for_activity_with_level_fallback(
+    *,
+    game_type: str,
+    language: str,
+    activity_id: str,
+    preferred_level: int,
+) -> dict[str, Any] | None:
+    levels: list[int] = [int(preferred_level), 1, 2, 3]
+    seen: set[int] = set()
+    for level in levels:
+        if level in seen:
+            continue
+        seen.add(level)
+        card = _build_card_for_activity(
+            game_type=game_type,
+            language=language,
+            level=level,
+            activity_id=activity_id,
+        )
+        if card is not None:
+            return card
+    return None
+
+
+def _closed_topics_map(learner_id: str, language: str) -> dict[str, Any]:
+    return {
+        item.topic_key: item
+        for item in memory.list_closed_topics(learner_id=learner_id, language=language)
+    }
+
+
+def _select_extra_card_for_game_type(
+    *,
+    learner_id: str,
+    language: str,
+    today_topic: TopicDefinition,
+    today_level: int,
+    game_type: str,
+    today_iso: str,
+) -> tuple[dict[str, Any] | None, str]:
+    closed_topics = _closed_topics_map(learner_id=learner_id, language=language)
+    if closed_topics:
+        due_items = memory.list_due_item_review_states(
+            learner_id=learner_id,
+            language=language,
+            current_day_iso=today_iso,
+            limit=120,
+        )
+        # Priority 1: due items from already closed topics.
+        due_candidates = [
+            item
+            for item in due_items
+            if item.game_type == game_type and item.topic_key in closed_topics
+        ]
+        due_candidates.sort(key=lambda item: (item.due_day_iso, -int(item.lapses), int(item.last_score)))
+        for item in due_candidates:
+            card = _build_card_for_activity_with_level_fallback(
+                game_type=game_type,
+                language=language,
+                activity_id=item.item_id,
+                preferred_level=today_level,
+            )
+            if card is None:
+                continue
+            card["topic_key"] = item.topic_key
+            card["selection_source"] = "due_closed_topic"
+            return card, "due_closed_topic"
+
+    # Priority 2: weak game types for the current topic.
+    failures = memory.aggregate_topic_failures(
+        learner_id=learner_id,
+        language=language,
+        topic_key=today_topic.topic_key,
+    )
+    if int(failures.get(game_type, 0)) > 0:
+        preferred_current = dict(today_topic.extra_plan_for_level(today_level)).get(game_type)
+        if preferred_current:
+            card = _build_card_for_activity(
+                game_type=game_type,
+                language=language,
+                level=today_level,
+                activity_id=preferred_current,
+            )
+            if card is not None:
+                card["topic_key"] = today_topic.topic_key
+                card["selection_source"] = "weak_current_topic"
+                return card, "weak_current_topic"
+
+    # Priority 3: default current-topic plan.
+    topic_extra_map = dict(today_topic.extra_plan_for_level(today_level))
+    preferred_activity_id = topic_extra_map.get(game_type)
+    if preferred_activity_id:
+        card = _build_card_for_activity(
+            game_type=game_type,
+            language=language,
+            level=today_level,
+            activity_id=preferred_activity_id,
+        )
+        if card is not None:
+            card["topic_key"] = today_topic.topic_key
+            card["selection_source"] = "current_topic_default"
+            return card, "current_topic_default"
+
+    fallback = _build_card_for_game_type(game_type=game_type, language=language, level=today_level)
+    if fallback is not None:
+        fallback["topic_key"] = today_topic.topic_key
+        fallback["selection_source"] = "current_generic_fallback"
+        return fallback, "current_generic_fallback"
+    return None, "missing"
+
+
+def _exam_question_from_card(
+    *,
+    card: dict[str, Any],
+    topic_key: str,
+    topic_title: str,
+    source: str,
+) -> dict[str, Any]:
+    payload = dict(card.get("payload") or {})
+    payload.setdefault("item_id", card.get("activity_id", ""))
+    return {
+        "question_id": f"{topic_key}:{card.get('game_type', '')}:{card.get('activity_id', '')}",
+        "topic_key": topic_key,
+        "topic_title": topic_title,
+        "source": source,
+        "game_type": card.get("game_type"),
+        "display_name": card.get("display_name"),
+        "language": card.get("language"),
+        "level": int(card.get("level", 1) or 1),
+        "item_id": card.get("activity_id"),
+        "prompt": card.get("prompt"),
+        "payload": payload,
+    }
+
+
+def _weekly_exam_questions(
+    *,
+    learner_id: str,
+    language: str,
+    current_topic: TopicDefinition,
+    current_level: int,
+    today_iso: str,
+    question_count: int,
+) -> list[dict[str, Any]]:
+    desired_count = max(3, int(question_count))
+    closed_topics = _closed_topics_map(learner_id=learner_id, language=language)
+    questions: list[dict[str, Any]] = []
+    seen_ids: set[tuple[str, str, str]] = set()
+
+    def _append_from_card(card: dict[str, Any] | None, topic_key: str, topic_title: str, source: str) -> None:
+        if card is None:
+            return
+        key = (topic_key, str(card.get("game_type", "")), str(card.get("activity_id", "")))
+        if key in seen_ids:
+            return
+        seen_ids.add(key)
+        questions.append(
+            _exam_question_from_card(
+                card=card,
+                topic_key=topic_key,
+                topic_title=topic_title,
+                source=source,
+            )
+        )
+
+    # Closed-topic due items first (cumulative pressure).
+    due_items = memory.list_due_item_review_states(
+        learner_id=learner_id,
+        language=language,
+        current_day_iso=today_iso,
+        limit=max(40, desired_count * 3),
+    )
+    due_items.sort(key=lambda item: (item.due_day_iso, -int(item.lapses), int(item.last_score)))
+    for item in due_items:
+        closed = closed_topics.get(item.topic_key)
+        if closed is None:
+            continue
+        topic_def = _topic_definition_for_key(language=language, topic_key=item.topic_key)
+        if topic_def is None:
+            continue
+        preferred_level = max(1, min(current_level, int(closed.closed_level)))
+        card = _build_card_for_activity_with_level_fallback(
+            game_type=item.game_type,
+            language=language,
+            activity_id=item.item_id,
+            preferred_level=preferred_level,
+        )
+        _append_from_card(card, topic_def.topic_key, topic_def.title, "closed_due")
+        if len(questions) >= desired_count:
+            return questions[:desired_count]
+
+    # Current topic (to keep exam tied to ongoing lesson).
+    for game_type, activity_id in current_topic.daily_plan_for_level(current_level) + current_topic.extra_plan_for_level(current_level):
+        card = _build_card_for_activity(
+            game_type=game_type,
+            language=language,
+            level=current_level,
+            activity_id=activity_id,
+        )
+        _append_from_card(card, current_topic.topic_key, current_topic.title, "current_topic")
+        if len(questions) >= desired_count:
+            return questions[:desired_count]
+
+    # Closed-topic fallback from configured plans.
+    for closed in closed_topics.values():
+        topic_def = _topic_definition_for_key(language=language, topic_key=closed.topic_key)
+        if topic_def is None:
+            continue
+        level = max(1, min(current_level, int(closed.closed_level)))
+        plans = topic_def.daily_plan_for_level(level) + topic_def.extra_plan_for_level(level)
+        for game_type, activity_id in plans:
+            card = _build_card_for_activity(
+                game_type=game_type,
+                language=language,
+                level=level,
+                activity_id=activity_id,
+            )
+            _append_from_card(card, topic_def.topic_key, topic_def.title, "closed_fallback")
+            if len(questions) >= desired_count:
+                return questions[:desired_count]
+
+    # Final fallback: pull additional items from the active level pool to reach target size.
+    for game_type in registry.list_game_types():
+        service = game_services.get(game_type)
+        if service is None:
+            continue
+        for activity in service.get_activities(language=language, level=current_level):
+            card = _build_card_for_activity(
+                game_type=game_type,
+                language=language,
+                level=current_level,
+                activity_id=activity.activity_id,
+            )
+            _append_from_card(card, current_topic.topic_key, current_topic.title, "pool_fallback")
+            if len(questions) >= desired_count:
+                return questions[:desired_count]
+
+    return questions[:desired_count]
+
+
 def _extra_game_cards_metadata(
     *,
     daily_game_types: list[str],
@@ -855,6 +1225,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
     response["selected_game"] = selected_game
     response["available_games"] = available_cards
     response["all_games"] = all_cards
+    response["learning_contract"] = _learning_contract_payload(daily_required_games=len(daily_cards))
     logger.info(
         "daily_games_ready learner_id=%s language=%s topic=%s current_level=%s today_level=%s selected_game=%s daily=%s extras=%s available=%s all=%s lesson_completed=%s level_up_blocked=%s level_override_requested=%s",
         req.learner_id,
@@ -981,17 +1352,14 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
         )
         return {"error": f"Extra game not available: {game_type}"}
 
-    topic_extra_map = dict(topic.extra_plan_for_level(today_level))
-    preferred_activity_id = topic_extra_map.get(game_type)
-    if preferred_activity_id:
-        card = _build_card_for_activity(
-            game_type=game_type,
-            language=language,
-            level=today_level,
-            activity_id=preferred_activity_id,
-        )
-    else:
-        card = _build_card_for_game_type(game_type=game_type, language=language, level=today_level)
+    card, selection_source = _select_extra_card_for_game_type(
+        learner_id=learner_id,
+        language=language,
+        today_topic=topic,
+        today_level=today_level,
+        game_type=game_type,
+        today_iso=_today_iso,
+    )
 
     if card is None:
         logger.warning(
@@ -1004,10 +1372,12 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
         )
         return {"error": f"No activity available for extra game: {game_type}"}
 
+    card_topic_key = str(card.get("topic_key", topic.topic_key))
+    card_topic_title = _topic_title(language=language, topic_key=card_topic_key)
     try:
         ai_prompt_result = await openai_planner.generate_extra_game_prompt(
             language=language,
-            topic_title=topic.title,
+            topic_title=card_topic_title,
             game_type=game_type,
             level=today_level,
         )
@@ -1022,7 +1392,7 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
         )
         ai_prompt_result = {
             "source": "fallback",
-            "text": f"Topic: {topic.title}. Try this {game_type} activity at level {today_level}.",
+            "text": f"Topic: {card_topic_title}. Try this {game_type} activity at level {today_level}.",
         }
     ai_prompt = str(ai_prompt_result.get("text", "")).strip()
     if ai_prompt:
@@ -1030,13 +1400,15 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
     card["ai_generated_prompt"] = ai_prompt
     card["ai_prompt_source"] = ai_prompt_result.get("source", "fallback")
     logger.info(
-        "extra_game_loaded learner_id=%s language=%s topic=%s game_type=%s level=%s ai_source=%s",
+        "extra_game_loaded learner_id=%s language=%s topic=%s game_type=%s level=%s ai_source=%s selection_source=%s card_topic=%s",
         learner_id,
         language,
         topic.topic_key,
         game_type,
         today_level,
         card["ai_prompt_source"],
+        selection_source,
+        card_topic_key,
     )
     return {
         "card": card,
@@ -1195,12 +1567,194 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             "daily_progress": insights,
         }
 
+    questions = _weekly_exam_questions(
+        learner_id=learner_id,
+        language=language,
+        current_topic=topic,
+        current_level=current_level,
+        today_iso=today_iso,
+        question_count=req.question_count,
+    )
+    if not questions:
+        logger.warning(
+            "weekly_exam_questions_empty learner_id=%s language=%s topic=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+        )
+        return {
+            "error": "No weekly exam questions available yet.",
+            "daily_progress": insights,
+        }
+
+    # Two-step weekly exam:
+    # 1) Call without answers -> receive cumulative questions.
+    # 2) Submit answers -> receive score/pass result.
+    submitted_answers = list(req.answers or [])
+    if WEEKLY_EXAM_FORCE_LEGACY:
+        if submitted_answers:
+            logger.info(
+                "weekly_exam_legacy_answers_ignored learner_id=%s language=%s topic=%s answers=%s",
+                learner_id,
+                language,
+                topic.topic_key,
+                len(submitted_answers),
+            )
+        lesson_and_daily_done = bool(progress.lesson_completed) and len(base_daily["completed_daily_games"]) >= len(daily_game_types)
+        target_score = int(insights["topic_day_target_score"])
+        exam_score = int(req.exam_score) if req.exam_score is not None else int(base_daily["daily_score"])
+        failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
+        min_pass_score = max(120, int(round(target_score * 0.85)))
+        passed = bool(lesson_and_daily_done and exam_score >= min_pass_score and failure_total <= 16)
+        memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
+        refreshed_daily = _enrich_daily_progress_payload(
+            learner_id=learner_id,
+            language=language,
+            current_level=current_level,
+            topic_key=topic.topic_key,
+            today_iso=today_iso,
+            daily_progress=base_daily,
+        )
+        logger.info(
+            "weekly_exam_generated_legacy learner_id=%s language=%s topic=%s questions=%s passed=%s exam_score=%s min_pass=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            len(questions),
+            passed,
+            exam_score,
+            min_pass_score,
+        )
+        return {
+            "requires_answers": False,
+            "legacy_mode": True,
+            "passed": passed,
+            "exam_score": exam_score,
+            "min_pass_score": min_pass_score,
+            "question_count": len(questions),
+            "questions_preview": questions,
+            "feedback": (
+                "Weekly mini-exam passed in legacy mode."
+                if passed
+                else "Weekly mini-exam failed. Complete daily games and improve consistency before retrying next week."
+            ),
+            "daily_progress": refreshed_daily,
+        }
+
+    # Cumulative mode phase 1: return generated questions so the client can submit answers in a second call.
+    if not submitted_answers:
+        logger.info(
+            "weekly_exam_questions_generated_cumulative learner_id=%s language=%s topic=%s questions=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            len(questions),
+        )
+        return {
+            "requires_answers": True,
+            "legacy_mode": False,
+            "question_count": len(questions),
+            "questions": questions,
+            "daily_progress": insights,
+        }
+
+    question_by_id = {str(question["question_id"]): question for question in questions}
+    question_by_key = {
+        (
+            str(question["topic_key"]),
+            str(question["game_type"]),
+            str(question["item_id"]),
+        ): question
+        for question in questions
+    }
+    answer_results: list[dict[str, Any]] = []
+    raw_scores: list[int] = []
+    for answer in submitted_answers:
+        if not isinstance(answer, dict):
+            answer_results.append({"error": "Invalid answer format."})
+            raw_scores.append(0)
+            continue
+
+        answer_question = None
+        answer_question_id = str(answer.get("question_id", "")).strip()
+        if answer_question_id and answer_question_id in question_by_id:
+            answer_question = question_by_id[answer_question_id]
+        else:
+            answer_key = (
+                str(answer.get("topic_key", "")).strip(),
+                str(answer.get("game_type", "")).strip(),
+                str(answer.get("item_id", "")).strip(),
+            )
+            answer_question = question_by_key.get(answer_key)
+        if answer_question is None:
+            answer_results.append(
+                {
+                    "question_id": answer_question_id or None,
+                    "error": "Answer does not match any generated weekly exam question.",
+                    "score": 0,
+                }
+            )
+            raw_scores.append(0)
+            continue
+
+        game_type = str(answer_question["game_type"])
+        item_id = str(answer_question["item_id"])
+        answer_payload = dict(answer.get("payload") or {})
+        answer_payload.setdefault("item_id", item_id)
+        answer_payload.setdefault("topic_key", str(answer_question["topic_key"]))
+        level = int(answer_question.get("level", current_level) or current_level)
+
+        try:
+            result = _evaluate_game_payload(
+                game_type=game_type,
+                language=language,
+                level=level,
+                retry_count=0,
+                payload=answer_payload,
+            )
+        except ValueError as exc:
+            result = {"error": str(exc)}
+        except Exception:
+            logger.exception("weekly_exam_answer_unhandled learner_id=%s game_type=%s item_id=%s", learner_id, game_type, item_id)
+            result = {"error": "Internal error while evaluating weekly answer"}
+
+        question_score = 0
+        if isinstance(result, dict) and "score" in result:
+            try:
+                question_score = max(0, min(100, int(result.get("score", 0))))
+            except (TypeError, ValueError):
+                question_score = 0
+        raw_scores.append(question_score)
+
+        _update_item_review_state(
+            learner_id=learner_id,
+            language=language,
+            game_type=game_type,
+            item_id=item_id,
+            payload=answer_payload,
+            score=question_score,
+        )
+        answer_results.append(
+            {
+                "question_id": answer_question["question_id"],
+                "topic_key": answer_question["topic_key"],
+                "game_type": game_type,
+                "item_id": item_id,
+                "score": question_score,
+                "result": result,
+            }
+        )
+
+    score_count = max(1, len(raw_scores))
+    raw_average = sum(raw_scores) / score_count
+    exam_score = int(round((raw_average / 100.0) * 300.0))
+
     lesson_and_daily_done = bool(progress.lesson_completed) and len(base_daily["completed_daily_games"]) >= len(daily_game_types)
     target_score = int(insights["topic_day_target_score"])
-    exam_score = int(req.exam_score) if req.exam_score is not None else int(base_daily["daily_score"])
     failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
     min_pass_score = max(120, int(round(target_score * 0.85)))
-    passed = bool(lesson_and_daily_done and exam_score >= min_pass_score and failure_total <= 16)
+    answered_enough = len(answer_results) >= max(3, min(len(questions), 6))
+    passed = bool(lesson_and_daily_done and answered_enough and exam_score >= min_pass_score and failure_total <= 16)
 
     memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
     refreshed_daily = _enrich_daily_progress_payload(
@@ -1212,18 +1766,24 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
         daily_progress=base_daily,
     )
     logger.info(
-        "weekly_exam_done learner_id=%s language=%s topic=%s passed=%s exam_score=%s min_pass=%s",
+        "weekly_exam_done learner_id=%s language=%s topic=%s passed=%s exam_score=%s min_pass=%s questions=%s answered=%s",
         learner_id,
         language,
         topic.topic_key,
         passed,
         exam_score,
         min_pass_score,
+        len(questions),
+        len(answer_results),
     )
     return {
+        "requires_answers": False,
         "passed": passed,
         "exam_score": exam_score,
         "min_pass_score": min_pass_score,
+        "question_count": len(questions),
+        "answers_evaluated": len(answer_results),
+        "answer_results": answer_results,
         "feedback": (
             "Weekly mini-exam passed. You can keep building toward the level exam."
             if passed
@@ -1594,6 +2154,115 @@ def _mark_daily_game_progress(
     )
 
 
+def _evaluate_game_payload(
+    *,
+    game_type: str,
+    language: str,
+    level: int,
+    retry_count: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    service = game_services.get(game_type)
+    if service is None:
+        return {"error": f"Unsupported game: {game_type}"}
+
+    if game_type == GAME_TYPE_GRAMMAR_PARTICLE_FIX:
+        return service.evaluate_attempt(
+            GrammarParticleAttempt(
+                language=language,
+                item_id=payload.get("item_id", ""),
+                selected_particle=payload.get("selected_particle", ""),
+                level=level,
+            )
+        )
+    if game_type == GAME_TYPE_SENTENCE_ORDER:
+        result = service.evaluate_attempt(
+            SentenceOrderAttempt(
+                language=language,
+                item_id=payload.get("item_id", ""),
+                ordered_tokens_by_user=payload.get("ordered_tokens_by_user", []),
+                level=level,
+            )
+        )
+        placement_penalty = max(0, min(100, int(payload.get("sentence_order_penalty", 0) or 0)))
+        base_score = int(result.get("score", 0))
+        result["sentence_order_penalty"] = placement_penalty
+        result["score"] = max(0, base_score - placement_penalty)
+        return result
+    if game_type == GAME_TYPE_LISTENING_GAP_FILL:
+        return service.evaluate_attempt(
+            ListeningGapFillAttempt(
+                language=language,
+                item_id=payload.get("item_id", ""),
+                user_gap_tokens=payload.get("user_gap_tokens", []),
+                level=level,
+            )
+        )
+    if game_type == GAME_TYPE_MORA_ROMANIZATION:
+        return service.evaluate_attempt(
+            MoraRomanizationAttempt(
+                language=language,
+                item_id=payload.get("item_id", ""),
+                user_romanized_text=payload.get("user_romanized_text", ""),
+                level=level,
+            )
+        )
+    if game_type == GAME_TYPE_CONTEXT_QUIZ:
+        return service.evaluate_attempt(
+            ContextQuizAttempt(
+                language=language,
+                item_id=payload.get("item_id", ""),
+                selected_option_id=payload.get("selected_option_id", ""),
+                level=level,
+            )
+        )
+    if game_type == GAME_TYPE_KANJI_MATCH:
+        pairs = service.get_pairs(language=language, level=level)
+        return service.evaluate_attempt(
+            KanjiMatchAttempt(
+                language=language,
+                expected_pairs=pairs,
+                learner_readings=payload.get("learner_readings", {}),
+                learner_meanings=payload.get("learner_meanings", payload.get("learner_matches", {})),
+                learner_matches=payload.get("learner_matches", {}),
+                level=level,
+            )
+        )
+    if game_type == ALIAS_GAME_TYPE_KANA_SPEED_ROUND:
+        return service.evaluate_attempt(
+            ScriptSpeedAttempt(
+                language=language,
+                sequence_expected=payload.get("sequence_expected", []),
+                sequence_read=payload.get("sequence_read", []),
+                elapsed_seconds=float(payload.get("elapsed_seconds", 1.0)),
+                level=level,
+                expected_text=payload.get("expected_text", ""),
+                recognized_text=payload.get("recognized_text", ""),
+                audio_duration_seconds=float(payload.get("audio_duration_seconds", payload.get("elapsed_seconds", 1.0))),
+                speech_seconds=float(payload.get("speech_seconds", payload.get("elapsed_seconds", 1.0))),
+                pause_seconds=float(payload.get("pause_seconds", 0.2)),
+                pitch_track_hz=payload.get("pitch_track_hz", [150.0, 149.0, 151.0]),
+                retry_count=retry_count,
+            )
+        )
+    if game_type == GAME_TYPE_PRONUNCIATION_MATCH:
+        return service.evaluate_attempt(
+            PronunciationMatchAttempt(
+                language=language,
+                expected_text=payload.get("expected_text", ""),
+                recognized_text=payload.get("recognized_text", ""),
+                audio_duration_seconds=float(payload.get("audio_duration_seconds", 2.0)),
+                speech_seconds=float(payload.get("speech_seconds", 1.8)),
+                pause_seconds=float(payload.get("pause_seconds", 0.2)),
+                pitch_track_hz=payload.get("pitch_track_hz", [150.0, 151.0, 149.0]),
+                item_id=payload.get("item_id", ""),
+                level=level,
+                retry_count=retry_count,
+            )
+        )
+    return {"error": f"Evaluation not implemented for: {game_type}"}
+
+
 @app.post("/api/games/evaluate")
 def evaluate_game(req: GameEvaluateRequest) -> dict:
     logger.info(
@@ -1605,107 +2274,14 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
         req.retry_count,
         ",".join(sorted(req.payload.keys())),
     )
-    service = game_services.get(req.game_type)
-    if service is None:
-        logger.warning("game_eval_unsupported game_type=%s", req.game_type)
-        return {"error": f"Unsupported game: {req.game_type}"}
-
     try:
-        if req.game_type == GAME_TYPE_GRAMMAR_PARTICLE_FIX:
-            result = service.evaluate_attempt(
-                GrammarParticleAttempt(
-                    language=req.language,
-                    item_id=req.payload.get("item_id", ""),
-                    selected_particle=req.payload.get("selected_particle", ""),
-                    level=req.level,
-                )
-            )
-        elif req.game_type == GAME_TYPE_SENTENCE_ORDER:
-            result = service.evaluate_attempt(
-                SentenceOrderAttempt(
-                    language=req.language,
-                    item_id=req.payload.get("item_id", ""),
-                    ordered_tokens_by_user=req.payload.get("ordered_tokens_by_user", []),
-                    level=req.level,
-                )
-            )
-            placement_penalty = max(0, min(100, int(req.payload.get("sentence_order_penalty", 0) or 0)))
-            base_score = int(result.get("score", 0))
-            result["sentence_order_penalty"] = placement_penalty
-            result["score"] = max(0, base_score - placement_penalty)
-        elif req.game_type == GAME_TYPE_LISTENING_GAP_FILL:
-            result = service.evaluate_attempt(
-                ListeningGapFillAttempt(
-                    language=req.language,
-                    item_id=req.payload.get("item_id", ""),
-                    user_gap_tokens=req.payload.get("user_gap_tokens", []),
-                    level=req.level,
-                )
-            )
-        elif req.game_type == GAME_TYPE_MORA_ROMANIZATION:
-            result = service.evaluate_attempt(
-                MoraRomanizationAttempt(
-                    language=req.language,
-                    item_id=req.payload.get("item_id", ""),
-                    user_romanized_text=req.payload.get("user_romanized_text", ""),
-                    level=req.level,
-                )
-            )
-        elif req.game_type == GAME_TYPE_CONTEXT_QUIZ:
-            result = service.evaluate_attempt(
-                ContextQuizAttempt(
-                    language=req.language,
-                    item_id=req.payload.get("item_id", ""),
-                    selected_option_id=req.payload.get("selected_option_id", ""),
-                    level=req.level,
-                )
-            )
-        elif req.game_type == GAME_TYPE_KANJI_MATCH:
-            pairs = service.get_pairs(language=req.language, level=req.level)
-            result = service.evaluate_attempt(
-                KanjiMatchAttempt(
-                    language=req.language,
-                    expected_pairs=pairs,
-                    learner_readings=req.payload.get("learner_readings", {}),
-                    learner_meanings=req.payload.get("learner_meanings", req.payload.get("learner_matches", {})),
-                    learner_matches=req.payload.get("learner_matches", {}),
-                    level=req.level,
-                )
-            )
-        elif req.game_type == ALIAS_GAME_TYPE_KANA_SPEED_ROUND:
-            result = service.evaluate_attempt(
-                ScriptSpeedAttempt(
-                    language=req.language,
-                    sequence_expected=req.payload.get("sequence_expected", []),
-                    sequence_read=req.payload.get("sequence_read", []),
-                    elapsed_seconds=float(req.payload.get("elapsed_seconds", 1.0)),
-                    level=req.level,
-                    expected_text=req.payload.get("expected_text", ""),
-                    recognized_text=req.payload.get("recognized_text", ""),
-                    audio_duration_seconds=float(req.payload.get("audio_duration_seconds", req.payload.get("elapsed_seconds", 1.0))),
-                    speech_seconds=float(req.payload.get("speech_seconds", req.payload.get("elapsed_seconds", 1.0))),
-                    pause_seconds=float(req.payload.get("pause_seconds", 0.2)),
-                    pitch_track_hz=req.payload.get("pitch_track_hz", [150.0, 149.0, 151.0]),
-                    retry_count=req.retry_count,
-                )
-            )
-        elif req.game_type == GAME_TYPE_PRONUNCIATION_MATCH:
-            result = service.evaluate_attempt(
-                PronunciationMatchAttempt(
-                    language=req.language,
-                    expected_text=req.payload.get("expected_text", ""),
-                    recognized_text=req.payload.get("recognized_text", ""),
-                    audio_duration_seconds=float(req.payload.get("audio_duration_seconds", 2.0)),
-                    speech_seconds=float(req.payload.get("speech_seconds", 1.8)),
-                    pause_seconds=float(req.payload.get("pause_seconds", 0.2)),
-                    pitch_track_hz=req.payload.get("pitch_track_hz", [150.0, 151.0, 149.0]),
-                    item_id=req.payload.get("item_id", ""),
-                    level=req.level,
-                    retry_count=req.retry_count,
-                )
-            )
-        else:
-            result = {"error": f"Evaluation not implemented for: {req.game_type}"}
+        result = _evaluate_game_payload(
+            game_type=req.game_type,
+            language=req.language,
+            level=req.level,
+            retry_count=req.retry_count,
+            payload=req.payload,
+        )
     except ValueError as exc:
         logger.warning("game_eval_invalid game_type=%s detail=%s", req.game_type, str(exc))
         return {"error": str(exc)}
@@ -1717,13 +2293,24 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
         logger.warning("game_eval_error game_type=%s detail=%s", req.game_type, result["error"])
     else:
         item_id = str(req.payload.get("item_id", "")).strip()
+        result_score = None
+        if isinstance(result, dict) and "score" in result:
+            try:
+                result_score = int(result.get("score"))
+            except (TypeError, ValueError):
+                result_score = None
+
+        if item_id and result_score is not None and not req.review_mode:
+            _update_item_review_state(
+                learner_id=req.learner_id,
+                language=req.language,
+                game_type=req.game_type,
+                item_id=item_id,
+                payload=req.payload,
+                score=result_score,
+            )
+
         if item_id and not req.review_mode:
-            result_score = None
-            if isinstance(result, dict) and "score" in result:
-                try:
-                    result_score = int(result.get("score"))
-                except (TypeError, ValueError):
-                    result_score = None
             result_success = _is_success_result(result) if isinstance(result, dict) else None
             daily_progress = _mark_daily_game_progress(
                 learner_id=req.learner_id,
