@@ -1492,28 +1492,177 @@ async function exitReviewMode() {
   await loadDailyGame();
 }
 
+function parseMoraRomajiFromPrompt(prompt) {
+  const lines = String(prompt || '').split(/\r?\n/);
+  const target = lines.find((line) => /^Mora \(romaji\):/i.test(line.trim()));
+  if (!target) return [];
+  const raw = target.split(':').slice(1).join(':').trim();
+  if (!raw) return [];
+  return raw.split(/\s+/).map((token) => token.trim()).filter(Boolean);
+}
+
+function buildWeeklyExamAnswerPayload(question) {
+  const payload = {};
+  const source = (question && question.payload) || {};
+  const gameType = String((question && question.game_type) || '');
+  const itemId = String((question && question.item_id) || source.item_id || '').trim();
+  if (itemId) {
+    payload.item_id = itemId;
+  }
+
+  if (gameType === 'sentence_order') {
+    payload.ordered_tokens_by_user = Array.isArray(source.ordered_tokens) ? source.ordered_tokens : [];
+    return payload;
+  }
+
+  if (gameType === 'listening_gap_fill') {
+    const tokens = Array.isArray(source.tokens) ? source.tokens : [];
+    const positions = Array.isArray(source.gap_positions) ? source.gap_positions : [];
+    payload.user_gap_tokens = positions
+      .map((position) => Number(position))
+      .filter((position) => Number.isInteger(position) && position >= 0 && position < tokens.length)
+      .map((position) => String(tokens[position] || '').trim())
+      .filter(Boolean);
+    return payload;
+  }
+
+  if (gameType === 'mora_romanization') {
+    const moraTokens = Array.isArray(source.mora_romaji_tokens) ? source.mora_romaji_tokens : parseMoraRomajiFromPrompt(question?.prompt);
+    payload.user_romanized_text = moraTokens.join(' ');
+    return payload;
+  }
+
+  if (gameType === 'context_quiz') {
+    const options = Array.isArray(source.options) ? source.options : [];
+    const firstOption = options.find((opt) => opt && typeof opt.id === 'string');
+    payload.selected_option_id = firstOption ? firstOption.id : '';
+    return payload;
+  }
+
+  if (gameType === 'grammar_particle_fix') {
+    const options = Array.isArray(source.options) ? source.options : [];
+    payload.selected_particle = options.length > 0 ? String(options[0]) : '';
+    return payload;
+  }
+
+  if (gameType === 'kanji_match') {
+    const pairs = Array.isArray(source.pairs) ? source.pairs : [];
+    const learnerReadings = {};
+    const learnerMeanings = {};
+    pairs.forEach((pair) => {
+      const symbol = String((pair && pair.symbol) || '').trim();
+      if (!symbol) return;
+      learnerReadings[symbol] = String((pair && pair.reading_romaji) || '').trim();
+      learnerMeanings[symbol] = String((pair && pair.meaning) || '').trim();
+    });
+    payload.learner_readings = learnerReadings;
+    payload.learner_meanings = learnerMeanings;
+    payload.learner_matches = learnerMeanings;
+    return payload;
+  }
+
+  if (gameType === 'pronunciation_match') {
+    const expectedText = String(source.expected_text || question?.prompt || '').trim();
+    payload.expected_text = expectedText;
+    payload.recognized_text = expectedText;
+    payload.audio_duration_seconds = 2.0;
+    payload.speech_seconds = 2.0;
+    payload.pause_seconds = 0.2;
+    payload.pitch_track_hz = [150.0, 151.0, 149.0];
+    return payload;
+  }
+
+  if (gameType === 'kana_speed_round') {
+    const expectedText = String(source.expected_text || '').trim();
+    payload.expected_text = expectedText;
+    payload.recognized_text = expectedText;
+    payload.sequence_expected = parseTokenList(expectedText, ' ');
+    payload.sequence_read = parseTokenList(expectedText, ' ');
+    payload.elapsed_seconds = KANA_DEFAULT_ELAPSED_SECONDS;
+    payload.audio_duration_seconds = KANA_DEFAULT_ELAPSED_SECONDS;
+    payload.speech_seconds = KANA_DEFAULT_ELAPSED_SECONDS;
+    payload.pause_seconds = 0.2;
+    payload.pitch_track_hz = [150.0, 149.0, 151.0];
+    return payload;
+  }
+
+  return payload;
+}
+
 async function takeWeeklyExam() {
-  const res = await fetch(apiUrl('api/exams/weekly'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      learner_id: learnerId,
-      language: currentLanguage,
-      topic_key: (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '',
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok || data.error) {
-    window.alert(data.error || 'Weekly mini-exam request failed.');
-  } else {
-    window.alert(data.feedback || 'Weekly mini-exam completed.');
+  const weeklyExamBtn = document.getElementById('weekly-exam-btn');
+  if (weeklyExamBtn) {
+    weeklyExamBtn.disabled = true;
   }
-  if (data.daily_progress) {
-    dailyProgress = data.daily_progress;
+  try {
+    const topicKey = (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '';
+    const firstRes = await fetch(apiUrl('api/exams/weekly'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        learner_id: learnerId,
+        language: currentLanguage,
+        topic_key: topicKey,
+        mode: 'cumulative',
+      }),
+    });
+    const firstData = await firstRes.json();
+    if (!firstRes.ok || firstData.error) {
+      window.alert(firstData.error || 'Weekly mini-exam request failed.');
+      if (firstData.daily_progress) {
+        dailyProgress = firstData.daily_progress;
+      }
+      return;
+    }
+
+    if (firstData.daily_progress) {
+      dailyProgress = firstData.daily_progress;
+    }
+
+    if (!firstData.requires_answers) {
+      window.alert(firstData.feedback || 'Weekly mini-exam completed.');
+      return;
+    }
+
+    const questions = Array.isArray(firstData.questions) ? firstData.questions : [];
+    if (questions.length === 0) {
+      window.alert('Weekly mini-exam could not start: no questions generated.');
+      return;
+    }
+
+    // Cumulative mode: build answer payloads from generated question cards and submit in a second call.
+    const answers = questions.map((question) => ({
+      question_id: question.question_id,
+      payload: buildWeeklyExamAnswerPayload(question),
+    }));
+    const secondRes = await fetch(apiUrl('api/exams/weekly'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        learner_id: learnerId,
+        language: currentLanguage,
+        topic_key: topicKey,
+        mode: 'cumulative',
+        answers,
+      }),
+    });
+    const secondData = await secondRes.json();
+    if (!secondRes.ok || secondData.error) {
+      window.alert(secondData.error || 'Weekly mini-exam submission failed.');
+      if (secondData.daily_progress) {
+        dailyProgress = secondData.daily_progress;
+      }
+      return;
+    }
+    if (secondData.daily_progress) {
+      dailyProgress = secondData.daily_progress;
+    }
+    window.alert(secondData.feedback || 'Weekly mini-exam completed.');
+  } finally {
+    updateTopbar();
+    renderSingleGame(selectedGame);
+    wireGameActions();
   }
-  updateTopbar();
-  renderSingleGame(selectedGame);
-  wireGameActions();
 }
 
 async function takeLevelExam() {

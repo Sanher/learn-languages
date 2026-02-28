@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -45,6 +46,10 @@ class DailyTopicProgress:
     topic_key: str
     lesson_completed: int
     completed_daily_games_json: str
+    level_state: int
+    daily_score: int
+    daily_game_scores_json: str
+    daily_game_failures_json: str
 
     def completed_daily_games(self) -> list[str]:
         raw = self.completed_daily_games_json.strip()
@@ -55,6 +60,88 @@ class DailyTopicProgress:
         except json.JSONDecodeError:
             return []
         return [str(item) for item in parsed if str(item).strip()]
+
+    def daily_game_scores(self) -> dict[str, int]:
+        raw = self.daily_game_scores_json.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        scores: dict[str, int] = {}
+        for game_type, value in parsed.items():
+            try:
+                scores[str(game_type)] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return scores
+
+    def daily_game_failures(self) -> dict[str, int]:
+        raw = self.daily_game_failures_json.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        failures: dict[str, int] = {}
+        for game_type, value in parsed.items():
+            try:
+                failures[str(game_type)] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return failures
+
+
+@dataclass
+class LearnerAssessmentState:
+    learner_id: str
+    weekly_exam_last_day_iso: str
+    weekly_exam_passed_count: int
+    level_exams_passed_json: str
+
+    def level_exams_passed(self) -> dict[str, int]:
+        raw = self.level_exams_passed_json.strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        result: dict[str, int] = {}
+        for key, value in parsed.items():
+            try:
+                result[str(key)] = int(value)
+            except (TypeError, ValueError):
+                continue
+        return result
+
+
+@dataclass
+class ClosedTopic:
+    learner_id: str
+    language: str
+    topic_key: str
+    closed_day_iso: str
+    closed_level: int
+    reason: str
+
+
+@dataclass
+class ItemReviewState:
+    learner_id: str
+    language: str
+    topic_key: str
+    game_type: str
+    item_id: str
+    due_day_iso: str
+    interval_days: int
+    ease: float
+    repetitions: int
+    lapses: int
+    last_score: int
+    last_seen_day_iso: str
 
 
 class ProgressMemory:
@@ -104,11 +191,82 @@ class ProgressMemory:
                     topic_key TEXT NOT NULL,
                     lesson_completed INTEGER NOT NULL DEFAULT 0,
                     completed_daily_games_json TEXT NOT NULL DEFAULT '[]',
+                    level_state INTEGER NOT NULL DEFAULT 1,
+                    daily_score INTEGER NOT NULL DEFAULT 0,
+                    daily_game_scores_json TEXT NOT NULL DEFAULT '{}',
+                    daily_game_failures_json TEXT NOT NULL DEFAULT '{}',
                     PRIMARY KEY (learner_id, day_iso, language, topic_key)
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learner_assessment_state (
+                    learner_id TEXT PRIMARY KEY,
+                    weekly_exam_last_day_iso TEXT NOT NULL DEFAULT '',
+                    weekly_exam_passed_count INTEGER NOT NULL DEFAULT 0,
+                    level_exams_passed_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS closed_topics (
+                    learner_id TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    topic_key TEXT NOT NULL,
+                    closed_day_iso TEXT NOT NULL,
+                    closed_level INTEGER NOT NULL DEFAULT 1,
+                    reason TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (learner_id, language, topic_key)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS item_review_state (
+                    learner_id TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    topic_key TEXT NOT NULL,
+                    game_type TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    due_day_iso TEXT NOT NULL,
+                    interval_days INTEGER NOT NULL DEFAULT 1,
+                    ease REAL NOT NULL DEFAULT 2.5,
+                    repetitions INTEGER NOT NULL DEFAULT 0,
+                    lapses INTEGER NOT NULL DEFAULT 0,
+                    last_score INTEGER NOT NULL DEFAULT 0,
+                    last_seen_day_iso TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (learner_id, language, topic_key, game_type, item_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_item_review_due
+                ON item_review_state (learner_id, language, due_day_iso)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_item_review_topic_due
+                ON item_review_state (learner_id, language, topic_key, due_day_iso)
+                """
+            )
+            # Backward-compatible migrations for existing addon databases.
+            self._ensure_column(conn, "daily_topic_progress", "level_state", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(conn, "daily_topic_progress", "daily_score", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "daily_topic_progress", "daily_game_scores_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "daily_topic_progress", "daily_game_failures_json", "TEXT NOT NULL DEFAULT '{}'")
         logger.info("memory_schema_ready db_path=%s", self.db_path)
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_ddl: str) -> None:
+        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column in columns:
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_ddl}")
+        logger.info("memory_schema_column_added table=%s column=%s", table, column)
 
     def load_or_create(self, learner_id: str) -> LearnerState:
         with self._conn() as conn:
@@ -222,7 +380,8 @@ class ProgressMemory:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json
+                SELECT learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json,
+                       level_state, daily_score, daily_game_scores_json, daily_game_failures_json
                 FROM daily_topic_progress
                 WHERE learner_id = ? AND day_iso = ? AND language = ? AND topic_key = ?
                 """,
@@ -241,9 +400,10 @@ class ProgressMemory:
             conn.execute(
                 """
                 INSERT INTO daily_topic_progress (
-                    learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json
+                    learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json,
+                    level_state, daily_score, daily_game_scores_json, daily_game_failures_json
                 )
-                VALUES (?, ?, ?, ?, 0, '[]')
+                VALUES (?, ?, ?, ?, 0, '[]', 1, 0, '{}', '{}')
                 """,
                 (learner_id, day_iso, language, topic_key),
             )
@@ -261,6 +421,10 @@ class ProgressMemory:
                 topic_key=topic_key,
                 lesson_completed=0,
                 completed_daily_games_json="[]",
+                level_state=1,
+                daily_score=0,
+                daily_game_scores_json="{}",
+                daily_game_failures_json="{}",
             )
 
     def mark_lesson_completed(
@@ -299,6 +463,10 @@ class ProgressMemory:
             topic_key=progress.topic_key,
             lesson_completed=1,
             completed_daily_games_json=progress.completed_daily_games_json,
+            level_state=progress.level_state,
+            daily_score=progress.daily_score,
+            daily_game_scores_json=progress.daily_game_scores_json,
+            daily_game_failures_json=progress.daily_game_failures_json,
         )
 
     def mark_daily_game_completed(
@@ -347,4 +515,540 @@ class ProgressMemory:
             topic_key=progress.topic_key,
             lesson_completed=progress.lesson_completed,
             completed_daily_games_json=completed_json,
+            level_state=progress.level_state,
+            daily_score=progress.daily_score,
+            daily_game_scores_json=progress.daily_game_scores_json,
+            daily_game_failures_json=progress.daily_game_failures_json,
         )
+
+    def set_daily_level_state(
+        self,
+        learner_id: str,
+        day_iso: str,
+        language: str,
+        topic_key: str,
+        level_state: int,
+    ) -> DailyTopicProgress:
+        progress = self.load_or_create_daily_topic_progress(
+            learner_id=learner_id,
+            day_iso=day_iso,
+            language=language,
+            topic_key=topic_key,
+        )
+        normalized = int(max(1, level_state))
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE daily_topic_progress
+                SET level_state = ?
+                WHERE learner_id = ? AND day_iso = ? AND language = ? AND topic_key = ?
+                """,
+                (normalized, learner_id, day_iso, language, topic_key),
+            )
+        logger.info(
+            "daily_level_state_saved learner_id=%s day=%s language=%s topic=%s level_state=%s",
+            learner_id,
+            day_iso,
+            language,
+            topic_key,
+            normalized,
+        )
+        return DailyTopicProgress(
+            learner_id=progress.learner_id,
+            day_iso=progress.day_iso,
+            language=progress.language,
+            topic_key=progress.topic_key,
+            lesson_completed=progress.lesson_completed,
+            completed_daily_games_json=progress.completed_daily_games_json,
+            level_state=normalized,
+            daily_score=progress.daily_score,
+            daily_game_scores_json=progress.daily_game_scores_json,
+            daily_game_failures_json=progress.daily_game_failures_json,
+        )
+
+    def upsert_daily_game_score(
+        self,
+        learner_id: str,
+        day_iso: str,
+        language: str,
+        topic_key: str,
+        game_type: str,
+        score: int,
+        allowed_daily_games: list[str],
+        max_total_score: int = 300,
+    ) -> DailyTopicProgress:
+        progress = self.load_or_create_daily_topic_progress(
+            learner_id=learner_id,
+            day_iso=day_iso,
+            language=language,
+            topic_key=topic_key,
+        )
+        normalized_score = max(0, min(100, int(score)))
+        scores = progress.daily_game_scores()
+        filtered_scores = {game: int(scores.get(game, 0)) for game in allowed_daily_games}
+        filtered_scores[game_type] = normalized_score
+        total = min(max_total_score, sum(max(0, min(100, int(value))) for value in filtered_scores.values()))
+        scores_json = json.dumps(filtered_scores, ensure_ascii=False)
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE daily_topic_progress
+                SET daily_score = ?,
+                    daily_game_scores_json = ?
+                WHERE learner_id = ? AND day_iso = ? AND language = ? AND topic_key = ?
+                """,
+                (int(total), scores_json, learner_id, day_iso, language, topic_key),
+            )
+        logger.info(
+            "daily_score_saved learner_id=%s day=%s language=%s topic=%s total=%s game_type=%s game_score=%s",
+            learner_id,
+            day_iso,
+            language,
+            topic_key,
+            total,
+            game_type,
+            normalized_score,
+        )
+        return DailyTopicProgress(
+            learner_id=progress.learner_id,
+            day_iso=progress.day_iso,
+            language=progress.language,
+            topic_key=progress.topic_key,
+            lesson_completed=progress.lesson_completed,
+            completed_daily_games_json=progress.completed_daily_games_json,
+            level_state=progress.level_state,
+            daily_score=int(total),
+            daily_game_scores_json=scores_json,
+            daily_game_failures_json=progress.daily_game_failures_json,
+        )
+
+    def increment_daily_game_failure(
+        self,
+        learner_id: str,
+        day_iso: str,
+        language: str,
+        topic_key: str,
+        game_type: str,
+        increment: int = 1,
+    ) -> DailyTopicProgress:
+        progress = self.load_or_create_daily_topic_progress(
+            learner_id=learner_id,
+            day_iso=day_iso,
+            language=language,
+            topic_key=topic_key,
+        )
+        amount = max(1, int(increment))
+        failures = progress.daily_game_failures()
+        failures[game_type] = int(failures.get(game_type, 0)) + amount
+        failures_json = json.dumps(failures, ensure_ascii=False)
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE daily_topic_progress
+                SET daily_game_failures_json = ?
+                WHERE learner_id = ? AND day_iso = ? AND language = ? AND topic_key = ?
+                """,
+                (failures_json, learner_id, day_iso, language, topic_key),
+            )
+        logger.info(
+            "daily_game_failure_saved learner_id=%s day=%s language=%s topic=%s game_type=%s total_failures=%s",
+            learner_id,
+            day_iso,
+            language,
+            topic_key,
+            game_type,
+            failures[game_type],
+        )
+        return DailyTopicProgress(
+            learner_id=progress.learner_id,
+            day_iso=progress.day_iso,
+            language=progress.language,
+            topic_key=progress.topic_key,
+            lesson_completed=progress.lesson_completed,
+            completed_daily_games_json=progress.completed_daily_games_json,
+            level_state=progress.level_state,
+            daily_score=progress.daily_score,
+            daily_game_scores_json=progress.daily_game_scores_json,
+            daily_game_failures_json=failures_json,
+        )
+
+    def aggregate_topic_failures(self, learner_id: str, language: str, topic_key: str) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT daily_game_failures_json
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND topic_key = ?
+                """,
+                (learner_id, language, topic_key),
+            ).fetchall()
+        for row in rows:
+            raw = str(row[0] or "").strip()
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            for game_type, value in parsed.items():
+                try:
+                    totals[str(game_type)] = int(totals.get(str(game_type), 0)) + int(value)
+                except (TypeError, ValueError):
+                    continue
+        return totals
+
+    def count_days_on_topic(self, learner_id: str, language: str, topic_key: str) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND topic_key = ?
+                """,
+                (learner_id, language, topic_key),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def count_high_score_days(self, learner_id: str, language: str, threshold: int = 240) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND daily_score >= ?
+                """,
+                (learner_id, language, int(threshold)),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def retention_ratio(
+        self,
+        learner_id: str,
+        language: str,
+        topic_key: str,
+        current_day_iso: str,
+        gap_days: int = 3,
+    ) -> float | None:
+        try:
+            current_day = date.fromisoformat(current_day_iso)
+        except ValueError:
+            return None
+        cutoff = (current_day - timedelta(days=max(1, gap_days))).isoformat()
+
+        with self._conn() as conn:
+            current_row = conn.execute(
+                """
+                SELECT day_iso, daily_score
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND topic_key = ? AND day_iso <= ?
+                ORDER BY day_iso DESC
+                LIMIT 1
+                """,
+                (learner_id, language, topic_key, current_day_iso),
+            ).fetchone()
+            if not current_row:
+                return None
+            previous_row = conn.execute(
+                """
+                SELECT day_iso, daily_score
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND topic_key = ? AND day_iso <= ?
+                ORDER BY day_iso DESC
+                LIMIT 1
+                """,
+                (learner_id, language, topic_key, cutoff),
+            ).fetchone()
+
+        if not previous_row:
+            return None
+        current_score = float(current_row[1] or 0)
+        previous_score = float(previous_row[1] or 0)
+        if previous_score <= 0:
+            return None
+        ratio = max(0.0, min(200.0, (current_score / previous_score) * 100.0))
+        return round(ratio, 1)
+
+    def load_or_create_assessment_state(self, learner_id: str) -> LearnerAssessmentState:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT learner_id, weekly_exam_last_day_iso, weekly_exam_passed_count, level_exams_passed_json
+                FROM learner_assessment_state
+                WHERE learner_id = ?
+                """,
+                (learner_id,),
+            ).fetchone()
+            if row:
+                return LearnerAssessmentState(*row)
+            conn.execute(
+                """
+                INSERT INTO learner_assessment_state (
+                    learner_id, weekly_exam_last_day_iso, weekly_exam_passed_count, level_exams_passed_json
+                )
+                VALUES (?, '', 0, '{}')
+                """,
+                (learner_id,),
+            )
+        logger.info("assessment_state_created learner_id=%s", learner_id)
+        return LearnerAssessmentState(
+            learner_id=learner_id,
+            weekly_exam_last_day_iso="",
+            weekly_exam_passed_count=0,
+            level_exams_passed_json="{}",
+        )
+
+    def save_weekly_exam_result(self, learner_id: str, day_iso: str, passed: bool) -> LearnerAssessmentState:
+        state = self.load_or_create_assessment_state(learner_id)
+        passed_count = int(state.weekly_exam_passed_count) + (1 if passed else 0)
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE learner_assessment_state
+                SET weekly_exam_last_day_iso = ?,
+                    weekly_exam_passed_count = ?
+                WHERE learner_id = ?
+                """,
+                (day_iso, passed_count, learner_id),
+            )
+        logger.info(
+            "weekly_exam_saved learner_id=%s day=%s passed=%s passed_count=%s",
+            learner_id,
+            day_iso,
+            passed,
+            passed_count,
+        )
+        return LearnerAssessmentState(
+            learner_id=learner_id,
+            weekly_exam_last_day_iso=day_iso,
+            weekly_exam_passed_count=passed_count,
+            level_exams_passed_json=state.level_exams_passed_json,
+        )
+
+    def mark_level_exam_passed(self, learner_id: str, language: str, from_level: int, to_level: int) -> LearnerAssessmentState:
+        state = self.load_or_create_assessment_state(learner_id)
+        passed_map = state.level_exams_passed()
+        key = f"{language}:{from_level}->{to_level}"
+        passed_map[key] = 1
+        passed_json = json.dumps(passed_map, ensure_ascii=False)
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE learner_assessment_state
+                SET level_exams_passed_json = ?
+                WHERE learner_id = ?
+                """,
+                (passed_json, learner_id),
+            )
+        logger.info(
+            "level_exam_marked learner_id=%s transition=%s",
+            learner_id,
+            key,
+        )
+        return LearnerAssessmentState(
+            learner_id=state.learner_id,
+            weekly_exam_last_day_iso=state.weekly_exam_last_day_iso,
+            weekly_exam_passed_count=state.weekly_exam_passed_count,
+            level_exams_passed_json=passed_json,
+        )
+
+    def level_exam_passed(self, learner_id: str, language: str, from_level: int, to_level: int) -> bool:
+        state = self.load_or_create_assessment_state(learner_id)
+        key = f"{language}:{from_level}->{to_level}"
+        return int(state.level_exams_passed().get(key, 0)) > 0
+
+    def mark_topic_closed(
+        self,
+        learner_id: str,
+        language: str,
+        topic_key: str,
+        closed_day_iso: str,
+        closed_level: int,
+        reason: str,
+    ) -> None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT closed_level
+                FROM closed_topics
+                WHERE learner_id = ? AND language = ? AND topic_key = ?
+                """,
+                (learner_id, language, topic_key),
+            ).fetchone()
+            if row:
+                next_level = max(int(row[0]), int(closed_level))
+                conn.execute(
+                    """
+                    UPDATE closed_topics
+                    SET closed_day_iso = ?, closed_level = ?, reason = ?
+                    WHERE learner_id = ? AND language = ? AND topic_key = ?
+                    """,
+                    (closed_day_iso, next_level, reason, learner_id, language, topic_key),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO closed_topics (
+                        learner_id, language, topic_key, closed_day_iso, closed_level, reason
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (learner_id, language, topic_key, closed_day_iso, int(closed_level), reason),
+                )
+        logger.info(
+            "topic_closed_saved learner_id=%s language=%s topic=%s level=%s reason=%s",
+            learner_id,
+            language,
+            topic_key,
+            closed_level,
+            reason,
+        )
+
+    def list_closed_topics(self, learner_id: str, language: str) -> list[ClosedTopic]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT learner_id, language, topic_key, closed_day_iso, closed_level, reason
+                FROM closed_topics
+                WHERE learner_id = ? AND language = ?
+                ORDER BY closed_day_iso DESC
+                """,
+                (learner_id, language),
+            ).fetchall()
+        return [ClosedTopic(*row) for row in rows]
+
+    def count_closed_topics(self, learner_id: str, language: str) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM closed_topics
+                WHERE learner_id = ? AND language = ?
+                """,
+                (learner_id, language),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def load_item_review_state(
+        self,
+        learner_id: str,
+        language: str,
+        topic_key: str,
+        game_type: str,
+        item_id: str,
+    ) -> ItemReviewState | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT learner_id, language, topic_key, game_type, item_id, due_day_iso,
+                       interval_days, ease, repetitions, lapses, last_score, last_seen_day_iso
+                FROM item_review_state
+                WHERE learner_id = ? AND language = ? AND topic_key = ? AND game_type = ? AND item_id = ?
+                """,
+                (learner_id, language, topic_key, game_type, item_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return ItemReviewState(*row)
+
+    def upsert_item_review_state(
+        self,
+        learner_id: str,
+        language: str,
+        topic_key: str,
+        game_type: str,
+        item_id: str,
+        due_day_iso: str,
+        interval_days: int,
+        ease: float,
+        repetitions: int,
+        lapses: int,
+        last_score: int,
+        last_seen_day_iso: str,
+    ) -> ItemReviewState:
+        payload = (
+            learner_id,
+            language,
+            topic_key,
+            game_type,
+            item_id,
+            due_day_iso,
+            int(max(1, interval_days)),
+            float(max(1.3, ease)),
+            int(max(0, repetitions)),
+            int(max(0, lapses)),
+            int(max(0, min(100, last_score))),
+            last_seen_day_iso,
+        )
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO item_review_state (
+                    learner_id, language, topic_key, game_type, item_id, due_day_iso,
+                    interval_days, ease, repetitions, lapses, last_score, last_seen_day_iso
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (learner_id, language, topic_key, game_type, item_id)
+                DO UPDATE SET
+                    due_day_iso = excluded.due_day_iso,
+                    interval_days = excluded.interval_days,
+                    ease = excluded.ease,
+                    repetitions = excluded.repetitions,
+                    lapses = excluded.lapses,
+                    last_score = excluded.last_score,
+                    last_seen_day_iso = excluded.last_seen_day_iso
+                """,
+                payload,
+            )
+        logger.info(
+            "item_review_state_saved learner_id=%s language=%s topic=%s game_type=%s item_id=%s due=%s interval=%s reps=%s lapses=%s score=%s ease=%.2f",
+            learner_id,
+            language,
+            topic_key,
+            game_type,
+            item_id,
+            due_day_iso,
+            int(max(1, interval_days)),
+            int(max(0, repetitions)),
+            int(max(0, lapses)),
+            int(max(0, min(100, last_score))),
+            float(max(1.3, ease)),
+        )
+        return ItemReviewState(*payload)
+
+    def list_due_item_review_states(
+        self,
+        learner_id: str,
+        language: str,
+        current_day_iso: str,
+        limit: int = 50,
+        topic_key: str | None = None,
+    ) -> list[ItemReviewState]:
+        max_items = max(1, int(limit))
+        with self._conn() as conn:
+            if topic_key:
+                rows = conn.execute(
+                    """
+                    SELECT learner_id, language, topic_key, game_type, item_id, due_day_iso,
+                           interval_days, ease, repetitions, lapses, last_score, last_seen_day_iso
+                    FROM item_review_state
+                    WHERE learner_id = ? AND language = ? AND topic_key = ? AND due_day_iso <= ?
+                    ORDER BY due_day_iso ASC, topic_key ASC, game_type ASC, item_id ASC
+                    LIMIT ?
+                    """,
+                    (learner_id, language, topic_key, current_day_iso, max_items),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT learner_id, language, topic_key, game_type, item_id, due_day_iso,
+                           interval_days, ease, repetitions, lapses, last_score, last_seen_day_iso
+                    FROM item_review_state
+                    WHERE learner_id = ? AND language = ? AND due_day_iso <= ?
+                    ORDER BY due_day_iso ASC, topic_key ASC, game_type ASC, item_id ASC
+                    LIMIT ?
+                    """,
+                    (learner_id, language, current_day_iso, max_items),
+                ).fetchall()
+        return [ItemReviewState(*row) for row in rows]

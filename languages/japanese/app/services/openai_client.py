@@ -78,6 +78,60 @@ class OpenAIPlanner:
             "raw": content_text,
         }
 
+    async def generate_extra_game_prompt(
+        self,
+        *,
+        language: str,
+        topic_title: str,
+        game_type: str,
+        level: int,
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            return {
+                "source": "fallback",
+                "text": f"Topic: {topic_title}. Try this {game_type} activity at level {level}.",
+            }
+
+        system_prompt = (
+            "You are a language-learning tutor. "
+            "Generate exactly one short activity prompt in English for the given game type and level. "
+            "Keep it concise (max 22 words) and practical."
+        )
+        user_prompt = (
+            f"Language={language}. Topic={topic_title}. Game={game_type}. Level={level}. "
+            "Return plain text only."
+        )
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "input": [
+                        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+                        {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
+                    ],
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+        text_outputs = payload.get("output", [])
+        content_text = ""
+        for block in text_outputs:
+            for item in block.get("content", []):
+                if item.get("type") == "output_text":
+                    content_text += item.get("text", "")
+
+        return {
+            "source": "openai",
+            "text": content_text.strip(),
+        }
+
     async def transcribe_audio(
         self,
         *,

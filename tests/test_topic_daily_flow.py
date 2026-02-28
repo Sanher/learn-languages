@@ -357,6 +357,53 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(after_state.weekly_exam_passed_count, 0)
         self.assertFalse(after_state.weekly_exam_last_day_iso)
 
+    def test_weekly_exam_mode_override_forces_cumulative_flow(self) -> None:
+        daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(daily.status_code, 200)
+        daily_data = daily.json()
+        topic_key = daily_data["topic"]["topic_key"]
+
+        self.client.post(
+            "/api/games/lesson/complete",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": topic_key,
+            },
+        )
+        for card in daily_data["daily_games"]:
+            payload = self._payload_for_daily_card(card)
+            self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": card["game_type"],
+                    "language": "ja",
+                    "level": card["level"],
+                    "retry_count": 0,
+                    "payload": payload,
+                },
+            )
+
+        with unittest.mock.patch.object(api, "WEEKLY_EXAM_FORCE_LEGACY", True):
+            weekly_exam = self.client.post(
+                "/api/exams/weekly",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "mode": "cumulative",
+                    "question_count": 6,
+                },
+            )
+
+        self.assertEqual(weekly_exam.status_code, 200)
+        weekly_data = weekly_exam.json()
+        self.assertTrue(weekly_data["requires_answers"])
+        self.assertFalse(weekly_data.get("legacy_mode", True))
+        self.assertGreaterEqual(weekly_data["question_count"], 3)
+        self.assertGreaterEqual(len(weekly_data.get("questions", [])), 3)
+
     def test_daily_score_stays_capped_at_300_after_duplicate_daily_evaluations(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)

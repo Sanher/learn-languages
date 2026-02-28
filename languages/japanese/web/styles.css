@@ -148,6 +148,41 @@ button {
   margin-top: 10px;
 }
 
+.lesson-progress-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.lesson-closed-topics {
+  margin-top: 10px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 10px;
+  background: #020617;
+}
+
+.lesson-closed-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lesson-closed-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.closed-topic-review-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
 .game-card,
 .game-card-locked {
   border: 1px solid #334155;

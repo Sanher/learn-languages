@@ -147,6 +147,7 @@ class WeeklyExamRequest(BaseModel):
     learner_id: str = DEFAULT_LEARNER_ID
     language: str = "ja"
     topic_key: str | None = None
+    mode: str | None = None
     exam_score: int | None = Field(default=None, ge=0, le=300)
     question_count: int = Field(default=10, ge=3, le=20)
     answers: list[dict[str, Any]] = Field(default_factory=list)
@@ -1534,6 +1535,10 @@ def load_topic_review(req: TopicReviewRequest) -> dict:
 def take_weekly_exam(req: WeeklyExamRequest) -> dict:
     learner_id = req.learner_id or DEFAULT_LEARNER_ID
     language = (req.language or "ja").strip().lower()
+    requested_mode = (req.mode or "").strip().lower()
+    weekly_force_legacy = WEEKLY_EXAM_FORCE_LEGACY
+    if requested_mode in {"legacy", "cumulative"}:
+        weekly_force_legacy = requested_mode != "cumulative"
     if language not in AVAILABLE_LANGUAGES:
         logger.warning("weekly_exam_invalid_language learner_id=%s language=%s", learner_id, language)
         return {"error": f"Unsupported language: {language}"}
@@ -1591,7 +1596,7 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
     # 1) Call without answers -> receive cumulative questions.
     # 2) Submit answers -> receive score/pass result.
     submitted_answers = list(req.answers or [])
-    if WEEKLY_EXAM_FORCE_LEGACY:
+    if weekly_force_legacy:
         if submitted_answers:
             logger.info(
                 "weekly_exam_legacy_answers_ignored learner_id=%s language=%s topic=%s answers=%s",
