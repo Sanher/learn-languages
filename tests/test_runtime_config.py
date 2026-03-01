@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import httpx
+
 from languages.japanese.app.services.elevenlabs_client import ElevenLabsService
 from languages.japanese.app.services.openai_client import OpenAIPlanner
 from languages.japanese.app.services.runtime_config import clear_cached_options, get_setting
@@ -100,6 +102,56 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(service.api_key, "eleven-key")
                 self.assertEqual(service.voice_id, "voice-123")
                 self.assertEqual(service.model_id, "eleven_turbo_v2_5")
+
+    def test_translation_circuit_breaker_opens_after_consecutive_failures(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_TRANSLATION_FAILURE_THRESHOLD": "2",
+                "OPENAI_TRANSLATION_COOLDOWN_SECONDS": "300",
+            },
+            clear=False,
+        ):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            with patch("languages.japanese.app.services.openai_client.httpx.Client") as mock_client:
+                mock_http = mock_client.return_value.__enter__.return_value
+                mock_http.post.side_effect = httpx.ConnectError("network down")
+
+                first = planner.translate_text(source_text="hello", target_language="es")
+                second = planner.translate_text(source_text="world", target_language="es")
+                third = planner.translate_text(source_text="again", target_language="es")
+
+                self.assertIn("Translation request failed", first.get("error", ""))
+                self.assertIn("Translation request failed", second.get("error", ""))
+                self.assertEqual(
+                    third.get("error"),
+                    "Translation temporarily unavailable due to repeated provider failures.",
+                )
+                self.assertEqual(mock_http.post.call_count, 2)
+
+    def test_translate_text_rejects_overlong_source_text_before_network_call(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_TRANSLATION_MAX_TEXT_CHARS": "40",
+            },
+            clear=False,
+        ):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            self.assertEqual(planner.translation_max_text_chars, 60)
+            with patch("languages.japanese.app.services.openai_client.httpx.Client") as mock_client:
+                response = planner.translate_text(
+                    source_text="x" * 61,
+                    target_language="es",
+                    context="unit-test",
+                )
+                self.assertEqual(response.get("source"), "fallback")
+                self.assertEqual(response.get("error"), "Source text is too long for translation.")
+                self.assertEqual(mock_client.call_count, 0)
 
 
 if __name__ == "__main__":

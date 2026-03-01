@@ -4,6 +4,7 @@ const todayScoreEl = document.getElementById('today-score');
 const gameZoneEl = document.getElementById('game-zone');
 const gamesSidebarEl = document.getElementById('games-sidebar');
 const changeLanguageBtn = document.getElementById('change-language-btn');
+const secondaryTranslationSelectEl = document.getElementById('secondary-translation-select');
 const LANGUAGE_ALIASES = {
   ja: 'Japanese',
 };
@@ -20,6 +21,11 @@ let extraGameCards = [];
 let dailyTopic = null;
 let dailyLesson = null;
 let dailyProgress = null;
+let translationPreferences = {
+  primary_translation_language: 'en',
+  secondary_translation_language: null,
+  available_secondary_translation_languages: [{ code: 'es', label: 'Español' }],
+};
 let closedTopics = [];
 let closedTopicsVisible = false;
 let isReviewMode = false;
@@ -82,12 +88,121 @@ function resolveLanguageCode(input) {
   return aliasMatch ? aliasMatch[0] : normalized;
 }
 
+function normalizeSecondaryLanguage(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized || normalized === 'off' || normalized === 'none' || normalized === 'null') {
+    return null;
+  }
+  return normalized;
+}
+
+function setTranslationPreferences(preferences) {
+  const payload = preferences && typeof preferences === 'object' ? preferences : {};
+  const available = Array.isArray(payload.available_secondary_translation_languages)
+    ? payload.available_secondary_translation_languages
+      .filter((entry) => entry && entry.code && entry.label)
+      .map((entry) => ({ code: String(entry.code).toLowerCase(), label: String(entry.label) }))
+    : [];
+  translationPreferences = {
+    primary_translation_language: 'en',
+    secondary_translation_language: normalizeSecondaryLanguage(payload.secondary_translation_language),
+    available_secondary_translation_languages: available.length > 0
+      ? available
+      : [{ code: 'es', label: 'Español' }],
+  };
+}
+
+function secondaryTranslationLabel(code) {
+  const normalized = normalizeSecondaryLanguage(code);
+  if (!normalized) return 'Off';
+  const match = translationPreferences.available_secondary_translation_languages
+    .find((entry) => String(entry.code || '').toLowerCase() === normalized);
+  return match ? match.label : normalized.toUpperCase();
+}
+
+function renderSecondaryTranslationSelector() {
+  if (!secondaryTranslationSelectEl) return;
+  const selected = normalizeSecondaryLanguage(translationPreferences.secondary_translation_language) || '';
+  const options = [
+    '<option value="">Off</option>',
+    ...translationPreferences.available_secondary_translation_languages
+      .map((entry) => `<option value="${escapeHtml(entry.code)}">${escapeHtml(entry.label)}</option>`),
+  ].join('');
+  secondaryTranslationSelectEl.innerHTML = options;
+  secondaryTranslationSelectEl.value = selected;
+}
+
+// Shared renderer for all EN/secondary translation bundles returned by the API.
+function translationBundleForField(record, field) {
+  const bundle = record && record[`${field}_translations`];
+  if (bundle && typeof bundle === 'object' && !Array.isArray(bundle)) {
+    return bundle;
+  }
+  return {
+    en: record && typeof record[field] === 'string' ? record[field] : '',
+    secondary_lang: normalizeSecondaryLanguage(translationPreferences.secondary_translation_language),
+    secondary: null,
+  };
+}
+
+function multilineHtml(value) {
+  return escapeHtml(value).replaceAll('\n', '<br />');
+}
+
+function renderBilingualValue(bundle, { showEnglish = true, multiline = false } = {}) {
+  if (!bundle || typeof bundle !== 'object') return '';
+  const enText = String(bundle.en || '').trim();
+  const secondaryLang = normalizeSecondaryLanguage(bundle.secondary_lang);
+  const secondaryText = String(bundle.secondary || '').trim();
+  const parts = [];
+  if (showEnglish && enText) {
+    parts.push(`<span class="translation-primary-line">${multiline ? multilineHtml(enText) : escapeHtml(enText)}</span>`);
+  }
+  if (secondaryLang && secondaryText) {
+    const secondaryLabel = secondaryTranslationLabel(secondaryLang);
+    const secondaryBody = multiline ? multilineHtml(secondaryText) : escapeHtml(secondaryText);
+    parts.push(`<span class="translation-secondary-line">${escapeHtml(secondaryLabel)}: ${secondaryBody}</span>`);
+  }
+  return parts.join('<br />');
+}
+
+function renderTranslatedField(record, field, {
+  label = '',
+  className = '',
+  tag = 'p',
+  showEnglish = true,
+  multiline = false,
+} = {}) {
+  const bundle = translationBundleForField(record, field);
+  const html = renderBilingualValue(bundle, { showEnglish, multiline });
+  if (!html) return '';
+  const classes = className ? ` class="${escapeHtml(className)}"` : '';
+  const labelHtml = label ? `<strong>${escapeHtml(label)}:</strong> ` : '';
+  return `<${tag}${classes}>${labelHtml}${html}</${tag}>`;
+}
+
+function renderTranslatedList(record, field) {
+  const values = Array.isArray(record && record[field]) ? record[field] : [];
+  const bundles = Array.isArray(record && record[`${field}_translations`]) ? record[`${field}_translations`] : [];
+  return values
+    .map((value, index) => {
+      const bundle = bundles[index] && typeof bundles[index] === 'object'
+        ? bundles[index]
+        : { en: value, secondary_lang: normalizeSecondaryLanguage(translationPreferences.secondary_translation_language), secondary: null };
+      const rendered = renderBilingualValue(bundle, { showEnglish: true, multiline: false });
+      return rendered ? `<li>${rendered}</li>` : '';
+    })
+    .filter(Boolean)
+    .join('');
+}
+
 function updateTopbar() {
   currentLanguageEl.textContent = languageLabel(currentLanguage);
   currentLevelEl.textContent = String(currentLevel);
   if (changeLanguageBtn) {
     changeLanguageBtn.hidden = availableLanguages.length <= 1;
   }
+  renderSecondaryTranslationSelector();
   const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
   const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
   if (todayScoreEl) {
@@ -163,10 +278,19 @@ function renderLessonPanel() {
   if (!dailyLesson) return '';
 
   if (isReviewMode) {
+    const reviewTopicHtml = renderTranslatedField(dailyTopic, 'title', {
+      label: 'Topic',
+      className: 'muted',
+    });
+    const reviewTopicDescriptionHtml = renderTranslatedField(dailyTopic, 'description', {
+      className: 'muted',
+      multiline: true,
+    });
     return `
       <section class="lesson-card">
         <h2>Review mode</h2>
-        <p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>
+        ${reviewTopicHtml || `<p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>`}
+        ${reviewTopicDescriptionHtml}
         <p class="muted">Practice this learned topic. Review attempts do not modify daily score or progression.</p>
         <div class="lesson-progress-actions">
           <button id="exit-review-btn" class="ghost-btn" type="button">Back to today's topic</button>
@@ -175,9 +299,7 @@ function renderLessonPanel() {
     `;
   }
 
-  const points = (dailyLesson.theory_points || [])
-    .map((point) => `<li>${escapeHtml(point)}</li>`)
-    .join('');
+  const points = renderTranslatedList(dailyLesson, 'theory_points');
   const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
   const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 3);
   const lessonDone = isLessonCompleted();
@@ -206,6 +328,15 @@ function renderLessonPanel() {
   const levelExamLabel = readyTo2 ? 'Take level exam (1 -> 2)' : (readyTo3 ? 'Take level exam (2 -> 3)' : 'Level exam locked');
   const levelExamDisabled = (levelExamReady && lessonDone && completedCount >= totalCount) ? '' : 'disabled';
   const closedTopicsCount = Number((dailyProgress && dailyProgress.closed_topics_count) || 0);
+  const lessonTitleHtml = renderTranslatedField(dailyLesson, 'title', { tag: 'h2' }) || '<h2>Daily lesson</h2>';
+  const topicTitleHtml = renderTranslatedField(dailyTopic, 'title', {
+    label: 'Topic',
+    className: 'muted',
+  });
+  const topicDescriptionHtml = renderTranslatedField(dailyTopic, 'description', {
+    className: 'muted',
+    multiline: true,
+  });
   const closedTopicsHtml = closedTopicsVisible
     ? `
       <div class="lesson-closed-topics">
@@ -235,14 +366,15 @@ function renderLessonPanel() {
 
   return `
     <section class="lesson-card">
-      <h2>${escapeHtml(dailyLesson.title || 'Daily lesson')}</h2>
-      <p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>
-      <p class="muted">${escapeHtml(dailyLesson.objective || '')}</p>
+      ${lessonTitleHtml}
+      ${topicTitleHtml || `<p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>`}
+      ${topicDescriptionHtml}
+      ${renderTranslatedField(dailyLesson, 'objective', { className: 'muted' })}
       ${points ? `<ul class="lesson-points">${points}</ul>` : ''}
       <div class="lesson-example">
         <p><strong>Example:</strong> ${escapeHtml(dailyLesson.example_script || '')}</p>
         <p><strong>Romanized:</strong> ${escapeHtml(dailyLesson.example_romanized || '')}</p>
-        <p><strong>Literal:</strong> ${escapeHtml(dailyLesson.example_literal_translation || '')}</p>
+        ${renderTranslatedField(dailyLesson, 'example_literal_translation', { label: 'Literal' })}
       </div>
       <div class="lesson-actions">
         ${lessonButton}
@@ -321,14 +453,16 @@ function renderSingleGame(game) {
   const payload = game.payload || {};
   const gameType = game.game_type;
   const displayName = game.display_name || gameType;
-  let promptHtml = `<p class="prompt">${escapeHtml(game.prompt || '')}</p>`;
+  let promptHtml = renderTranslatedField(game, 'prompt', { className: 'prompt', multiline: true });
+  let promptIncludesTranslation = true;
   if (game.ai_generated_prompt) {
     promptHtml = `
       <div class="prompt game-meta">
-        <p class="game-meta-line"><strong>AI prompt:</strong> ${escapeHtml(game.ai_generated_prompt)}</p>
-        <p class="game-meta-line">${escapeHtml(game.prompt || '')}</p>
+        ${renderTranslatedField(game, 'ai_generated_prompt', { label: 'AI prompt', className: 'game-meta-line' })}
+        ${renderTranslatedField(game, 'prompt', { className: 'game-meta-line', multiline: true })}
       </div>
     `;
+    promptIncludesTranslation = true;
   }
   if (gameType !== 'kana_speed_round') {
     stopKanaElapsedTicker();
@@ -350,6 +484,7 @@ function renderSingleGame(game) {
         ${promptLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
       </div>
     `;
+    promptIncludesTranslation = false;
     controls = `
       <fieldset class="response-group">
         <legend>Answer</legend>
@@ -444,6 +579,7 @@ function renderSingleGame(game) {
         ${metaLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
       </div>
     `;
+    promptIncludesTranslation = false;
     controls = `
       <fieldset class="response-group">
         <legend>Answer</legend>
@@ -494,6 +630,7 @@ function renderSingleGame(game) {
         ${promptLines.map((line) => `<p class="listening-line">${escapeHtml(line)}</p>`).join('')}
       </div>
     `;
+    promptIncludesTranslation = false;
     const listenButton = payload.tts_text
       ? `
         <div class="audio-actions">
@@ -600,6 +737,7 @@ function renderSingleGame(game) {
         ${promptLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
       </div>
     `;
+    promptIncludesTranslation = false;
     controls = `
       <p><strong>Target sequence:</strong> ${escapeHtml(expectedText)}</p>
       <input data-k="expected_text" type="hidden" value="${escapeHtml(expectedText)}" />
@@ -631,6 +769,7 @@ function renderSingleGame(game) {
         ${promptLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
       </div>
     `;
+    promptIncludesTranslation = false;
     controls = `
       <div class="audio-actions">
         <button id="pronunciation-record-btn" type="button" class="ghost-btn">Record</button>
@@ -651,6 +790,13 @@ function renderSingleGame(game) {
     ? 'Evaluate audio'
     : 'Evaluate';
   const showEvaluateButton = gameType !== 'sentence_order';
+  const promptSecondaryHtml = promptIncludesTranslation
+    ? ''
+    : renderTranslatedField(game, 'prompt', {
+      className: 'prompt prompt-secondary',
+      showEnglish: false,
+      multiline: true,
+    });
 
   gameZoneEl.classList.remove('hidden');
   gameZoneEl.innerHTML = `
@@ -658,6 +804,7 @@ function renderSingleGame(game) {
     <section class="game-card">
       <h2>${escapeHtml(displayName)}</h2>
       ${promptHtml}
+      ${promptSecondaryHtml}
       ${controls}
       <div class="actions">
         ${showEvaluateButton ? `<button id="evaluate-btn">${evaluateLabel}</button>` : ''}
@@ -670,6 +817,12 @@ function renderSingleGame(game) {
 
 function renderSidebar(games) {
   if (!gamesSidebarEl) return;
+  const sidebarTopicLine = renderTranslatedField(dailyTopic, 'title', { className: 'muted' })
+    || `<p class="muted">${escapeHtml((dailyTopic && dailyTopic.title) || (dailyLesson && dailyLesson.topic_title) || 'Daily topic')}</p>`;
+  const sidebarTopicDescriptionLine = renderTranslatedField(dailyTopic, 'description', {
+    className: 'muted',
+    multiline: true,
+  });
   if (isReviewMode) {
     const reviewList = (dailyGameCards || [])
       .map((game) => {
@@ -683,7 +836,8 @@ function renderSidebar(games) {
       .join('');
     gamesSidebarEl.innerHTML = `
       <h3>Topic review</h3>
-      <p class="muted">${escapeHtml((dailyTopic && dailyTopic.title) || 'Review topic')}</p>
+      ${sidebarTopicLine}
+      ${sidebarTopicDescriptionLine || ''}
       <div class="sidebar-list">${reviewList || '<p class="muted">No review games available.</p>'}</div>
     `;
     return;
@@ -726,7 +880,8 @@ function renderSidebar(games) {
 
   gamesSidebarEl.innerHTML = `
     <h3>Topic flow</h3>
-    <p class="muted">${escapeHtml((dailyTopic && dailyTopic.title) || 'Daily topic')}</p>
+    ${sidebarTopicLine}
+    ${sidebarTopicDescriptionLine || ''}
     <h4>Daily games</h4>
     <div class="sidebar-list">${dailyList || '<p class="muted">No games available.</p>'}</div>
     ${extraSection}
@@ -1039,42 +1194,52 @@ function renderEvaluation(data) {
 
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   const alertsHtml = alerts.map((alert) => `<p class="alert">${escapeHtml(alert)}</p>`).join('');
-  const scoreHtml = data.score != null ? `<p><strong>Score:</strong> ${escapeHtml(data.score)}</p>` : '';
-  const feedbackHtml = data.feedback ? `<p><strong>Feedback:</strong> ${escapeHtml(data.feedback)}</p>` : '';
-  const translationHtml = data.literal_translation
-    ? `<p><strong>Literal translation:</strong> ${escapeHtml(data.literal_translation)}</p>`
-    : '';
+  const scoreHtml = data.score != null ? `<p class="result-line"><strong>Score:</strong> ${escapeHtml(data.score)}</p>` : '';
+  const feedbackHtml = renderTranslatedField(data, 'feedback', {
+    label: 'Feedback',
+    className: 'result-line',
+    multiline: true,
+  });
+  const translationHtml = renderTranslatedField(data, 'literal_translation', {
+    label: 'Literal translation',
+    className: 'result-line',
+    multiline: true,
+  });
   const readingAccuracyHtml = data.reading_accuracy != null
-    ? `<p><strong>Reading:</strong> ${escapeHtml(Math.round(Number(data.reading_accuracy) * 100))}%</p>`
+    ? `<p class="result-line"><strong>Reading:</strong> ${escapeHtml(Math.round(Number(data.reading_accuracy) * 100))}%</p>`
     : '';
   const meaningAccuracyHtml = data.meaning_accuracy != null
-    ? `<p><strong>Meaning:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
+    ? `<p class="result-line"><strong>Meaning:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
     : '';
   const romanizationAccuracyHtml = data.romanization_accuracy != null
-    ? `<p><strong>Romanization:</strong> ${escapeHtml(Math.round(Number(data.romanization_accuracy) * 100))}%</p>`
+    ? `<p class="result-line"><strong>Romanization:</strong> ${escapeHtml(Math.round(Number(data.romanization_accuracy) * 100))}%</p>`
     : '';
   const segmentationAccuracyHtml = data.segmentation_accuracy != null
-    ? `<p><strong>Segmentation:</strong> ${escapeHtml(Math.round(Number(data.segmentation_accuracy) * 100))}%</p>`
+    ? `<p class="result-line"><strong>Segmentation:</strong> ${escapeHtml(Math.round(Number(data.segmentation_accuracy) * 100))}%</p>`
     : '';
   const kanjiMoraHtml = data.kanji_mora_line
     ? `<div class="result-block"><p><strong>Kanji (mora):</strong> ${escapeHtml(data.kanji_mora_line)}</p></div>`
     : '';
   const pronunciationSummaryHtml = (data.is_match != null)
-    ? `<p><strong>Match:</strong> ${data.is_match ? 'Yes' : 'No'}${data.match_threshold != null ? ` (target ${Math.round(Number(data.match_threshold) * 100)}%)` : ''}</p>`
+    ? `<p class="result-line"><strong>Match:</strong> ${data.is_match ? 'Yes' : 'No'}${data.match_threshold != null ? ` (target ${Math.round(Number(data.match_threshold) * 100)}%)` : ''}</p>`
     : '';
   const kanaRomanizedHtml = data.expected_romaji || data.recognized_romaji
     ? `
       <div class="result-block">
-        <p><strong>Expected (romanized):</strong> ${escapeHtml(data.expected_romaji || '-')}</p>
-        <p><strong>Recognized (romanized):</strong> ${escapeHtml(data.recognized_romaji || '-')}</p>
-        <p><strong>Expected translation:</strong> ${escapeHtml(data.expected_translation || '-')}</p>
-        <p><strong>Recognized translation:</strong> ${escapeHtml(data.recognized_translation || '-')}</p>
+        <p class="result-line"><strong>Expected (romanized):</strong> ${escapeHtml(data.expected_romaji || '-')}</p>
+        <p class="result-line"><strong>Recognized (romanized):</strong> ${escapeHtml(data.recognized_romaji || '-')}</p>
+        ${renderTranslatedField(data, 'expected_translation', { label: 'Expected translation', className: 'result-line' })}
+        ${renderTranslatedField(data, 'recognized_translation', { label: 'Recognized translation', className: 'result-line' })}
       </div>
     `
     : '';
   const mismatchHtml = renderMismatchesHtml(data.sequence_mismatches);
   const wordFeedbackHtml = renderWordFeedbackHtml(data.word_feedback);
-  const nextStepHtml = data.next_step ? `<p><strong>Next step:</strong> ${escapeHtml(data.next_step)}</p>` : '';
+  const nextStepHtml = renderTranslatedField(data, 'next_step', {
+    label: 'Next step',
+    className: 'result-line',
+    multiline: true,
+  });
 
   resultEl.innerHTML = `
     ${alertsHtml}
@@ -1879,6 +2044,7 @@ async function loadDailyGame() {
   currentLanguage = data.language || 'ja';
   currentLevel = Number(data.current_level || 1);
   todayLevel = Number(data.today_level || currentLevel);
+  setTranslationPreferences(data.translation_preferences || {});
   isReviewMode = false;
   dailyTopic = data.topic || null;
   dailyLesson = data.lesson || null;
@@ -1929,7 +2095,44 @@ async function changeLanguage() {
   await loadDailyGame();
 }
 
+async function changeSecondaryTranslation() {
+  if (!secondaryTranslationSelectEl) return;
+  const selectedValue = normalizeSecondaryLanguage(secondaryTranslationSelectEl.value);
+  secondaryTranslationSelectEl.disabled = true;
+  try {
+    let res;
+    let data;
+    try {
+      res = await fetch(apiUrl('api/ui/secondary-translation'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          learner_id: learnerId,
+          secondary_language: selectedValue || 'off',
+        }),
+      });
+      data = await res.json();
+    } catch (error) {
+      window.alert('Could not reach the server to update translation preference.');
+      renderSecondaryTranslationSelector();
+      return;
+    }
+    if (!res.ok || data.error) {
+      window.alert(data.error || 'Could not update translation preference.');
+      renderSecondaryTranslationSelector();
+      return;
+    }
+    if (data.translation_preferences) {
+      setTranslationPreferences(data.translation_preferences);
+    }
+    await loadDailyGame();
+  } finally {
+    secondaryTranslationSelectEl.disabled = false;
+  }
+}
+
 changeLanguageBtn?.addEventListener('click', changeLanguage);
+secondaryTranslationSelectEl?.addEventListener('change', changeSecondaryTranslation);
 gamesSidebarEl?.addEventListener('click', (event) => {
   const target = event.target;
   if (!target || !target.dataset || target.dataset.action !== 'pick-game') return;

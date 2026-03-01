@@ -1,4 +1,5 @@
 import unittest
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -13,7 +14,24 @@ class ApiEnglishContractTests(unittest.TestCase):
     def test_health_endpoint(self) -> None:
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "ok")
+        self.assertIn("providers", payload)
+        self.assertIn("openai_configured", payload["providers"])
+        self.assertIn("elevenlabs_configured", payload["providers"])
+        self.assertIn("storage", payload)
+        self.assertIn("db_exists", payload["storage"])
+        self.assertIn("db_writable_parent", payload["storage"])
+
+    def test_missing_web_asset_returns_404(self) -> None:
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get("/web/missing.js")
+        self.assertEqual(response.status_code, 404)
+
+    def test_web_path_traversal_returns_404(self) -> None:
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get("/web/%2e%2e/%2e%2e/README.md")
+        self.assertEqual(response.status_code, 404)
 
     def test_unsupported_language_returns_english_error(self) -> None:
         response = self.client.post(
@@ -25,6 +43,169 @@ class ApiEnglishContractTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["error"], "Unsupported language: es")
+
+    def test_secondary_translation_rejects_unsupported_language(self) -> None:
+        response = self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": "test-user",
+                "secondary_language": "fr",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["error"], "Unsupported secondary translation language: fr")
+
+    def test_secondary_translation_contract_is_present_in_daily_payload(self) -> None:
+        response = self.client.post("/api/games/daily", json={"learner_id": "test-user-translation-contract"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        preferences = data.get("translation_preferences", {})
+        self.assertEqual(preferences.get("primary_translation_language"), "en")
+        self.assertIsNone(preferences.get("secondary_translation_language"))
+        self.assertIn(
+            {"code": "es", "label": "Español"},
+            preferences.get("available_secondary_translation_languages", []),
+        )
+
+    def test_secondary_translation_persists_in_daily_payload(self) -> None:
+        learner_id = "test-user-translation-es"
+        save = self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        self.assertEqual(save.status_code, 200)
+        self.assertEqual(save.json()["translation_preferences"]["secondary_translation_language"], "es")
+
+        daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+        self.assertEqual(daily.status_code, 200)
+        self.assertEqual(daily.json()["translation_preferences"]["secondary_translation_language"], "es")
+
+    def test_secondary_translation_can_be_disabled_with_off(self) -> None:
+        learner_id = "test-user-translation-off"
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        disable = self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "off",
+            },
+        )
+        self.assertEqual(disable.status_code, 200)
+        self.assertIsNone(disable.json()["translation_preferences"]["secondary_translation_language"])
+
+        daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+        self.assertEqual(daily.status_code, 200)
+        self.assertIsNone(daily.json()["translation_preferences"]["secondary_translation_language"])
+
+    def test_secondary_translation_update_keeps_learning_language(self) -> None:
+        learner_id = "test-user-translation-language-stable"
+        self.client.post(
+            "/api/ui/language",
+            json={
+                "learner_id": learner_id,
+                "language": "ja",
+            },
+        )
+        updated = self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json().get("language"), "ja")
+
+    def test_daily_payload_includes_translation_bundles_for_lesson_and_prompts(self) -> None:
+        learner_id = "test-user-translation-bundles"
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+        self.assertEqual(daily.status_code, 200)
+        data = daily.json()
+
+        lesson = data["lesson"]
+        self.assertIn("objective_translations", lesson)
+        self.assertEqual(lesson["objective_translations"]["en"], lesson["objective"])
+        self.assertEqual(lesson["objective_translations"]["secondary_lang"], "es")
+        self.assertIn("title_translations", lesson)
+        self.assertEqual(lesson["title_translations"]["en"], lesson["title"])
+        self.assertEqual(lesson["title_translations"]["secondary_lang"], "es")
+        topic = data["topic"]
+        self.assertIn("title_translations", topic)
+        self.assertEqual(topic["title_translations"]["en"], topic["title"])
+        self.assertEqual(topic["title_translations"]["secondary_lang"], "es")
+        self.assertIn("description_translations", topic)
+        self.assertEqual(topic["description_translations"]["en"], topic["description"])
+        self.assertEqual(topic["description_translations"]["secondary_lang"], "es")
+
+        first_card = data["daily_games"][0]
+        self.assertIn("prompt_translations", first_card)
+        self.assertEqual(first_card["prompt_translations"]["en"], first_card["prompt"])
+        self.assertEqual(first_card["prompt_translations"]["secondary_lang"], "es")
+
+    def test_game_evaluation_includes_translation_bundle_feedback(self) -> None:
+        learner_id = "test-user-translation-eval"
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+        self.assertEqual(daily.status_code, 200)
+        card = next((entry for entry in daily.json().get("daily_games", []) if entry.get("game_type") == "sentence_order"), None)
+        self.assertIsNotNone(card)
+        payload = {
+            "item_id": card["activity_id"],
+            "ordered_tokens_by_user": card.get("payload", {}).get("ordered_tokens", []),
+        }
+        evaluation = self.client.post(
+            "/api/games/evaluate",
+            json={
+                "learner_id": learner_id,
+                "game_type": "sentence_order",
+                "language": "ja",
+                "level": card["level"],
+                "retry_count": 0,
+                "payload": payload,
+            },
+        )
+        self.assertEqual(evaluation.status_code, 200)
+        evaluated = evaluation.json()
+        self.assertIn("feedback", evaluated)
+        self.assertIn("feedback_translations", evaluated)
+        self.assertEqual(evaluated["feedback_translations"]["en"], evaluated["feedback"])
+        self.assertEqual(evaluated["feedback_translations"]["secondary_lang"], "es")
+
+    def test_translation_cache_roundtrip(self) -> None:
+        cache_key = f"test-cache-key-{uuid4().hex}"
+        self.assertIsNone(api.memory.load_cached_translation(cache_key))
+        api.memory.save_cached_translation(
+            cache_key=cache_key,
+            source_text="good morning",
+            source_language="en",
+            target_language="es",
+            context="unit-test",
+            translated_text="buenos días",
+            updated_at_iso="2026-03-01T00:00:00",
+        )
+        self.assertEqual(api.memory.load_cached_translation(cache_key), "buenos días")
 
     def test_unsupported_tts_language_returns_english_error(self) -> None:
         response = self.client.post(

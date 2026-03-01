@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from math import log2
 from pathlib import Path
 from random import Random
 from time import perf_counter
 from typing import Any
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -55,8 +56,30 @@ LOCAL_LANGUAGE_DATA_DIR = BASE_DIR / "data" / "japanese"
 DB_PATH = str((ADDON_LANGUAGE_DATA_DIR if Path("/data").exists() else LOCAL_LANGUAGE_DATA_DIR) / "progress.db")
 DEFAULT_LEARNER_ID = os.getenv("HA_DEFAULT_LEARNER_ID", "ha_default_user")
 AVAILABLE_LANGUAGES = ["ja"]
+AVAILABLE_SECONDARY_TRANSLATION_LANGUAGES = {"es": "Español"}
+TRANSLATABLE_STRING_FIELDS = {
+    "title",
+    "prompt",
+    "objective",
+    "description",
+    "topic_description",
+    "example_literal_translation",
+    "literal_translation",
+    "translation_hint",
+    "feedback",
+    "topic_days_message",
+    "context_prompt",
+    "ai_generated_prompt",
+    "expected_translation",
+    "recognized_translation",
+}
+TRANSLATABLE_LIST_FIELDS = {
+    "theory_points",
+    "feedback",
+}
 SRS_DEFAULT_EASE = 2.5
 SRS_MIN_EASE = 1.3
+SRS_MAX_INTERVAL_DAYS = 3650
 WEEKLY_EXAM_MODE = os.getenv("LEARN_LANGUAGES_WEEKLY_EXAM_MODE", "legacy").strip().lower()
 WEEKLY_EXAM_FORCE_LEGACY = WEEKLY_EXAM_MODE != "cumulative"
 GAME_NAME_ALIASES = {
@@ -176,6 +199,11 @@ class LanguageUpdateRequest(BaseModel):
     language: str
 
 
+class SecondaryTranslationUpdateRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    secondary_language: str | None = None
+
+
 class SessionResult(BaseModel):
     learner_id: str
     accuracy: float
@@ -221,34 +249,58 @@ async def request_log_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _resolve_web_asset(path: str) -> Path:
+    web_root = WEB_DIR.resolve()
+    candidate = (WEB_DIR / str(path or "")).resolve()
+    # Do not allow path traversal outside /web.
+    if candidate != web_root and web_root not in candidate.parents:
+        logger.warning("web_asset_traversal_blocked path=%s resolved=%s", path, candidate)
+        raise HTTPException(status_code=404, detail="Not Found")
+    if not candidate.exists() or not candidate.is_file():
+        logger.info("web_asset_not_found path=%s resolved=%s", path, candidate)
+        raise HTTPException(status_code=404, detail="Not Found")
+    return candidate
+
+
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    db_file = Path(DB_PATH)
+    return {
+        "status": "ok",
+        "providers": {
+            "openai_configured": bool(openai_planner.api_key),
+            "elevenlabs_configured": bool(elevenlabs.api_key and elevenlabs.voice_id),
+        },
+        "storage": {
+            "db_exists": db_file.exists(),
+            "db_writable_parent": db_file.parent.exists() and os.access(db_file.parent, os.W_OK),
+        },
+    }
 
 
 @app.get("/web/")
 def web_index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(_resolve_web_asset("index.html"))
 
 
 @app.get("/web/{path:path}")
 def web_assets(path: str) -> FileResponse:
-    return FileResponse(WEB_DIR / path)
+    return FileResponse(_resolve_web_asset(path))
 
 
 @app.get("/")
 def root_index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(_resolve_web_asset("index.html"))
 
 
 @app.get("/app.js")
 def root_app_js() -> FileResponse:
-    return FileResponse(WEB_DIR / "app.js")
+    return FileResponse(_resolve_web_asset("app.js"))
 
 
 @app.get("/styles.css")
 def root_styles_css() -> FileResponse:
-    return FileResponse(WEB_DIR / "styles.css")
+    return FileResponse(_resolve_web_asset("styles.css"))
 
 
 @app.post("/api/daily")
@@ -285,7 +337,194 @@ def _service_level_from_difficulty(difficulty: int) -> int:
     return 3
 
 
-def _ui_state(learner_id: str, preferred_language: str, difficulty: int, today_level: int, overridden: bool) -> dict[str, Any]:
+def _normalize_secondary_language(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    if not normalized or normalized in {"off", "none", "null"}:
+        return None
+    if normalized not in AVAILABLE_SECONDARY_TRANSLATION_LANGUAGES:
+        return None
+    return normalized
+
+
+def _translation_preferences_payload(secondary_language: str | None) -> dict[str, Any]:
+    normalized = _normalize_secondary_language(secondary_language)
+    options = [{"code": code, "label": label} for code, label in AVAILABLE_SECONDARY_TRANSLATION_LANGUAGES.items()]
+    return {
+        "primary_translation_language": "en",
+        "secondary_translation_language": normalized,
+        "available_secondary_translation_languages": options,
+    }
+
+
+def _translation_cache_key(*, source_text: str, source_language: str, target_language: str, context: str) -> str:
+    material = f"{source_language}|{target_language}|{context}|{source_text}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _secondary_translation_for_text(
+    *,
+    text: str,
+    secondary_language: str | None,
+    context: str,
+    memo: dict[tuple[str, str, str], str | None],
+) -> str | None:
+    normalized_secondary = _normalize_secondary_language(secondary_language)
+    source_text = str(text or "").strip()
+    if not normalized_secondary or not source_text:
+        return None
+    if not openai_planner.api_key:
+        return None
+
+    memo_key = (normalized_secondary, context, source_text)
+    if memo_key in memo:
+        return memo[memo_key]
+
+    cache_key = _translation_cache_key(
+        source_text=source_text,
+        source_language="en",
+        target_language=normalized_secondary,
+        context=context,
+    )
+    cached = memory.load_cached_translation(cache_key)
+    if cached is not None:
+        logger.info("translation_cache_hit target=%s context=%s", normalized_secondary, context)
+        memo[memo_key] = cached
+        return cached
+
+    logger.info("translation_cache_miss target=%s context=%s", normalized_secondary, context)
+    translation_result = openai_planner.translate_text(
+        source_text=source_text,
+        source_language="en",
+        target_language=normalized_secondary,
+        context=context,
+    )
+    translated_text = str(translation_result.get("translated_text") or "").strip()
+    if translated_text:
+        memory.save_cached_translation(
+            cache_key=cache_key,
+            source_text=source_text,
+            source_language="en",
+            target_language=normalized_secondary,
+            context=context,
+            translated_text=translated_text,
+            updated_at_iso=datetime.utcnow().isoformat(),
+        )
+        memo[memo_key] = translated_text
+        return translated_text
+
+    logger.warning(
+        "translation_unavailable target=%s context=%s detail=%s",
+        normalized_secondary,
+        context,
+        translation_result.get("error", "unknown"),
+    )
+    memo[memo_key] = None
+    return None
+
+
+def _translation_bundle_for_text(
+    *,
+    text: str,
+    secondary_language: str | None,
+    context: str,
+    memo: dict[tuple[str, str, str], str | None],
+) -> dict[str, Any]:
+    en_text = str(text or "").strip()
+    normalized_secondary = _normalize_secondary_language(secondary_language)
+    return {
+        "en": en_text,
+        "secondary_lang": normalized_secondary,
+        "secondary": _secondary_translation_for_text(
+            text=en_text,
+            secondary_language=normalized_secondary,
+            context=context,
+            memo=memo,
+        ),
+    }
+
+
+def _augment_with_secondary_translations(
+    value: Any,
+    *,
+    secondary_language: str | None,
+    context: str,
+    memo: dict[tuple[str, str, str], str | None],
+) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, inner in value.items():
+            field_context = f"{context}.{key}" if context else str(key)
+            result[key] = _augment_with_secondary_translations(
+                inner,
+                secondary_language=secondary_language,
+                context=field_context,
+                memo=memo,
+            )
+
+        for key in list(value.keys()):
+            inner = value.get(key)
+            field_context = f"{context}.{key}" if context else str(key)
+            if key in TRANSLATABLE_STRING_FIELDS and isinstance(inner, str):
+                result[f"{key}_translations"] = _translation_bundle_for_text(
+                    text=inner,
+                    secondary_language=secondary_language,
+                    context=field_context,
+                    memo=memo,
+                )
+            elif key in TRANSLATABLE_LIST_FIELDS and isinstance(inner, list) and all(isinstance(item, str) for item in inner):
+                result[f"{key}_translations"] = [
+                    _translation_bundle_for_text(
+                        text=item,
+                        secondary_language=secondary_language,
+                        context=f"{field_context}[{idx}]",
+                        memo=memo,
+                    )
+                    for idx, item in enumerate(inner)
+                ]
+        return result
+
+    if isinstance(value, list):
+        return [
+            _augment_with_secondary_translations(
+                item,
+                secondary_language=secondary_language,
+                context=f"{context}[{idx}]",
+                memo=memo,
+            )
+            for idx, item in enumerate(value)
+        ]
+
+    return value
+
+
+def _secondary_translation_for_learner(learner_id: str) -> str | None:
+    prefs = memory.load_or_create_preferences(learner_id)
+    return _normalize_secondary_language(prefs.secondary_translation_language())
+
+
+def _translate_response_for_learner(
+    *,
+    learner_id: str,
+    payload: dict[str, Any],
+    context: str,
+) -> dict[str, Any]:
+    secondary_language = _secondary_translation_for_learner(learner_id)
+    return _augment_with_secondary_translations(
+        payload,
+        secondary_language=secondary_language,
+        context=context,
+        memo={},
+    )
+
+
+def _ui_state(
+    learner_id: str,
+    preferred_language: str,
+    difficulty: int,
+    today_level: int,
+    overridden: bool,
+    secondary_translation_language: str | None = None,
+) -> dict[str, Any]:
     current_level = memory.level_for_language(learner_id, preferred_language, default_level=1)
     return {
         "learner_id": learner_id,
@@ -295,6 +534,8 @@ def _ui_state(learner_id: str, preferred_language: str, difficulty: int, today_l
         "current_level": current_level,
         "today_level": today_level,
         "today_level_overridden": overridden,
+        # UI contract: app strings stay in English, this controls optional secondary translation lines.
+        "translation_preferences": _translation_preferences_payload(secondary_translation_language),
     }
 
 
@@ -347,9 +588,9 @@ def _daily_topic_for(learner_id: str, language: str) -> tuple[TopicDefinition, A
     return topic, progress, today.isoformat()
 
 
-def _topic_lesson_payload(topic: TopicDefinition, level: int) -> dict[str, Any]:
+def _topic_lesson_payload(topic: TopicDefinition, level: int, secondary_translation_language: str | None = None) -> dict[str, Any]:
     lesson = topic.lesson_for_level(level)
-    return {
+    payload = {
         "topic_key": topic.topic_key,
         "topic_title": topic.title,
         "topic_description": topic.description,
@@ -361,6 +602,12 @@ def _topic_lesson_payload(topic: TopicDefinition, level: int) -> dict[str, Any]:
         "example_romanized": lesson.example_romanized,
         "example_literal_translation": lesson.example_literal_translation,
     }
+    return _augment_with_secondary_translations(
+        payload,
+        secondary_language=secondary_translation_language,
+        context=f"lesson.{topic.topic_key}.level{level}",
+        memo={},
+    )
 
 
 def _target_score_for_topic_day(topic_day_index: int) -> int:
@@ -458,7 +705,16 @@ def _srs_quality_from_score(score: int) -> int:
 
 
 def _next_srs_state(previous: ItemReviewState | None, score: int) -> tuple[int, float, int, int, int]:
-    prev_interval = int(previous.interval_days) if previous is not None else 1
+    raw_prev_interval = int(previous.interval_days) if previous is not None else 1
+    prev_interval = raw_prev_interval
+    prev_interval = max(1, min(SRS_MAX_INTERVAL_DAYS, prev_interval))
+    if prev_interval != raw_prev_interval:
+        logger.warning(
+            "srs_interval_capped_previous raw=%s capped=%s max=%s",
+            raw_prev_interval,
+            prev_interval,
+            SRS_MAX_INTERVAL_DAYS,
+        )
     prev_ease = float(previous.ease) if previous is not None else SRS_DEFAULT_EASE
     prev_repetitions = int(previous.repetitions) if previous is not None else 0
     prev_lapses = int(previous.lapses) if previous is not None else 0
@@ -481,6 +737,16 @@ def _next_srs_state(previous: ItemReviewState | None, score: int) -> tuple[int, 
         interval = 1 if quality <= 1 else 2
         ease = max(SRS_MIN_EASE, round(prev_ease - 0.2, 2))
 
+    raw_interval = int(interval)
+    interval = max(1, min(SRS_MAX_INTERVAL_DAYS, raw_interval))
+    if interval != raw_interval:
+        logger.warning(
+            "srs_interval_capped_next raw=%s capped=%s max=%s quality=%s",
+            raw_interval,
+            interval,
+            SRS_MAX_INTERVAL_DAYS,
+            quality,
+        )
     return interval, ease, repetitions, lapses, quality
 
 
@@ -774,7 +1040,13 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
     return {}
 
 
-def _build_card_for_activity(game_type: str, language: str, level: int, activity_id: str) -> dict[str, Any] | None:
+def _build_card_for_activity(
+    game_type: str,
+    language: str,
+    level: int,
+    activity_id: str,
+    secondary_translation_language: str | None = None,
+) -> dict[str, Any] | None:
     service = game_services.get(game_type)
     if service is None:
         logger.warning("topic_card_missing_service game_type=%s", game_type)
@@ -792,7 +1064,7 @@ def _build_card_for_activity(game_type: str, language: str, level: int, activity
         )
         return None
 
-    return {
+    payload = {
         "game_type": game_type,
         "display_name": GAME_NAME_ALIASES.get(game_type, game_type),
         "activity_id": activity.activity_id,
@@ -807,9 +1079,15 @@ def _build_card_for_activity(game_type: str, language: str, level: int, activity
             prompt=activity.prompt,
         ),
     }
+    return _augment_with_secondary_translations(
+        payload,
+        secondary_language=secondary_translation_language,
+        context=f"card.{game_type}.{activity.activity_id}",
+        memo={},
+    )
 
 
-def _build_card_for_game_type(game_type: str, language: str, level: int) -> dict[str, Any] | None:
+def _build_card_for_game_type(game_type: str, language: str, level: int, secondary_translation_language: str | None = None) -> dict[str, Any] | None:
     service = game_services.get(game_type)
     if service is None:
         return None
@@ -821,6 +1099,7 @@ def _build_card_for_game_type(game_type: str, language: str, level: int) -> dict
         language=language,
         level=level,
         activity_id=activities[0].activity_id,
+        secondary_translation_language=secondary_translation_language,
     )
 
 
@@ -830,6 +1109,7 @@ def _build_card_for_activity_with_level_fallback(
     language: str,
     activity_id: str,
     preferred_level: int,
+    secondary_translation_language: str | None = None,
 ) -> dict[str, Any] | None:
     levels: list[int] = [int(preferred_level), 1, 2, 3]
     seen: set[int] = set()
@@ -842,6 +1122,7 @@ def _build_card_for_activity_with_level_fallback(
             language=language,
             level=level,
             activity_id=activity_id,
+            secondary_translation_language=secondary_translation_language,
         )
         if card is not None:
             return card
@@ -863,6 +1144,7 @@ def _select_extra_card_for_game_type(
     today_level: int,
     game_type: str,
     today_iso: str,
+    secondary_translation_language: str | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     closed_topics = _closed_topics_map(learner_id=learner_id, language=language)
     if closed_topics:
@@ -885,6 +1167,7 @@ def _select_extra_card_for_game_type(
                 language=language,
                 activity_id=item.item_id,
                 preferred_level=today_level,
+                secondary_translation_language=secondary_translation_language,
             )
             if card is None:
                 continue
@@ -906,6 +1189,7 @@ def _select_extra_card_for_game_type(
                 language=language,
                 level=today_level,
                 activity_id=preferred_current,
+                secondary_translation_language=secondary_translation_language,
             )
             if card is not None:
                 card["topic_key"] = today_topic.topic_key
@@ -921,13 +1205,19 @@ def _select_extra_card_for_game_type(
             language=language,
             level=today_level,
             activity_id=preferred_activity_id,
+            secondary_translation_language=secondary_translation_language,
         )
         if card is not None:
             card["topic_key"] = today_topic.topic_key
             card["selection_source"] = "current_topic_default"
             return card, "current_topic_default"
 
-    fallback = _build_card_for_game_type(game_type=game_type, language=language, level=today_level)
+    fallback = _build_card_for_game_type(
+        game_type=game_type,
+        language=language,
+        level=today_level,
+        secondary_translation_language=secondary_translation_language,
+    )
     if fallback is not None:
         fallback["topic_key"] = today_topic.topic_key
         fallback["selection_source"] = "current_generic_fallback"
@@ -1074,9 +1364,11 @@ def _extra_game_cards_metadata(
     for game_type in registry.list_game_types():
         if game_type in daily_game_types:
             continue
+        service = game_services.get(game_type)
+        if service is None:
+            continue
         # Only expose games that actually have activities for current language/level.
-        candidate = _build_card_for_game_type(game_type=game_type, language=language, level=level)
-        if candidate is None:
+        if not service.get_activities(language=language, level=level):
             continue
         cards.append(
             {
@@ -1100,6 +1392,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
     state = memory.load_or_create(req.learner_id)
     prefs = memory.load_or_create_preferences(req.learner_id)
     preferred_language = prefs.preferred_language or "ja"
+    secondary_translation_language = prefs.secondary_translation_language()
     if preferred_language not in AVAILABLE_LANGUAGES:
         preferred_language = "ja"
         memory.set_preferred_language(req.learner_id, preferred_language)
@@ -1139,6 +1432,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
             language=preferred_language,
             level=today_level,
             activity_id=activity_id,
+            secondary_translation_language=secondary_translation_language,
         )
         if card is not None:
             daily_cards.append(card)
@@ -1188,23 +1482,15 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         activity = all_daily_activities.get(game)
         if activity is None:
             continue
-        all_cards.append(
-            {
-                "game_type": game,
-                "display_name": GAME_NAME_ALIASES.get(game, game),
-                "activity_id": activity.activity_id,
-                "language": activity.language,
-                "prompt": activity.prompt,
-                "level": activity.level,
-                "payload": _game_payload(
-                    game_type=game,
-                    language=preferred_language,
-                    level=today_level,
-                    activity_id=activity.activity_id,
-                    prompt=activity.prompt,
-                ),
-            }
+        card = _build_card_for_activity(
+            game_type=game,
+            language=preferred_language,
+            level=today_level,
+            activity_id=activity.activity_id,
+            secondary_translation_language=secondary_translation_language,
         )
+        if card is not None:
+            all_cards.append(card)
 
     response = _ui_state(
         learner_id=req.learner_id,
@@ -1212,13 +1498,18 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         difficulty=difficulty,
         today_level=today_level,
         overridden=False,
+        secondary_translation_language=secondary_translation_language,
     )
     response["topic"] = {
         "topic_key": topic.topic_key,
         "title": topic.title,
         "description": topic.description,
     }
-    response["lesson"] = _topic_lesson_payload(topic=topic, level=today_level)
+    response["lesson"] = _topic_lesson_payload(
+        topic=topic,
+        level=today_level,
+        secondary_translation_language=secondary_translation_language,
+    )
     response["daily_progress"] = daily_progress
     response["daily_games"] = daily_cards
     response["extra_games"] = extra_cards
@@ -1243,7 +1534,11 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         level_up_blocked,
         requested_level,
     )
-    return response
+    return _translate_response_for_learner(
+        learner_id=req.learner_id,
+        context="daily_games",
+        payload=response,
+    )
 
 
 @app.post("/api/games/lesson/complete")
@@ -1289,11 +1584,15 @@ def complete_daily_lesson(req: DailyLessonCompleteRequest) -> dict:
         language,
         topic.topic_key,
     )
-    return {
+    return _translate_response_for_learner(
+        learner_id=learner_id,
+        context="lesson_complete",
+        payload={
         "saved": True,
         "topic_key": topic.topic_key,
         "daily_progress": daily_progress,
-    }
+        },
+    )
 
 
 @app.post("/api/games/extra/load")
@@ -1301,6 +1600,7 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
     learner_id = req.learner_id or DEFAULT_LEARNER_ID
     language = (req.language or "ja").strip().lower()
     game_type = req.game_type.strip()
+    secondary_translation_language = _secondary_translation_for_learner(learner_id)
     if language not in AVAILABLE_LANGUAGES:
         logger.warning("extra_game_invalid_language learner_id=%s language=%s", learner_id, language)
         return {"error": f"Unsupported language: {language}"}
@@ -1360,6 +1660,7 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
         today_level=today_level,
         game_type=game_type,
         today_iso=_today_iso,
+        secondary_translation_language=secondary_translation_language,
     )
 
     if card is None:
@@ -1411,10 +1712,14 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
         selection_source,
         card_topic_key,
     )
-    return {
+    return _translate_response_for_learner(
+        learner_id=learner_id,
+        context="extra_game_load",
+        payload={
         "card": card,
         "daily_progress": daily_progress,
-    }
+        },
+    )
 
 
 @app.post("/api/topics/closed")
@@ -1454,6 +1759,7 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
 def load_topic_review(req: TopicReviewRequest) -> dict:
     learner_id = req.learner_id or DEFAULT_LEARNER_ID
     language = (req.language or "ja").strip().lower()
+    secondary_translation_language = _secondary_translation_for_learner(learner_id)
     if language not in AVAILABLE_LANGUAGES:
         logger.warning("topic_review_invalid_language learner_id=%s language=%s", learner_id, language)
         return {"error": f"Unsupported language: {language}"}
@@ -1502,6 +1808,7 @@ def load_topic_review(req: TopicReviewRequest) -> dict:
             language=language,
             level=current_level,
             activity_id=activity_id,
+            secondary_translation_language=secondary_translation_language,
         )
         if card is None:
             continue
@@ -1516,7 +1823,10 @@ def load_topic_review(req: TopicReviewRequest) -> dict:
         current_level,
         len(review_cards),
     )
-    return {
+    return _translate_response_for_learner(
+        learner_id=learner_id,
+        context="topic_review",
+        payload={
         "learner_id": learner_id,
         "language": language,
         "topic": {
@@ -1524,11 +1834,16 @@ def load_topic_review(req: TopicReviewRequest) -> dict:
             "title": topic.title,
             "description": topic.description,
         },
-        "lesson": _topic_lesson_payload(topic=topic, level=current_level),
+        "lesson": _topic_lesson_payload(
+            topic=topic,
+            level=current_level,
+            secondary_translation_language=secondary_translation_language,
+        ),
         "review_mode": True,
         "review_games": review_cards,
         "selected_game": review_cards[0] if review_cards else None,
-    }
+        },
+    )
 
 
 @app.post("/api/exams/weekly")
@@ -1567,10 +1882,14 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
     )
     if not insights.get("weekly_exam_due"):
         logger.info("weekly_exam_not_due learner_id=%s language=%s topic=%s", learner_id, language, topic.topic_key)
-        return {
+        return _translate_response_for_learner(
+            learner_id=learner_id,
+            context="weekly_exam.not_due",
+            payload={
             "error": "Weekly mini-exam is not due yet.",
             "daily_progress": insights,
-        }
+            },
+        )
 
     questions = _weekly_exam_questions(
         learner_id=learner_id,
@@ -1587,10 +1906,14 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             language,
             topic.topic_key,
         )
-        return {
+        return _translate_response_for_learner(
+            learner_id=learner_id,
+            context="weekly_exam.questions_empty",
+            payload={
             "error": "No weekly exam questions available yet.",
             "daily_progress": insights,
-        }
+            },
+        )
 
     # Two-step weekly exam:
     # 1) Call without answers -> receive cumulative questions.
@@ -1630,7 +1953,10 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             exam_score,
             min_pass_score,
         )
-        return {
+        return _translate_response_for_learner(
+            learner_id=learner_id,
+            context="weekly_exam.legacy",
+            payload={
             "requires_answers": False,
             "legacy_mode": True,
             "passed": passed,
@@ -1644,7 +1970,8 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
                 else "Weekly mini-exam failed. Complete daily games and improve consistency before retrying next week."
             ),
             "daily_progress": refreshed_daily,
-        }
+            },
+        )
 
     # Cumulative mode phase 1: return generated questions so the client can submit answers in a second call.
     if not submitted_answers:
@@ -1655,13 +1982,17 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             topic.topic_key,
             len(questions),
         )
-        return {
+        return _translate_response_for_learner(
+            learner_id=learner_id,
+            context="weekly_exam.phase_one",
+            payload={
             "requires_answers": True,
             "legacy_mode": False,
             "question_count": len(questions),
             "questions": questions,
             "daily_progress": insights,
-        }
+            },
+        )
 
     question_by_id = {str(question["question_id"]): question for question in questions}
     question_by_key = {
@@ -1781,7 +2112,10 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
         len(questions),
         len(answer_results),
     )
-    return {
+    return _translate_response_for_learner(
+        learner_id=learner_id,
+        context="weekly_exam.phase_two",
+        payload={
         "requires_answers": False,
         "passed": passed,
         "exam_score": exam_score,
@@ -1795,7 +2129,8 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             else "Weekly mini-exam failed. Complete daily games and improve consistency before retrying next week."
         ),
         "daily_progress": refreshed_daily,
-    }
+        },
+    )
 
 
 @app.post("/api/exams/level")
@@ -1927,7 +2262,10 @@ def take_level_exam(req: LevelExamRequest) -> dict:
         exam_score,
         pass_threshold,
     )
-    return {
+    return _translate_response_for_learner(
+        learner_id=learner_id,
+        context="level_exam",
+        payload={
         "passed": passed,
         "promoted": promoted,
         "current_level": refreshed_level,
@@ -1940,7 +2278,8 @@ def take_level_exam(req: LevelExamRequest) -> dict:
             else "Level exam failed. Keep training and retry when metrics improve."
         ),
         "daily_progress": refreshed_daily,
-    }
+        },
+    )
 
 
 @app.post("/api/ui/language")
@@ -1953,6 +2292,7 @@ def update_ui_language(req: LanguageUpdateRequest) -> dict:
     memory.load_or_create(req.learner_id)
     prefs = memory.load_or_create_preferences(req.learner_id)
     levels = prefs.levels()
+    secondary_translation_language = prefs.secondary_translation_language()
     if language not in levels:
         memory.set_language_level(req.learner_id, language, 1)
 
@@ -1980,6 +2320,51 @@ def update_ui_language(req: LanguageUpdateRequest) -> dict:
         difficulty=difficulty,
         today_level=current_level,
         overridden=False,
+        secondary_translation_language=secondary_translation_language,
+    )
+
+
+@app.post("/api/ui/secondary-translation")
+def update_ui_secondary_translation(req: SecondaryTranslationUpdateRequest) -> dict:
+    requested = _normalize_secondary_language(req.secondary_language)
+    raw = (req.secondary_language or "").strip().lower()
+    if raw and raw not in {"off", "none", "null"} and requested is None:
+        logger.warning(
+            "ui_secondary_translation_invalid learner_id=%s requested=%s",
+            req.learner_id,
+            raw,
+        )
+        return {"error": f"Unsupported secondary translation language: {raw}"}
+
+    memory.load_or_create(req.learner_id)
+    prefs = memory.load_or_create_preferences(req.learner_id)
+    preferred_language = (prefs.preferred_language or "ja").strip().lower()
+    if preferred_language not in AVAILABLE_LANGUAGES:
+        preferred_language = "ja"
+        memory.set_preferred_language(req.learner_id, preferred_language)
+    memory.set_secondary_translation_language(req.learner_id, requested)
+
+    state = memory.load_or_create(req.learner_id)
+    snapshot = LearnerSnapshot(
+        learner_id=state.learner_id,
+        streak_days=state.streak_days,
+        recent_accuracy=state.recent_accuracy,
+        recent_games=[g for g in state.recent_games_csv.split(",") if g],
+    )
+    difficulty = planner.difficulty_for(snapshot)
+    current_level = memory.level_for_language(req.learner_id, preferred_language, default_level=1)
+    logger.info(
+        "ui_secondary_translation_updated learner_id=%s secondary_language=%s",
+        req.learner_id,
+        requested or "off",
+    )
+    return _ui_state(
+        learner_id=req.learner_id,
+        preferred_language=preferred_language,
+        difficulty=difficulty,
+        today_level=current_level,
+        overridden=False,
+        secondary_translation_language=requested,
     )
 
 
@@ -2337,4 +2722,10 @@ def evaluate_game(req: GameEvaluateRequest) -> dict:
             )
         score = result.get("score") if isinstance(result, dict) else None
         logger.info("game_eval_done game_type=%s score=%s", req.game_type, score)
+    if isinstance(result, dict):
+        return _translate_response_for_learner(
+            learner_id=req.learner_id,
+            context=f"game_evaluate.{req.game_type}",
+            payload=result,
+        )
     return result

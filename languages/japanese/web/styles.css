@@ -52,6 +52,17 @@ body {
   gap: 8px;
 }
 
+.translation-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 260px;
+}
+
+#secondary-translation-select {
+  width: 100%;
+}
+
 button,
 input,
 select {
@@ -221,6 +232,15 @@ button {
 
 .game-meta-line {
   margin: 0;
+}
+
+.prompt-secondary {
+  margin-top: 8px;
+}
+
+.translation-secondary-line {
+  color: #bfdbfe;
+  font-size: 13px;
 }
 
 .inline-select-field {
@@ -563,6 +583,10 @@ button {
 }
 
 .result-block p {
+  margin: 4px 0;
+}
+
+.result-line {
   margin: 4px 0;
 }
 

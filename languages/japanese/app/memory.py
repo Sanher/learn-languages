@@ -25,6 +25,7 @@ class LearnerPreferences:
     learner_id: str
     preferred_language: str
     levels_json: str
+    secondary_translation_lang: str
 
     def levels(self) -> dict[str, int]:
         raw = self.levels_json.strip()
@@ -35,6 +36,10 @@ class LearnerPreferences:
         except json.JSONDecodeError:
             return {}
         return {str(key): int(value) for key, value in parsed.items()}
+
+    def secondary_translation_language(self) -> str | None:
+        value = (self.secondary_translation_lang or "").strip().lower()
+        return value or None
 
 
 @dataclass
@@ -178,7 +183,8 @@ class ProgressMemory:
                 CREATE TABLE IF NOT EXISTS learner_preferences (
                     learner_id TEXT PRIMARY KEY,
                     preferred_language TEXT NOT NULL DEFAULT 'ja',
-                    levels_json TEXT NOT NULL DEFAULT '{"ja": 1}'
+                    levels_json TEXT NOT NULL DEFAULT '{"ja": 1}',
+                    secondary_translation_lang TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -243,6 +249,19 @@ class ProgressMemory:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS translation_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    source_text TEXT NOT NULL,
+                    source_language TEXT NOT NULL DEFAULT 'en',
+                    target_language TEXT NOT NULL,
+                    context TEXT NOT NULL DEFAULT '',
+                    translated_text TEXT NOT NULL,
+                    updated_at_iso TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_item_review_due
                 ON item_review_state (learner_id, language, due_day_iso)
                 """
@@ -258,6 +277,7 @@ class ProgressMemory:
             self._ensure_column(conn, "daily_topic_progress", "daily_score", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "daily_topic_progress", "daily_game_scores_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "daily_topic_progress", "daily_game_failures_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "learner_preferences", "secondary_translation_lang", "TEXT NOT NULL DEFAULT ''")
         logger.info("memory_schema_ready db_path=%s", self.db_path)
 
     @staticmethod
@@ -310,7 +330,7 @@ class ProgressMemory:
     def load_or_create_preferences(self, learner_id: str) -> LearnerPreferences:
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT learner_id, preferred_language, levels_json "
+                "SELECT learner_id, preferred_language, levels_json, COALESCE(secondary_translation_lang, '') "
                 "FROM learner_preferences WHERE learner_id = ?",
                 (learner_id,),
             ).fetchone()
@@ -321,8 +341,8 @@ class ProgressMemory:
             default_levels = json.dumps({"ja": 1}, ensure_ascii=False)
             conn.execute(
                 """
-                INSERT INTO learner_preferences (learner_id, preferred_language, levels_json)
-                VALUES (?, 'ja', ?)
+                INSERT INTO learner_preferences (learner_id, preferred_language, levels_json, secondary_translation_lang)
+                VALUES (?, 'ja', ?, '')
                 """,
                 (learner_id, default_levels),
             )
@@ -331,6 +351,7 @@ class ProgressMemory:
                 learner_id=learner_id,
                 preferred_language="ja",
                 levels_json=default_levels,
+                secondary_translation_lang="",
             )
 
     def set_preferred_language(self, learner_id: str, language: str) -> None:
@@ -363,6 +384,78 @@ class ProgressMemory:
                 (json.dumps(levels, ensure_ascii=False), learner_id),
             )
         logger.info("language_level_updated learner_id=%s language=%s level=%s", learner_id, language, int(level))
+
+    def set_secondary_translation_language(self, learner_id: str, secondary_language: str | None) -> None:
+        normalized = (secondary_language or "").strip().lower()
+        _ = self.load_or_create_preferences(learner_id)
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE learner_preferences
+                SET secondary_translation_lang = ?
+                WHERE learner_id = ?
+                """,
+                (normalized, learner_id),
+            )
+        logger.info("secondary_translation_language_updated learner_id=%s secondary_language=%s", learner_id, normalized or "off")
+
+    def load_cached_translation(self, cache_key: str) -> str | None:
+        normalized_key = str(cache_key or "").strip()
+        if not normalized_key:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT translated_text
+                FROM translation_cache
+                WHERE cache_key = ?
+                """,
+                (normalized_key,),
+            ).fetchone()
+        if not row:
+            return None
+        translated = str(row[0] or "").strip()
+        return translated or None
+
+    def save_cached_translation(
+        self,
+        *,
+        cache_key: str,
+        source_text: str,
+        source_language: str,
+        target_language: str,
+        context: str,
+        translated_text: str,
+        updated_at_iso: str,
+    ) -> None:
+        normalized_key = str(cache_key or "").strip()
+        if not normalized_key:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO translation_cache (
+                    cache_key, source_text, source_language, target_language, context, translated_text, updated_at_iso
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (cache_key) DO UPDATE SET
+                    source_text = excluded.source_text,
+                    source_language = excluded.source_language,
+                    target_language = excluded.target_language,
+                    context = excluded.context,
+                    translated_text = excluded.translated_text,
+                    updated_at_iso = excluded.updated_at_iso
+                """,
+                (
+                    normalized_key,
+                    str(source_text or ""),
+                    str(source_language or "en"),
+                    str(target_language or ""),
+                    str(context or ""),
+                    str(translated_text or ""),
+                    str(updated_at_iso or ""),
+                ),
+            )
 
     def level_for_language(self, learner_id: str, language: str, default_level: int = 1) -> int:
         prefs = self.load_or_create_preferences(learner_id)

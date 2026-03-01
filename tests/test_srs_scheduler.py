@@ -43,6 +43,27 @@ class SRSSchedulerTests(unittest.TestCase):
         self.assertEqual(lapses, 1)
         self.assertLess(ease, previous.ease)
 
+    def test_next_srs_state_caps_interval_for_very_large_previous_state(self) -> None:
+        previous = ItemReviewState(
+            learner_id="learner",
+            language="ja",
+            topic_key="identity_and_plans",
+            game_type="sentence_order",
+            item_id="ja-sentence-order-1-1",
+            due_day_iso=date.today().isoformat(),
+            interval_days=10_000_000,
+            ease=3.8,
+            repetitions=20,
+            lapses=0,
+            last_score=100,
+            last_seen_day_iso=date.today().isoformat(),
+        )
+
+        interval, _, repetitions, _, quality = api._next_srs_state(previous=previous, score=100)
+        self.assertEqual(quality, 5)
+        self.assertEqual(repetitions, 21)
+        self.assertLessEqual(interval, api.SRS_MAX_INTERVAL_DAYS)
+
     def test_update_item_review_state_applies_success_then_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             memory = ProgressMemory(f"{tmp_dir}/srs.db")

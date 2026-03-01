@@ -168,6 +168,61 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertIn("ai_generated_prompt", card)
         self.assertIn("ai_prompt_source", card)
 
+    def test_extra_game_load_includes_translation_bundles_when_secondary_enabled(self) -> None:
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": self.learner_id,
+                "secondary_language": "es",
+            },
+        )
+        daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(daily.status_code, 200)
+        daily_data = daily.json()
+
+        self.client.post(
+            "/api/games/lesson/complete",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": daily_data["lesson"]["topic_key"],
+            },
+        )
+        for card in daily_data["daily_games"]:
+            payload = self._payload_for_daily_card(card)
+            self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": card["game_type"],
+                    "language": "ja",
+                    "level": card["level"],
+                    "retry_count": 0,
+                    "payload": payload,
+                },
+            )
+
+        unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(unlocked.status_code, 200)
+        extra_meta = unlocked.json()["extra_games"][0]
+
+        load = self.client.post(
+            "/api/games/extra/load",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": unlocked.json()["topic"]["topic_key"],
+                "game_type": extra_meta["game_type"],
+            },
+        )
+        self.assertEqual(load.status_code, 200)
+        card = load.json()["card"]
+        self.assertIn("prompt_translations", card)
+        self.assertEqual(card["prompt_translations"]["en"], card["prompt"])
+        self.assertEqual(card["prompt_translations"]["secondary_lang"], "es")
+        self.assertIn("ai_generated_prompt_translations", card)
+        self.assertEqual(card["ai_generated_prompt_translations"]["secondary_lang"], "es")
+
     def test_playing_extra_game_does_not_change_daily_score(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
@@ -589,6 +644,36 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(data["topic"]["topic_key"], topic_key)
         self.assertGreaterEqual(len(data.get("review_games", [])), 3)
         self.assertIsNotNone(data.get("selected_game"))
+
+    def test_topic_review_includes_translation_bundles_when_secondary_enabled(self) -> None:
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": self.learner_id,
+                "secondary_language": "es",
+            },
+        )
+        topic_key = self._close_topic_and_promote_to_level_2()
+
+        review = self.client.post(
+            "/api/topics/review",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": topic_key,
+            },
+        )
+        self.assertEqual(review.status_code, 200)
+        data = review.json()
+        self.assertIn("title_translations", data["topic"])
+        self.assertEqual(data["topic"]["title_translations"]["secondary_lang"], "es")
+        self.assertIn("description_translations", data["topic"])
+        self.assertEqual(data["topic"]["description_translations"]["secondary_lang"], "es")
+        self.assertIn("objective_translations", data["lesson"])
+        self.assertEqual(data["lesson"]["objective_translations"]["secondary_lang"], "es")
+        first_card = data["review_games"][0]
+        self.assertIn("prompt_translations", first_card)
+        self.assertEqual(first_card["prompt_translations"]["secondary_lang"], "es")
 
     def test_topic_review_evaluate_does_not_modify_daily_progress(self) -> None:
         topic_key = self._close_topic_and_promote_to_level_2()

@@ -54,6 +54,8 @@ pip install -r requirements.txt
 - Carga estado + juego único diario desde `/api/games/daily`
 - Evalúa y reintenta juegos por `/api/games/evaluate`
 - Cambio persistente de idioma por `/api/ui/language`
+- Selector de traducción secundaria en topbar (`Off | Español`) por `/api/ui/secondary-translation`
+- Las líneas de traducción usan bundles `*_translations` (EN base + ES secundaria cuando esté activa)
 
 ## Ejecutar tests
 

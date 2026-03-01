@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 import httpx
 from .runtime_config import get_setting
+
+logger = logging.getLogger("learn_languages.japanese.openai")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
 
 class OpenAIPlanner:
@@ -24,6 +39,188 @@ class OpenAIPlanner:
             default="gpt-4o-mini-transcribe,whisper-1",
         )
         self.stt_models = [model_name.strip() for model_name in raw_stt_models.split(",") if model_name.strip()]
+        # Short timeout and circuit breaker for translation calls to avoid cascading latency/cost.
+        timeout_raw = get_setting(
+            env_names=("OPENAI_TRANSLATION_TIMEOUT_SECONDS",),
+            option_names=("openai_translation_timeout_seconds", "openai.translation_timeout_seconds"),
+            default="12",
+        )
+        threshold_raw = get_setting(
+            env_names=("OPENAI_TRANSLATION_FAILURE_THRESHOLD",),
+            option_names=("openai_translation_failure_threshold", "openai.translation_failure_threshold"),
+            default="3",
+        )
+        cooldown_raw = get_setting(
+            env_names=("OPENAI_TRANSLATION_COOLDOWN_SECONDS",),
+            option_names=("openai_translation_cooldown_seconds", "openai.translation_cooldown_seconds"),
+            default="180",
+        )
+        try:
+            self.translation_timeout_seconds = max(2.0, float(timeout_raw))
+        except (TypeError, ValueError):
+            self.translation_timeout_seconds = 12.0
+        try:
+            self.translation_failure_threshold = max(1, int(threshold_raw))
+        except (TypeError, ValueError):
+            self.translation_failure_threshold = 3
+        try:
+            self.translation_cooldown_seconds = max(30, int(cooldown_raw))
+        except (TypeError, ValueError):
+            self.translation_cooldown_seconds = 180
+        max_chars_raw = get_setting(
+            env_names=("OPENAI_TRANSLATION_MAX_TEXT_CHARS",),
+            option_names=("openai_translation_max_text_chars", "openai.translation_max_text_chars"),
+            default="900",
+        )
+        max_context_raw = get_setting(
+            env_names=("OPENAI_TRANSLATION_MAX_CONTEXT_CHARS",),
+            option_names=("openai_translation_max_context_chars", "openai.translation_max_context_chars"),
+            default="240",
+        )
+        try:
+            self.translation_max_text_chars = max(60, int(max_chars_raw))
+        except (TypeError, ValueError):
+            self.translation_max_text_chars = 900
+        try:
+            self.translation_max_context_chars = max(20, int(max_context_raw))
+        except (TypeError, ValueError):
+            self.translation_max_context_chars = 240
+        self._translation_consecutive_failures = 0
+        self._translation_circuit_open_until = 0.0
+
+    def _is_translation_circuit_open(self) -> bool:
+        return time.monotonic() < self._translation_circuit_open_until
+
+    def _mark_translation_success(self) -> None:
+        if self._translation_consecutive_failures:
+            logger.info(
+                "translation_recovered consecutive_failures=%s",
+                self._translation_consecutive_failures,
+            )
+        self._translation_consecutive_failures = 0
+        self._translation_circuit_open_until = 0.0
+
+    def _mark_translation_failure(self, *, reason: str) -> None:
+        self._translation_consecutive_failures += 1
+        logger.warning(
+            "translation_failure consecutive_failures=%s threshold=%s reason=%s",
+            self._translation_consecutive_failures,
+            self.translation_failure_threshold,
+            reason,
+        )
+        if self._translation_consecutive_failures < self.translation_failure_threshold:
+            return
+        self._translation_circuit_open_until = time.monotonic() + float(self.translation_cooldown_seconds)
+        logger.warning(
+            "translation_circuit_open cooldown_seconds=%s",
+            self.translation_cooldown_seconds,
+        )
+
+    def translate_text(
+        self,
+        *,
+        source_text: str,
+        target_language: str,
+        source_language: str = "en",
+        context: str = "",
+    ) -> dict[str, Any]:
+        text = str(source_text or "").strip()
+        target = str(target_language or "").strip().lower()
+        source = str(source_language or "en").strip().lower()
+        if not text:
+            return {
+                "source": "fallback",
+                "translated_text": "",
+                "error": "Empty source text for translation.",
+            }
+        if len(text) > self.translation_max_text_chars:
+            logger.warning(
+                "translation_skipped_text_too_long chars=%s max=%s",
+                len(text),
+                self.translation_max_text_chars,
+            )
+            return {
+                "source": "fallback",
+                "translated_text": "",
+                "error": "Source text is too long for translation.",
+            }
+        if not target:
+            return {
+                "source": "fallback",
+                "translated_text": "",
+                "error": "Missing target language for translation.",
+            }
+        if not self.api_key:
+            return {
+                "source": "fallback",
+                "translated_text": "",
+                "error": "OPENAI_API_KEY is not configured for translation.",
+            }
+        if self._is_translation_circuit_open():
+            return {
+                "source": "fallback",
+                "translated_text": "",
+                "error": "Translation temporarily unavailable due to repeated provider failures.",
+            }
+
+        system_prompt = (
+            "You are a precise translator for language-learning content. "
+            "Translate the input text to the requested target language. "
+            "Preserve Japanese script, romaji, punctuation, and line breaks when present. "
+            "Return plain text only."
+        )
+        user_prompt = (
+            f"Source language: {source}\n"
+            f"Target language: {target}\n"
+            f"Context: {str(context or 'general').strip()[: self.translation_max_context_chars]}\n"
+            f"Text:\n{text}"
+        )
+
+        try:
+            with httpx.Client(timeout=self.translation_timeout_seconds) as client:
+                response = client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "input": [
+                            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+                            {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
+                        ],
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            self._mark_translation_failure(reason=type(exc).__name__)
+            return {
+                "source": "fallback",
+                "translated_text": "",
+                "error": f"Translation request failed: {type(exc).__name__}",
+            }
+
+        translated_text = ""
+        for block in payload.get("output", []):
+            for item in block.get("content", []):
+                if item.get("type") == "output_text":
+                    translated_text += item.get("text", "")
+
+        normalized_output = translated_text.strip()
+        if not normalized_output:
+            self._mark_translation_failure(reason="empty_output")
+            return {
+                "source": "fallback",
+                "translated_text": "",
+                "error": "Empty translation output.",
+            }
+        self._mark_translation_success()
+        return {
+            "source": "openai",
+            "translated_text": normalized_output,
+        }
 
     async def generate_daily_content(self, *, difficulty: int, games: list[str], learner_note: str) -> dict[str, Any]:
         if not self.api_key:
