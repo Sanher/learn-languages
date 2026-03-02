@@ -5,6 +5,7 @@ const gameZoneEl = document.getElementById('game-zone');
 const gamesSidebarEl = document.getElementById('games-sidebar');
 const changeLanguageBtn = document.getElementById('change-language-btn');
 const secondaryTranslationSelectEl = document.getElementById('secondary-translation-select');
+const secondaryTranslationStatusEl = document.getElementById('secondary-translation-status');
 const LANGUAGE_ALIASES = {
   ja: 'Japanese',
 };
@@ -21,11 +22,15 @@ let extraGameCards = [];
 let dailyTopic = null;
 let dailyLesson = null;
 let dailyProgress = null;
+let lessonCollapsed = false;
+let dailyGamesCollapsed = false;
 let translationPreferences = {
   primary_translation_language: 'en',
   secondary_translation_language: null,
   available_secondary_translation_languages: [{ code: 'es', label: 'Español' }],
+  secondary_translation_provider_available: false,
 };
+let secondaryTranslationUnavailable = false;
 let closedTopics = [];
 let closedTopicsVisible = false;
 let isReviewMode = false;
@@ -109,6 +114,7 @@ function setTranslationPreferences(preferences) {
     available_secondary_translation_languages: available.length > 0
       ? available
       : [{ code: 'es', label: 'Español' }],
+    secondary_translation_provider_available: Boolean(payload.secondary_translation_provider_available),
   };
 }
 
@@ -130,6 +136,48 @@ function renderSecondaryTranslationSelector() {
   ].join('');
   secondaryTranslationSelectEl.innerHTML = options;
   secondaryTranslationSelectEl.value = selected;
+}
+
+function hasSecondaryTranslationsInPayload(value) {
+  if (!value) return false;
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasSecondaryTranslationsInPayload(entry));
+  }
+  if (typeof value !== 'object') return false;
+  const bundleLike = Object.prototype.hasOwnProperty.call(value, 'en')
+    && Object.prototype.hasOwnProperty.call(value, 'secondary_lang')
+    && Object.prototype.hasOwnProperty.call(value, 'secondary');
+  if (bundleLike) {
+    return String(value.secondary || '').trim().length > 0;
+  }
+  return Object.values(value).some((entry) => hasSecondaryTranslationsInPayload(entry));
+}
+
+function refreshSecondaryTranslationAvailability(payload) {
+  const selected = normalizeSecondaryLanguage(translationPreferences.secondary_translation_language);
+  if (!selected) {
+    secondaryTranslationUnavailable = false;
+    return;
+  }
+  if (!translationPreferences.secondary_translation_provider_available) {
+    secondaryTranslationUnavailable = true;
+    return;
+  }
+  secondaryTranslationUnavailable = !hasSecondaryTranslationsInPayload(payload);
+}
+
+function renderSecondaryTranslationStatus() {
+  if (!secondaryTranslationStatusEl) return;
+  const selected = normalizeSecondaryLanguage(translationPreferences.secondary_translation_language);
+  secondaryTranslationStatusEl.classList.remove('translation-status-warning');
+  if (!selected || !secondaryTranslationUnavailable) {
+    secondaryTranslationStatusEl.textContent = '';
+    secondaryTranslationStatusEl.hidden = true;
+    return;
+  }
+  secondaryTranslationStatusEl.hidden = false;
+  secondaryTranslationStatusEl.classList.add('translation-status-warning');
+  secondaryTranslationStatusEl.textContent = `${secondaryTranslationLabel(selected)} is not available right now.`;
 }
 
 // Shared renderer for all EN/secondary translation bundles returned by the API.
@@ -203,6 +251,7 @@ function updateTopbar() {
     changeLanguageBtn.hidden = availableLanguages.length <= 1;
   }
   renderSecondaryTranslationSelector();
+  renderSecondaryTranslationStatus();
   const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
   const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
   if (todayScoreEl) {
@@ -260,6 +309,27 @@ function isLessonCompleted() {
 function areExtrasUnlocked() {
   if (isReviewMode) return true;
   return Boolean(dailyProgress && dailyProgress.extras_unlocked);
+}
+
+function dailyProgressCounts() {
+  const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
+  const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 0);
+  return { completedCount, totalCount };
+}
+
+function areDailyGamesCompleted() {
+  if (isReviewMode) return false;
+  const { completedCount, totalCount } = dailyProgressCounts();
+  return totalCount > 0 && completedCount >= totalCount;
+}
+
+function isDailyGameType(gameType) {
+  return dailyGameCards.some((card) => card.game_type === gameType);
+}
+
+function isSelectedGameExtra() {
+  if (!selectedGame) return false;
+  return !isDailyGameType(selectedGame.game_type);
 }
 
 function refreshAvailableGameCards() {
@@ -364,9 +434,31 @@ function renderLessonPanel() {
     `
     : '';
 
+  if (lessonCollapsed) {
+    return `
+      <section class="lesson-card lesson-card-collapsed">
+        <div class="panel-head">
+          ${lessonTitleHtml || '<h2>Daily lesson</h2>'}
+          <button id="toggle-lesson-btn" type="button" class="ghost-btn">Expand lesson</button>
+        </div>
+        ${topicTitleHtml || `<p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>`}
+        <p class="muted">
+          ${lessonDone ? 'Lesson completed.' : 'Lesson pending.'}
+          ${lessonDone ? ' You can review the theory at any time.' : ' Complete it to unlock today\'s 3 games.'}
+        </p>
+        <div class="lesson-actions lesson-actions-inline">
+          ${lessonDone ? '<button id="review-lesson-btn" type="button" class="ghost-btn">Review lesson</button>' : lessonButton}
+        </div>
+      </section>
+    `;
+  }
+
   return `
     <section class="lesson-card">
-      ${lessonTitleHtml}
+      <div class="panel-head">
+        ${lessonTitleHtml || '<h2>Daily lesson</h2>'}
+        <button id="toggle-lesson-btn" type="button" class="ghost-btn">Collapse lesson</button>
+      </div>
       ${topicTitleHtml || `<p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>`}
       ${topicDescriptionHtml}
       ${renderTranslatedField(dailyLesson, 'objective', { className: 'muted' })}
@@ -378,6 +470,7 @@ function renderLessonPanel() {
       </div>
       <div class="lesson-actions">
         ${lessonButton}
+        ${lessonDone ? '<button id="review-lesson-btn" type="button" class="ghost-btn">Review lesson</button>' : ''}
       </div>
       <p class="muted">Daily progress: ${completedCount}/${totalCount} games completed.</p>
       <p class="muted">Days on this topic: ${topicDays}.</p>
@@ -394,6 +487,25 @@ function renderLessonPanel() {
         </button>
       </div>
       ${closedTopicsHtml}
+    </section>
+  `;
+}
+
+function renderTodaySummaryPanel() {
+  if (!areDailyGamesCompleted()) return '';
+  const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
+  const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
+  const byGame = (dailyProgress && dailyProgress.daily_scores_by_game) || {};
+  const scoreRows = Object.entries(byGame)
+    .map(([gameType, gameScore]) => `<li>${escapeHtml(gameType)}: ${escapeHtml(gameScore)}</li>`)
+    .join('');
+  return `
+    <section class="game-summary-card">
+      <h2>Today's results</h2>
+      <p><strong>Score:</strong> ${score}/${scoreMax}</p>
+      <p class="muted">Daily lesson + 3 daily games completed. Progress has been saved.</p>
+      <p class="muted">You can continue with extra topic games using the list on the right.</p>
+      ${scoreRows ? `<ul class="result-list">${scoreRows}</ul>` : ''}
     </section>
   `;
 }
@@ -428,6 +540,7 @@ function updateSentenceOrderStatusLine() {
 
 function renderSingleGame(game) {
   const lessonHtml = renderLessonPanel();
+  const summaryHtml = renderTodaySummaryPanel();
   if (!isLessonCompleted()) {
     gameZoneEl.classList.remove('hidden');
     gameZoneEl.innerHTML = `
@@ -439,6 +552,22 @@ function renderSingleGame(game) {
     return;
   }
 
+  if (areDailyGamesCompleted() && dailyGamesCollapsed && !isSelectedGameExtra()) {
+    gameZoneEl.classList.remove('hidden');
+    gameZoneEl.innerHTML = `
+      ${lessonHtml}
+      <section class="game-card-collapsed">
+        <div class="panel-head">
+          <h2>Daily games</h2>
+          <button id="review-daily-games-btn" type="button" class="ghost-btn">Review daily games</button>
+        </div>
+        <p class="muted">Today's daily game block is completed.</p>
+      </section>
+      ${summaryHtml}
+    `;
+    return;
+  }
+
   if (!game) {
     gameZoneEl.classList.remove('hidden');
     gameZoneEl.innerHTML = `
@@ -446,6 +575,7 @@ function renderSingleGame(game) {
       <section class="game-card-locked">
         <p class="muted">No game available for today.</p>
       </section>
+      ${summaryHtml}
     `;
     return;
   }
@@ -812,6 +942,7 @@ function renderSingleGame(game) {
       </div>
       <div id="game-result" class="result"></div>
     </section>
+    ${summaryHtml}
   `;
 }
 
@@ -1167,6 +1298,25 @@ function applyKanjiEvaluationFeedback(data) {
   });
 }
 
+function applyListeningGapFillFeedback(data) {
+  if (!selectedGame || selectedGame.game_type !== 'listening_gap_fill') return;
+  const expected = Array.isArray(data.expected_gap_tokens) ? data.expected_gap_tokens : [];
+  const observed = Array.isArray(data.user_gap_tokens) ? data.user_gap_tokens : [];
+  const dropzones = Array.from(gameZoneEl.querySelectorAll('.gap-dropzone[data-gap-index]'))
+    .sort((a, b) => Number(a.dataset.gapIndex || 0) - Number(b.dataset.gapIndex || 0));
+  dropzones.forEach((zone, idx) => {
+    const expectedToken = String(expected[idx] || '').trim();
+    const observedToken = String(observed[idx] || '').trim();
+    zone.classList.remove('gap-correct', 'gap-wrong');
+    if (!observedToken) return;
+    if (expectedToken && observedToken === expectedToken) {
+      zone.classList.add('gap-correct');
+    } else {
+      zone.classList.add('gap-wrong');
+    }
+  });
+}
+
 function renderMismatchesHtml(mismatches) {
   if (!Array.isArray(mismatches) || mismatches.length === 0) return '';
   const rows = mismatches
@@ -1257,6 +1407,7 @@ function renderEvaluation(data) {
     ${wordFeedbackHtml}
     ${nextStepHtml}
   `;
+  applyListeningGapFillFeedback(data);
   applyKanjiEvaluationFeedback(data);
 }
 
@@ -1284,12 +1435,26 @@ async function evaluateSelectedGame(isRetry) {
     }),
   });
   const data = await res.json();
+  refreshSecondaryTranslationAvailability(data);
+  let collapseDailyPanelAfterEvaluation = false;
   if (!isReviewMode && data.daily_progress) {
     dailyProgress = data.daily_progress;
+    if (areDailyGamesCompleted()) {
+      dailyGamesCollapsed = true;
+      if (selectedGame && isDailyGameType(selectedGame.game_type)) {
+        selectedGame = null;
+      }
+      collapseDailyPanelAfterEvaluation = true;
+    }
     refreshAvailableGameCards();
     renderSidebar(availableGameCards);
   }
   updateTopbar();
+  if (collapseDailyPanelAfterEvaluation) {
+    renderSingleGame(selectedGame);
+    wireGameActions();
+    return;
+  }
   renderEvaluation(data);
 }
 
@@ -1576,6 +1741,8 @@ async function completeDailyLesson() {
   if (data.daily_progress) {
     dailyProgress = data.daily_progress;
   }
+  lessonCollapsed = true;
+  dailyGamesCollapsed = false;
   refreshAvailableGameCards();
   selectedGame = nextPendingDailyGame() || availableGameCards[0] || null;
   updateTopbar();
@@ -1645,6 +1812,8 @@ async function startTopicReview(topicKey) {
   selectedGame = data.selected_game || dailyGameCards[0] || null;
   retryCounters.clear();
   sentenceOrderPenaltyByAttempt.clear();
+  lessonCollapsed = false;
+  dailyGamesCollapsed = false;
   updateTopbar();
   renderSidebar(availableGameCards);
   renderSingleGame(selectedGame);
@@ -1893,6 +2062,9 @@ function wireGameActions() {
   const evaluateBtn = document.getElementById('evaluate-btn');
   const retryBtn = document.getElementById('retry-btn');
   const completeLessonBtn = document.getElementById('complete-lesson-btn');
+  const toggleLessonBtn = document.getElementById('toggle-lesson-btn');
+  const reviewLessonBtn = document.getElementById('review-lesson-btn');
+  const reviewDailyGamesBtn = document.getElementById('review-daily-games-btn');
   const kanaPlayBtn = document.getElementById('kana-play-audio-btn');
   const listeningPlayBtn = document.getElementById('listening-play-audio-btn');
   const kanaRecordBtn = document.getElementById('kana-record-btn');
@@ -1927,6 +2099,23 @@ function wireGameActions() {
   exitReviewBtn?.addEventListener('click', exitReviewMode);
   reviewTopicBtns.forEach((btn) => {
     btn.addEventListener('click', () => startTopicReview(btn.dataset.topicKey || ''));
+  });
+  toggleLessonBtn?.addEventListener('click', () => {
+    lessonCollapsed = !lessonCollapsed;
+    renderSingleGame(selectedGame);
+    wireGameActions();
+  });
+  reviewLessonBtn?.addEventListener('click', () => {
+    lessonCollapsed = false;
+    renderSingleGame(selectedGame);
+    wireGameActions();
+  });
+  reviewDailyGamesBtn?.addEventListener('click', () => {
+    dailyGamesCollapsed = false;
+    selectedGame = nextPendingDailyGame() || dailyGameCards[0] || selectedGame;
+    renderSidebar(availableGameCards);
+    renderSingleGame(selectedGame);
+    wireGameActions();
   });
   initDragAndDropComponents();
   syncKanjiReadingPreview();
@@ -2045,6 +2234,7 @@ async function loadDailyGame() {
   currentLevel = Number(data.current_level || 1);
   todayLevel = Number(data.today_level || currentLevel);
   setTranslationPreferences(data.translation_preferences || {});
+  refreshSecondaryTranslationAvailability(data);
   isReviewMode = false;
   dailyTopic = data.topic || null;
   dailyLesson = data.lesson || null;
@@ -2073,6 +2263,11 @@ async function loadDailyGame() {
   sentenceOrderPenaltyByAttempt.clear();
   closedTopicsVisible = false;
   closedTopics = [];
+  lessonCollapsed = isLessonCompleted();
+  dailyGamesCollapsed = areDailyGamesCompleted();
+  if (dailyGamesCollapsed && selectedGame && isDailyGameType(selectedGame.game_type)) {
+    selectedGame = null;
+  }
   updateTopbar();
   renderSidebar(availableGameCards);
   renderSingleGame(selectedGame);
@@ -2150,6 +2345,9 @@ gamesSidebarEl?.addEventListener('click', (event) => {
       ));
     }
     selectedGame = found;
+    if (isDailyGameType(gameType)) {
+      dailyGamesCollapsed = false;
+    }
     retryCounters.clear();
     renderSidebar(availableGameCards);
     renderSingleGame(selectedGame);

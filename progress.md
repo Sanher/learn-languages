@@ -53,3 +53,38 @@ Original prompt: puedes añadir un cuadro de respuesta para todos los juegos, co
 - Removed `shadowing_score` from active daily game pool (`game_engine.GAME_POOL`).
 - Removed `ShadowingScoreService` registration in Japanese API startup, so it no longer appears in daily selection or right-side game list.
 - Removed shadowing-specific payload/evaluation branches from API to avoid stale references.
+
+## 2026-03-02 (lesson/game flow UX + secondary ES fallback)
+- Updated `languages/japanese/web/app.js` with a guided flow:
+  - Added collapsible lesson panel (`Expand lesson` / `Collapse lesson`).
+  - Added `Review lesson` action after lesson completion.
+  - Auto-collapses lesson after `Complete lesson and start games`.
+  - Added daily game block collapse after finishing the 3 required daily games.
+  - Added `Review daily games` action from collapsed daily block.
+  - Added summary panel after daily completion with score, persistence confirmation, and extra-games hint.
+- Updated `listening_gap_fill` UX in `languages/japanese/web/app.js`:
+  - On evaluation, correct selected gap options now highlight in green (`gap-correct`).
+  - Incorrect selected options highlight in amber (`gap-wrong`).
+- Updated styles in `languages/japanese/web/styles.css`:
+  - New reusable collapsed/summary panel styles.
+  - Visual feedback classes for listening gap dropzones.
+- Updated backend translation behavior in `languages/japanese/app/api.py`:
+  - Added deterministic Spanish fallback translations for key lesson/game strings and prompt prefixes.
+  - Added fallback path when OpenAI translation is unavailable (`no_api_key` or provider failure), with HA-friendly logs:
+    - `translation_fallback_used ... reason=no_api_key`
+    - `translation_fallback_used ... reason=openai_empty_or_failed`
+- Validation executed:
+  - `node --check languages/japanese/web/app.js`
+  - `python3 -m py_compile languages/japanese/app/api.py`
+  - `python3 -m unittest tests.test_sentence_order_service tests.test_listening_gap_fill_service tests.test_mora_romanization_service tests.test_grammar_particle_fix_service tests.test_context_quiz_service tests.test_kanji_match_service tests.test_pronunciation_match_service`
+- Validation limitation in this local shell:
+  - API-level test modules that import FastAPI app fail here due missing `python-multipart` package.
+
+## 2026-03-02 (secondary translation availability message)
+- Removed deterministic local fallback for secondary Spanish translations in `languages/japanese/app/api.py`; secondary lines now depend on OpenAI translation responses again.
+- Extended `translation_preferences` payload with `secondary_translation_provider_available` to expose provider readiness to UI.
+- Added UI message under secondary translation selector:
+  - `"<Language> is not available right now."` when secondary translation is selected but unavailable.
+- Added payload inspection in `languages/japanese/web/app.js` to detect missing secondary lines in responses and show/hide the warning status.
+- Added topbar status element in `languages/japanese/web/index.html` and warning style in `languages/japanese/web/styles.css`.
+- Added API contract assertions in `tests/test_api_english_contract.py` for `secondary_translation_provider_available`.

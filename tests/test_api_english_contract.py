@@ -62,6 +62,11 @@ class ApiEnglishContractTests(unittest.TestCase):
         preferences = data.get("translation_preferences", {})
         self.assertEqual(preferences.get("primary_translation_language"), "en")
         self.assertIsNone(preferences.get("secondary_translation_language"))
+        self.assertIn("secondary_translation_provider_available", preferences)
+        self.assertEqual(
+            preferences.get("secondary_translation_provider_available"),
+            bool(api.openai_planner.api_key),
+        )
         self.assertIn(
             {"code": "es", "label": "Español"},
             preferences.get("available_secondary_translation_languages", []),
@@ -78,6 +83,10 @@ class ApiEnglishContractTests(unittest.TestCase):
         )
         self.assertEqual(save.status_code, 200)
         self.assertEqual(save.json()["translation_preferences"]["secondary_translation_language"], "es")
+        self.assertEqual(
+            save.json()["translation_preferences"]["secondary_translation_provider_available"],
+            bool(api.openai_planner.api_key),
+        )
 
         daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
         self.assertEqual(daily.status_code, 200)

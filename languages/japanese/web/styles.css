@@ -63,6 +63,10 @@ body {
   width: 100%;
 }
 
+.translation-status-warning {
+  color: #fca5a5;
+}
+
 button,
 input,
 select {
@@ -130,9 +134,25 @@ button {
   margin-bottom: 12px;
 }
 
+.lesson-card-collapsed {
+  background: #0b172d;
+}
+
 .lesson-card h2 {
   margin-top: 0;
   margin-bottom: 10px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.panel-head h2 {
+  margin: 0;
 }
 
 .lesson-points {
@@ -157,6 +177,12 @@ button {
 
 .lesson-actions {
   margin-top: 10px;
+}
+
+.lesson-actions-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .lesson-progress-actions {
@@ -200,6 +226,22 @@ button {
   border-radius: 10px;
   padding: 12px;
   background: #101a30;
+}
+
+.game-card-collapsed,
+.game-summary-card {
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 12px;
+  background: #101a30;
+}
+
+.game-summary-card {
+  margin-top: 12px;
+}
+
+.game-summary-card h2 {
+  margin-top: 0;
 }
 
 #games-sidebar h4 {
@@ -304,6 +346,16 @@ button {
   background: #1b273d;
   padding: 6px 10px;
   margin: 0 4px;
+}
+
+.gap-dropzone.gap-correct {
+  border-color: #10b981;
+  background: #123526;
+}
+
+.gap-dropzone.gap-wrong {
+  border-color: #f59e0b;
+  background: #3c2c13;
 }
 
 .gap-options-bank {

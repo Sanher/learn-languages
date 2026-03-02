@@ -353,6 +353,7 @@ def _translation_preferences_payload(secondary_language: str | None) -> dict[str
         "primary_translation_language": "en",
         "secondary_translation_language": normalized,
         "available_secondary_translation_languages": options,
+        "secondary_translation_provider_available": bool(openai_planner.api_key),
     }
 
 
