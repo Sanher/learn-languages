@@ -1110,6 +1110,47 @@ class ProgressMemory:
         )
         return ItemReviewState(*payload)
 
+    def list_completed_extra_game_types_for_day(
+        self,
+        *,
+        learner_id: str,
+        language: str,
+        topic_key: str,
+        day_iso: str,
+        excluded_game_types: list[str],
+    ) -> list[str]:
+        excluded = [str(value).strip() for value in excluded_game_types if str(value).strip()]
+        with self._conn() as conn:
+            if excluded:
+                placeholders = ",".join("?" for _ in excluded)
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT game_type
+                    FROM item_review_state
+                    WHERE learner_id = ?
+                      AND language = ?
+                      AND topic_key = ?
+                      AND last_seen_day_iso = ?
+                      AND game_type NOT IN ({placeholders})
+                    ORDER BY game_type ASC
+                    """,
+                    (learner_id, language, topic_key, day_iso, *excluded),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT game_type
+                    FROM item_review_state
+                    WHERE learner_id = ?
+                      AND language = ?
+                      AND topic_key = ?
+                      AND last_seen_day_iso = ?
+                    ORDER BY game_type ASC
+                    """,
+                    (learner_id, language, topic_key, day_iso),
+                ).fetchall()
+        return [str(row[0]).strip() for row in rows if str(row[0]).strip()]
+
     def list_due_item_review_states(
         self,
         learner_id: str,

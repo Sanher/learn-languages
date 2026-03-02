@@ -372,6 +372,10 @@ function renderLessonPanel() {
   const points = renderTranslatedList(dailyLesson, 'theory_points');
   const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
   const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 3);
+  const extraCompletedCount = Number((dailyProgress && dailyProgress.extra_games_completed_count) || 0);
+  const extraCompletedLine = extraCompletedCount > 0
+    ? `<p class="muted">Extra topic tasks completed today: ${extraCompletedCount}. These do not count toward daily score.</p>`
+    : '';
   const lessonDone = isLessonCompleted();
   const lessonButton = lessonDone
     ? '<button id="complete-lesson-btn" type="button" class="ghost-btn" disabled>Lesson completed</button>'
@@ -473,6 +477,7 @@ function renderLessonPanel() {
         ${lessonDone ? '<button id="review-lesson-btn" type="button" class="ghost-btn">Review lesson</button>' : ''}
       </div>
       <p class="muted">Daily progress: ${completedCount}/${totalCount} games completed.</p>
+      ${extraCompletedLine}
       <p class="muted">Days on this topic: ${topicDays}.</p>
       <p class="muted">Target score for this day: ${targetScore}/300 (${targetReached ? 'reached' : 'pending'}).</p>
       <p class="muted">High-score days (>240): ${highScoreDays}.</p>
@@ -495,6 +500,10 @@ function renderTodaySummaryPanel() {
   if (!areDailyGamesCompleted()) return '';
   const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
   const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
+  const extraCompletedCount = Number((dailyProgress && dailyProgress.extra_games_completed_count) || 0);
+  const extraSummaryLine = extraCompletedCount > 0
+    ? `<p class="muted">Extra topic tasks completed today: ${extraCompletedCount}. They do not count toward daily score.</p>`
+    : '';
   const byGame = (dailyProgress && dailyProgress.daily_scores_by_game) || {};
   const scoreRows = Object.entries(byGame)
     .map(([gameType, gameScore]) => `<li>${escapeHtml(gameType)}: ${escapeHtml(gameScore)}</li>`)
@@ -504,6 +513,7 @@ function renderTodaySummaryPanel() {
       <h2>Today's results</h2>
       <p><strong>Score:</strong> ${score}/${scoreMax}</p>
       <p class="muted">Daily lesson + 3 daily games completed. Progress has been saved.</p>
+      ${extraSummaryLine}
       <p class="muted">You can continue with extra topic games using the list on the right.</p>
       ${scoreRows ? `<ul class="result-list">${scoreRows}</ul>` : ''}
     </section>

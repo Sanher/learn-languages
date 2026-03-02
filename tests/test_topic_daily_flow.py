@@ -39,6 +39,8 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(data["daily_progress"]["topic_day_target_score"], 150)
         self.assertEqual(data["daily_progress"]["high_score_days_over_240"], 0)
         self.assertEqual(data["daily_progress"]["closed_topics_count"], 0)
+        self.assertEqual(data["daily_progress"]["extra_games_completed_count"], 0)
+        self.assertEqual(data["daily_progress"]["extra_games_completed_types"], [])
         self.assertIsNone(data.get("selected_game"))
 
     def test_lesson_plus_three_daily_games_unlocks_extras(self) -> None:
@@ -290,6 +292,8 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(after.status_code, 200)
         after_data = after.json()
         self.assertEqual(after_data["daily_progress"]["daily_score"], score_before)
+        self.assertGreaterEqual(after_data["daily_progress"]["extra_games_completed_count"], 1)
+        self.assertIn("grammar_particle_fix", after_data["daily_progress"]["extra_games_completed_types"])
 
     def test_extra_game_prefers_due_item_from_closed_topic(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})

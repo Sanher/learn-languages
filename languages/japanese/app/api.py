@@ -893,6 +893,25 @@ def _enrich_daily_progress_payload(
     daily_progress: dict[str, Any],
 ) -> dict[str, Any]:
     enriched = dict(daily_progress)
+    # Extra games are tracked independently from the 3 daily required games.
+    # The UI uses this to inform the learner that extra practice does not affect daily score.
+    daily_required_raw = daily_progress.get("daily_games_required", [])
+    daily_required = sorted(
+        {
+            str(game_type).strip()
+            for game_type in daily_required_raw
+            if str(game_type).strip()
+        }
+    )
+    extra_completed_types = memory.list_completed_extra_game_types_for_day(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+        day_iso=today_iso,
+        excluded_game_types=daily_required,
+    )
+    enriched["extra_games_completed_types"] = extra_completed_types
+    enriched["extra_games_completed_count"] = len(extra_completed_types)
     enriched.update(
         _progress_insights(
             learner_id=learner_id,
