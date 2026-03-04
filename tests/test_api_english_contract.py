@@ -167,6 +167,35 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertEqual(first_card["prompt_translations"]["en"], first_card["prompt"])
         self.assertEqual(first_card["prompt_translations"]["secondary_lang"], "es")
 
+    def test_daily_payload_attaches_ai_generated_prompt_when_openai_available(self) -> None:
+        learner_id = f"test-user-ai-prompts-{uuid4().hex}"
+
+        async def _fake_daily_content(*, difficulty: int, games: list[str], learner_note: str) -> dict:
+            return {
+                "source": "openai",
+                "activities": [
+                    {"game": game, "prompt": f"AI prompt for {game} at difficulty {difficulty}."}
+                    for game in games
+                ],
+            }
+
+        with (
+            unittest.mock.patch.object(api.openai_planner, "api_key", "test-openai-key"),
+            unittest.mock.patch.object(
+                api.openai_planner,
+                "generate_daily_content",
+                new=unittest.mock.AsyncMock(side_effect=_fake_daily_content),
+            ) as mock_generate,
+        ):
+            daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+
+        self.assertEqual(daily.status_code, 200)
+        cards = daily.json().get("daily_games", [])
+        self.assertEqual(mock_generate.await_count, 1)
+        self.assertGreater(len(cards), 0)
+        self.assertTrue(all(bool(card.get("ai_generated_prompt")) for card in cards))
+        self.assertTrue(all(card.get("ai_prompt_source") == "openai" for card in cards))
+
     def test_game_evaluation_includes_translation_bundle_feedback(self) -> None:
         learner_id = "test-user-translation-eval"
         self.client.post(

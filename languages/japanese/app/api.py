@@ -1123,6 +1123,89 @@ def _build_card_for_game_type(game_type: str, language: str, level: int, seconda
     )
 
 
+async def _attach_ai_prompts_to_cards(
+    *,
+    cards: list[dict[str, Any]],
+    difficulty: int,
+    learner_note: str,
+    secondary_translation_language: str | None,
+    context: str,
+) -> None:
+    if not cards or not openai_planner.api_key:
+        return
+
+    # Generate one prompt per game type (not per card instance) and reuse it for all cards of that type.
+    requested_games: list[str] = []
+    seen: set[str] = set()
+    for card in cards:
+        game_type = str(card.get("game_type") or "").strip()
+        if not game_type or game_type in seen:
+            continue
+        seen.add(game_type)
+        requested_games.append(game_type)
+    if not requested_games:
+        return
+
+    try:
+        generated = await openai_planner.generate_daily_content(
+            difficulty=difficulty,
+            games=requested_games,
+            learner_note=learner_note,
+        )
+    except Exception as exc:  # pragma: no cover - defensive safety for provider/network issues
+        logger.warning("ai_prompt_generation_failed context=%s detail=%s", context, type(exc).__name__)
+        return
+
+    source = str(generated.get("source") or "fallback").strip().lower()
+    if source != "openai":
+        logger.info("ai_prompt_generation_skipped context=%s source=%s", context, source or "fallback")
+        return
+
+    rows = generated.get("activities")
+    if not isinstance(rows, list):
+        logger.warning("ai_prompt_generation_invalid_payload context=%s", context)
+        return
+
+    prompts_by_game: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        game_type = str(row.get("game") or "").strip()
+        prompt = str(row.get("prompt") or "").strip()
+        if not game_type or not prompt or game_type in prompts_by_game:
+            continue
+        prompts_by_game[game_type] = prompt
+
+    if not prompts_by_game:
+        logger.warning("ai_prompt_generation_empty context=%s requested=%s", context, ",".join(requested_games))
+        return
+
+    # Shared translation memo to avoid repeated secondary-translation provider calls per response.
+    memo: dict[tuple[str, str, str], str | None] = {}
+    applied = 0
+    for index, card in enumerate(cards):
+        game_type = str(card.get("game_type") or "").strip()
+        ai_prompt = prompts_by_game.get(game_type)
+        if not ai_prompt:
+            continue
+        card["ai_generated_prompt"] = ai_prompt
+        card["ai_prompt_source"] = "openai"
+        cards[index] = _augment_with_secondary_translations(
+            card,
+            secondary_language=secondary_translation_language,
+            context=f"{context}.{game_type}.{card.get('activity_id', '')}.ai_prompt",
+            memo=memo,
+        )
+        applied += 1
+
+    logger.info(
+        "ai_prompt_generation_applied context=%s requested=%s applied=%s",
+        context,
+        len(requested_games),
+        applied,
+    )
+
+
 def _build_card_for_activity_with_level_fallback(
     *,
     game_type: str,
@@ -1403,7 +1486,7 @@ def _extra_game_cards_metadata(
 
 
 @app.post("/api/games/daily")
-def get_daily_games(req: DailyGamesRequest) -> dict:
+async def get_daily_games(req: DailyGamesRequest) -> dict:
     logger.info(
         "daily_games learner_id=%s level_override_today=%s",
         req.learner_id,
@@ -1512,6 +1595,19 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         if card is not None:
             all_cards.append(card)
 
+    # When OpenAI is configured, enrich daily/reviewable cards with generated prompts.
+    # Core game payload stays deterministic; only the instructional text becomes dynamic.
+    ai_target_cards: list[dict[str, Any]] = [*daily_cards, *all_cards]
+    await _attach_ai_prompts_to_cards(
+        cards=ai_target_cards,
+        difficulty=difficulty,
+        learner_note=f"Topic={topic.title}; level={today_level}",
+        secondary_translation_language=secondary_translation_language,
+        context="daily_games",
+    )
+    ai_prompts_daily = sum(1 for card in daily_cards if str(card.get("ai_prompt_source") or "").lower() == "openai")
+    ai_prompts_all = sum(1 for card in all_cards if str(card.get("ai_prompt_source") or "").lower() == "openai")
+
     response = _ui_state(
         learner_id=req.learner_id,
         preferred_language=preferred_language,
@@ -1539,7 +1635,7 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
     response["all_games"] = all_cards
     response["learning_contract"] = _learning_contract_payload(daily_required_games=len(daily_cards))
     logger.info(
-        "daily_games_ready learner_id=%s language=%s topic=%s current_level=%s today_level=%s selected_game=%s daily=%s extras=%s available=%s all=%s lesson_completed=%s level_up_blocked=%s level_override_requested=%s",
+        "daily_games_ready learner_id=%s language=%s topic=%s current_level=%s today_level=%s selected_game=%s daily=%s extras=%s available=%s all=%s ai_prompts_daily=%s ai_prompts_all=%s lesson_completed=%s level_up_blocked=%s level_override_requested=%s",
         req.learner_id,
         preferred_language,
         topic.topic_key,
@@ -1550,6 +1646,8 @@ def get_daily_games(req: DailyGamesRequest) -> dict:
         len(extra_cards),
         len(available_cards),
         len(all_cards),
+        ai_prompts_daily,
+        ai_prompts_all,
         daily_progress["lesson_completed"],
         level_up_blocked,
         requested_level,
@@ -1776,7 +1874,7 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
 
 
 @app.post("/api/topics/review")
-def load_topic_review(req: TopicReviewRequest) -> dict:
+async def load_topic_review(req: TopicReviewRequest) -> dict:
     learner_id = req.learner_id or DEFAULT_LEARNER_ID
     language = (req.language or "ja").strip().lower()
     secondary_translation_language = _secondary_translation_for_learner(learner_id)
@@ -1835,13 +1933,25 @@ def load_topic_review(req: TopicReviewRequest) -> dict:
         seen_game_types.add(game_type)
         review_cards.append(card)
 
+    # Keep review prompts aligned with current proficiency while using the same IA generator.
+    level_hint = 3 if current_level <= 1 else (6 if current_level == 2 else 9)
+    await _attach_ai_prompts_to_cards(
+        cards=review_cards,
+        difficulty=level_hint,
+        learner_note=f"Topic={topic.title}; review_mode=true; level={current_level}",
+        secondary_translation_language=secondary_translation_language,
+        context="topic_review",
+    )
+    ai_prompts_review = sum(1 for card in review_cards if str(card.get("ai_prompt_source") or "").lower() == "openai")
+
     logger.info(
-        "topic_review_loaded learner_id=%s language=%s topic=%s level=%s games=%s",
+        "topic_review_loaded learner_id=%s language=%s topic=%s level=%s games=%s ai_prompts_review=%s",
         learner_id,
         language,
         topic.topic_key,
         current_level,
         len(review_cards),
+        ai_prompts_review,
     )
     return _translate_response_for_learner(
         learner_id=learner_id,

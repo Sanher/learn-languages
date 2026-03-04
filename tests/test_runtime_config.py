@@ -1,8 +1,9 @@
+import asyncio
 import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
@@ -152,6 +153,104 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(response.get("source"), "fallback")
                 self.assertEqual(response.get("error"), "Source text is too long for translation.")
                 self.assertEqual(mock_client.call_count, 0)
+
+    def test_generate_daily_content_parses_json_activities_and_fills_missing_games(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "{\"activities\":[{\"game\":\"sentence_order\",\"prompt\":\"Arrange this sentence politely.\"}]}",
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_daily_content(
+                        difficulty=4,
+                        games=["sentence_order", "listening_gap_fill"],
+                        learner_note="topic test",
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "openai")
+                activities = result.get("activities", [])
+                self.assertEqual(len(activities), 2)
+                self.assertEqual(activities[0]["game"], "sentence_order")
+                self.assertEqual(activities[0]["prompt"], "Arrange this sentence politely.")
+                self.assertEqual(activities[1]["game"], "listening_gap_fill")
+                self.assertIn("Level 4", activities[1]["prompt"])
+
+    def test_generate_daily_content_falls_back_when_provider_fails(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_http.post = AsyncMock(side_effect=httpx.ConnectError("network down"))
+
+                result = asyncio.run(
+                    planner.generate_daily_content(
+                        difficulty=5,
+                        games=["mora_romanization"],
+                        learner_note="topic test",
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "fallback")
+                self.assertIn("Daily content request failed", result.get("error", ""))
+                activities = result.get("activities", [])
+                self.assertEqual(len(activities), 1)
+                self.assertEqual(activities[0]["game"], "mora_romanization")
+                self.assertIn("Level 5", activities[0]["prompt"])
+
+    def test_generate_daily_content_falls_back_when_output_is_invalid_json(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "not-json",
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_daily_content(
+                        difficulty=6,
+                        games=["sentence_order", "context_quiz"],
+                        learner_note="invalid-json-test",
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "fallback")
+                self.assertEqual(result.get("error"), "Invalid JSON daily content output.")
+                activities = result.get("activities", [])
+                self.assertEqual(len(activities), 2)
+                self.assertEqual(activities[0]["game"], "sentence_order")
+                self.assertEqual(activities[1]["game"], "context_quiz")
 
 
 if __name__ == "__main__":

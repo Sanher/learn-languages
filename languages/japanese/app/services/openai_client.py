@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -87,6 +88,23 @@ class OpenAIPlanner:
             self.translation_max_context_chars = 240
         self._translation_consecutive_failures = 0
         self._translation_circuit_open_until = 0.0
+
+    def _fallback_daily_activities(self, *, difficulty: int, games: list[str]) -> list[dict[str, str]]:
+        ordered_games: list[str] = []
+        seen: set[str] = set()
+        for game in games:
+            normalized = str(game or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered_games.append(normalized)
+        return [
+            {
+                "game": game,
+                "prompt": f"Level {difficulty}: {game} exercise for Japanese.",
+            }
+            for game in ordered_games
+        ]
 
     def _is_translation_circuit_open(self) -> bool:
         return time.monotonic() < self._translation_circuit_open_until
@@ -223,16 +241,11 @@ class OpenAIPlanner:
         }
 
     async def generate_daily_content(self, *, difficulty: int, games: list[str], learner_note: str) -> dict[str, Any]:
+        fallback_activities = self._fallback_daily_activities(difficulty=difficulty, games=games)
         if not self.api_key:
             return {
                 "source": "fallback",
-                "activities": [
-                    {
-                        "game": game,
-                        "prompt": f"Level {difficulty}: {game} exercise for Japanese.",
-                    }
-                    for game in games
-                ],
+                "activities": fallback_activities,
             }
 
         system_prompt = (
@@ -244,24 +257,32 @@ class OpenAIPlanner:
             f"Learner notes: {learner_note}."
         )
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/responses",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "input": [
-                        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-                        {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
-                    ],
-                    "text": {"format": {"type": "json_object"}},
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "input": [
+                            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+                            {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
+                        ],
+                        "text": {"format": {"type": "json_object"}},
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            logger.warning("daily_content_provider_error detail=%s", type(exc).__name__)
+            return {
+                "source": "fallback",
+                "activities": fallback_activities,
+                "error": f"Daily content request failed: {type(exc).__name__}",
+            }
 
         text_outputs = payload.get("output", [])
         content_text = ""
@@ -270,9 +291,84 @@ class OpenAIPlanner:
                 if item.get("type") == "output_text":
                     content_text += item.get("text", "")
 
+        raw_text = content_text.strip()
+        if not raw_text:
+            logger.warning("daily_content_empty_output")
+            return {
+                "source": "fallback",
+                "activities": fallback_activities,
+                "error": "Empty daily content output.",
+            }
+
+        # Providers sometimes wrap JSON with extra prose/markdown; keep only the outermost JSON object.
+        json_candidate = raw_text
+        first_brace = json_candidate.find("{")
+        last_brace = json_candidate.rfind("}")
+        if first_brace != -1 and last_brace > first_brace:
+            json_candidate = json_candidate[first_brace : last_brace + 1]
+
+        try:
+            parsed = json.loads(json_candidate)
+        except json.JSONDecodeError:
+            logger.warning("daily_content_invalid_json")
+            return {
+                "source": "fallback",
+                "activities": fallback_activities,
+                "raw": raw_text,
+                "error": "Invalid JSON daily content output.",
+            }
+
+        parsed_activities = parsed.get("activities")
+        if not isinstance(parsed_activities, list):
+            logger.warning("daily_content_missing_activities")
+            return {
+                "source": "fallback",
+                "activities": fallback_activities,
+                "raw": raw_text,
+                "error": "Missing activities in daily content output.",
+            }
+
+        requested_order = [item["game"] for item in fallback_activities]
+        requested_set = set(requested_order)
+        prompts_by_game: dict[str, str] = {}
+        for row in parsed_activities:
+            if not isinstance(row, dict):
+                continue
+            game = str(row.get("game") or "").strip()
+            prompt = str(row.get("prompt") or "").strip()
+            if not game or not prompt or game not in requested_set or game in prompts_by_game:
+                continue
+            prompts_by_game[game] = prompt
+
+        if not prompts_by_game:
+            logger.warning("daily_content_no_valid_prompts")
+            return {
+                "source": "fallback",
+                "activities": fallback_activities,
+                "raw": raw_text,
+                "error": "No valid prompts in daily content output.",
+            }
+
+        activities: list[dict[str, str]] = []
+        fallback_by_game = {row["game"]: row["prompt"] for row in fallback_activities}
+        for game in requested_order:
+            activities.append(
+                {
+                    "game": game,
+                    "prompt": prompts_by_game.get(game, fallback_by_game.get(game, "")),
+                }
+            )
+
+        logger.info(
+            "daily_content_generated requested=%s resolved=%s model=%s",
+            len(requested_order),
+            len(prompts_by_game),
+            self.model,
+        )
         return {
             "source": "openai",
-            "raw": content_text,
+            "activities": activities,
+            "raw": raw_text,
         }
 
     async def generate_extra_game_prompt(

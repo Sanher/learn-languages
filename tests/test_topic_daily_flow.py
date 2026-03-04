@@ -679,6 +679,77 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertIn("prompt_translations", first_card)
         self.assertEqual(first_card["prompt_translations"]["secondary_lang"], "es")
 
+    def test_topic_review_attaches_ai_generated_prompt_when_openai_available(self) -> None:
+        topic_key = self._close_topic_and_promote_to_level_2()
+
+        async def _fake_daily_content(*, difficulty: int, games: list[str], learner_note: str) -> dict:
+            return {
+                "source": "openai",
+                "activities": [
+                    {"game": game, "prompt": f"Review AI prompt for {game} at {difficulty}."}
+                    for game in games
+                ],
+            }
+
+        with (
+            unittest.mock.patch.object(api.openai_planner, "api_key", "test-openai-key"),
+            unittest.mock.patch.object(
+                api.openai_planner,
+                "generate_daily_content",
+                new=unittest.mock.AsyncMock(side_effect=_fake_daily_content),
+            ) as mock_generate,
+        ):
+            review = self.client.post(
+                "/api/topics/review",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                },
+            )
+
+        self.assertEqual(review.status_code, 200)
+        data = review.json()
+        self.assertTrue(data.get("review_mode"))
+        self.assertGreater(mock_generate.await_count, 0)
+        self.assertGreaterEqual(len(data.get("review_games", [])), 3)
+        self.assertTrue(all(bool(card.get("ai_generated_prompt")) for card in data["review_games"]))
+        self.assertTrue(all(card.get("ai_prompt_source") == "openai" for card in data["review_games"]))
+
+    def test_topic_review_does_not_attach_ai_prompt_when_generation_falls_back(self) -> None:
+        topic_key = self._close_topic_and_promote_to_level_2()
+
+        async def _fake_fallback(*, difficulty: int, games: list[str], learner_note: str) -> dict:
+            return {
+                "source": "fallback",
+                "activities": [
+                    {"game": game, "prompt": f"Fallback prompt {game}"}
+                    for game in games
+                ],
+            }
+
+        with (
+            unittest.mock.patch.object(api.openai_planner, "api_key", "test-openai-key"),
+            unittest.mock.patch.object(
+                api.openai_planner,
+                "generate_daily_content",
+                new=unittest.mock.AsyncMock(side_effect=_fake_fallback),
+            ),
+        ):
+            review = self.client.post(
+                "/api/topics/review",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                },
+            )
+
+        self.assertEqual(review.status_code, 200)
+        data = review.json()
+        self.assertGreaterEqual(len(data.get("review_games", [])), 3)
+        self.assertTrue(all(not card.get("ai_generated_prompt") for card in data["review_games"]))
+
     def test_topic_review_evaluate_does_not_modify_daily_progress(self) -> None:
         topic_key = self._close_topic_and_promote_to_level_2()
         daily_before = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
