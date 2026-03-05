@@ -1,6 +1,7 @@
 const currentLanguageEl = document.getElementById('current-language');
 const currentLevelEl = document.getElementById('current-level');
 const todayScoreEl = document.getElementById('today-score');
+const topbarLevelProgressEl = document.getElementById('topbar-level-progress');
 const gameZoneEl = document.getElementById('game-zone');
 const gamesSidebarEl = document.getElementById('games-sidebar');
 const changeLanguageBtn = document.getElementById('change-language-btn');
@@ -22,6 +23,7 @@ let extraGameCards = [];
 let dailyTopic = null;
 let dailyLesson = null;
 let dailyProgress = null;
+let levelUpNotice = null;
 let lessonCollapsed = false;
 let dailyGamesCollapsed = false;
 let translationPreferences = {
@@ -52,6 +54,7 @@ let kanaElapsedApproximate = true;
 let kanaElapsedTicker = null;
 const PRONUNCIATION_DEFAULT_AUDIO_SECONDS = 2.0;
 let pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
+let isEvaluatingGame = false;
 
 function apiUrl(path) {
   const cleanPath = String(path || '').replace(/^\/+/, '');
@@ -244,6 +247,73 @@ function renderTranslatedList(record, field) {
     .join('');
 }
 
+function levelProgressState() {
+  const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
+  const fallbackTarget = Number((dailyProgress && dailyProgress.topic_day_target_score) || 150);
+  const raw = dailyProgress && dailyProgress.level_progress && typeof dailyProgress.level_progress === 'object'
+    ? dailyProgress.level_progress
+    : {};
+
+  const currentLevelValue = Number(raw.current_level ?? currentLevel ?? 1);
+  const normalizedCurrentLevel = Number.isFinite(currentLevelValue) ? currentLevelValue : 1;
+  const nextLevelRaw = raw.next_level;
+  const nextLevelValue = (nextLevelRaw == null || nextLevelRaw === '')
+    ? (normalizedCurrentLevel >= 3 ? null : (normalizedCurrentLevel + 1))
+    : Number(nextLevelRaw);
+  const pointsTargetValue = Math.max(1, Number(raw.points_target ?? fallbackTarget));
+  const pointsCurrentValue = Math.max(0, Number(raw.points_current ?? score));
+  const pointsRemainingValue = Math.max(0, Number(raw.points_remaining ?? (pointsTargetValue - pointsCurrentValue)));
+  const progressPercentValue = Math.max(
+    0,
+    Math.min(
+      100,
+      Number(raw.progress_percent ?? Math.round((pointsCurrentValue / pointsTargetValue) * 100))
+    )
+  );
+  return {
+    currentLevel: normalizedCurrentLevel,
+    nextLevel: Number.isFinite(nextLevelValue) ? nextLevelValue : null,
+    pointsCurrent: Number.isFinite(pointsCurrentValue) ? pointsCurrentValue : 0,
+    pointsTarget: Number.isFinite(pointsTargetValue) ? pointsTargetValue : 1,
+    pointsRemaining: Number.isFinite(pointsRemainingValue) ? pointsRemainingValue : 0,
+    progressPercent: Number.isFinite(progressPercentValue) ? progressPercentValue : 0,
+    readyForExam: Boolean(raw.ready_for_level_exam),
+    levelCapReached: Boolean(raw.level_cap_reached),
+    statusMessage: String(raw.status_message || '').trim(),
+  };
+}
+
+function renderLevelProgressBlock(options = {}) {
+  const compact = Boolean(options.compact);
+  const includeNotice = Boolean(options.includeNotice);
+  const progress = levelProgressState();
+  const heading = progress.levelCapReached
+    ? 'Level progress · max reached'
+    : `Level ${progress.currentLevel} -> ${progress.nextLevel}`;
+  const summary = progress.levelCapReached
+    ? 'Maximum level reached.'
+    : `${progress.pointsCurrent}/${progress.pointsTarget} points · ${progress.pointsRemaining} needed`;
+  const status = progress.statusMessage || (progress.readyForExam
+    ? 'Ready for level exam.'
+    : summary);
+  const noticeText = includeNotice && levelUpNotice && levelUpNotice.message
+    ? String(levelUpNotice.message)
+    : '';
+  const noticeHtml = noticeText ? `<p class="level-up-notice">${escapeHtml(noticeText)}</p>` : '';
+  const statusClass = progress.readyForExam ? 'level-progress-status is-ready' : 'level-progress-status';
+  return `
+    <div class="level-progress ${compact ? 'is-compact' : ''}">
+      <p class="level-progress-title">${escapeHtml(heading)}</p>
+      <div class="level-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${escapeHtml(progress.progressPercent)}">
+        <span class="level-progress-fill" style="width: ${escapeHtml(progress.progressPercent)}%"></span>
+      </div>
+      <p class="level-progress-meta">${escapeHtml(summary)}</p>
+      <p class="${statusClass}">${escapeHtml(status)}</p>
+      ${noticeHtml}
+    </div>
+  `;
+}
+
 function updateTopbar() {
   currentLanguageEl.textContent = languageLabel(currentLanguage);
   currentLevelEl.textContent = String(currentLevel);
@@ -256,6 +326,9 @@ function updateTopbar() {
   const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
   if (todayScoreEl) {
     todayScoreEl.textContent = `Today's score: ${score}/${scoreMax}`;
+  }
+  if (topbarLevelProgressEl) {
+    topbarLevelProgressEl.innerHTML = renderLevelProgressBlock({ compact: true, includeNotice: false });
   }
 }
 
@@ -370,6 +443,7 @@ function renderLessonPanel() {
   }
 
   const points = renderTranslatedList(dailyLesson, 'theory_points');
+  const lessonLevelProgressHtml = renderLevelProgressBlock({ compact: false, includeNotice: true });
   const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
   const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 3);
   const extraCompletedCount = Number((dailyProgress && dailyProgress.extra_games_completed_count) || 0);
@@ -450,8 +524,10 @@ function renderLessonPanel() {
           ${lessonDone ? 'Lesson completed.' : 'Lesson pending.'}
           ${lessonDone ? ' You can review the theory at any time.' : ' Complete it to unlock today\'s 3 games.'}
         </p>
+        ${lessonLevelProgressHtml}
         <div class="lesson-actions lesson-actions-inline">
           ${lessonDone ? '<button id="review-lesson-btn" type="button" class="ghost-btn">Review lesson</button>' : lessonButton}
+          <button id="refresh-topic-sequence-btn" type="button" class="ghost-btn">Refresh topic list now</button>
         </div>
       </section>
     `;
@@ -484,9 +560,11 @@ function renderLessonPanel() {
       <p class="muted">Retention (vs previous days): ${retention == null ? 'n/a' : `${retention}%`}.</p>
       <p class="muted">Failures by game: ${escapeHtml(failureSummary)}</p>
       ${unlockLine}
+      ${lessonLevelProgressHtml}
       <div class="lesson-progress-actions">
         <button id="weekly-exam-btn" class="ghost-btn" type="button" ${weeklyDisabled}>${weeklyButtonLabel}</button>
         <button id="level-exam-btn" class="ghost-btn" type="button" ${levelExamDisabled}>${levelExamLabel}</button>
+        <button id="refresh-topic-sequence-btn" class="ghost-btn" type="button">Refresh topic list now</button>
         <button id="closed-topics-btn" class="ghost-btn" type="button">
           ${closedTopicsVisible ? 'Hide learned topics' : `Show learned topics (${closedTopicsCount})`}
         </button>
@@ -1421,51 +1499,103 @@ function renderEvaluation(data) {
   applyKanjiEvaluationFeedback(data);
 }
 
+function setEvaluateLoadingState(isLoading) {
+  const evaluateBtn = document.getElementById('evaluate-btn');
+  const retryBtn = document.getElementById('retry-btn');
+  const loadingLabel = 'Loading...';
+
+  if (evaluateBtn) {
+    if (isLoading) {
+      if (!evaluateBtn.dataset.originalLabel) {
+        evaluateBtn.dataset.originalLabel = (evaluateBtn.textContent || '').trim() || 'Evaluate';
+      }
+      evaluateBtn.classList.add('is-loading');
+      evaluateBtn.disabled = true;
+      evaluateBtn.setAttribute('aria-busy', 'true');
+      evaluateBtn.innerHTML = `
+        <span class="btn-spinner" aria-hidden="true"></span>
+        <span>${loadingLabel}</span>
+      `;
+    } else {
+      const originalLabel = evaluateBtn.dataset.originalLabel || 'Evaluate';
+      evaluateBtn.classList.remove('is-loading');
+      evaluateBtn.disabled = false;
+      evaluateBtn.removeAttribute('aria-busy');
+      evaluateBtn.textContent = originalLabel;
+    }
+  }
+
+  if (retryBtn) {
+    retryBtn.disabled = Boolean(isLoading);
+    if (isLoading) {
+      retryBtn.setAttribute('aria-busy', 'true');
+    } else {
+      retryBtn.removeAttribute('aria-busy');
+    }
+  }
+}
+
 async function evaluateSelectedGame(isRetry) {
   if (!selectedGame) return;
   if (!isLessonCompleted()) return;
+  if (isEvaluatingGame) return;
+  isEvaluatingGame = true;
+  setEvaluateLoadingState(true);
   const key = `${selectedGame.game_type}:${selectedGame.activity_id}`;
   const currentRetry = retryCounters.get(key) || 0;
   const nextRetry = isRetry ? currentRetry + 1 : currentRetry;
   retryCounters.set(key, nextRetry);
 
-  const payload = collectPayload(selectedGame);
-  const res = await fetch(apiUrl('api/games/evaluate'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      learner_id: learnerId,
-      game_type: selectedGame.game_type,
-      language: selectedGame.language || currentLanguage,
-      // Use card level first to avoid backend item lookup mismatches in review/extra flows.
-      level: Number(selectedGame.level || todayLevel || currentLevel || 1),
-      retry_count: nextRetry,
-      review_mode: isReviewMode,
-      payload,
-    }),
-  });
-  const data = await res.json();
-  refreshSecondaryTranslationAvailability(data);
-  let collapseDailyPanelAfterEvaluation = false;
-  if (!isReviewMode && data.daily_progress) {
-    dailyProgress = data.daily_progress;
-    if (areDailyGamesCompleted()) {
-      dailyGamesCollapsed = true;
-      if (selectedGame && isDailyGameType(selectedGame.game_type)) {
-        selectedGame = null;
-      }
-      collapseDailyPanelAfterEvaluation = true;
+  try {
+    const payload = collectPayload(selectedGame);
+    let res;
+    let data;
+    try {
+      res = await fetch(apiUrl('api/games/evaluate'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          learner_id: learnerId,
+          game_type: selectedGame.game_type,
+          language: selectedGame.language || currentLanguage,
+          // Use card level first to avoid backend item lookup mismatches in review/extra flows.
+          level: Number(selectedGame.level || todayLevel || currentLevel || 1),
+          retry_count: nextRetry,
+          review_mode: isReviewMode,
+          payload,
+        }),
+      });
+      data = await res.json();
+    } catch (error) {
+      appendResultAlert('Could not evaluate this game. Please retry.');
+      return;
     }
-    refreshAvailableGameCards();
-    renderSidebar(availableGameCards);
+
+    refreshSecondaryTranslationAvailability(data);
+    let collapseDailyPanelAfterEvaluation = false;
+    if (!isReviewMode && data.daily_progress) {
+      dailyProgress = data.daily_progress;
+      if (areDailyGamesCompleted()) {
+        dailyGamesCollapsed = true;
+        if (selectedGame && isDailyGameType(selectedGame.game_type)) {
+          selectedGame = null;
+        }
+        collapseDailyPanelAfterEvaluation = true;
+      }
+      refreshAvailableGameCards();
+      renderSidebar(availableGameCards);
+    }
+    updateTopbar();
+    if (collapseDailyPanelAfterEvaluation) {
+      renderSingleGame(selectedGame);
+      wireGameActions();
+      return;
+    }
+    renderEvaluation(data);
+  } finally {
+    isEvaluatingGame = false;
+    setEvaluateLoadingState(false);
   }
-  updateTopbar();
-  if (collapseDailyPanelAfterEvaluation) {
-    renderSingleGame(selectedGame);
-    wireGameActions();
-    return;
-  }
-  renderEvaluation(data);
 }
 
 function resolveTtsText(game) {
@@ -1830,6 +1960,51 @@ async function startTopicReview(topicKey) {
   wireGameActions();
 }
 
+async function refreshTopicSequenceNow() {
+  const refreshBtn = document.getElementById('refresh-topic-sequence-btn');
+  const previousText = refreshBtn ? refreshBtn.textContent : '';
+  if (refreshBtn) {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = 'Refreshing...';
+  }
+  let response = null;
+  let data = null;
+  try {
+    response = await fetch(apiUrl('api/topics/refresh'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        learner_id: learnerId,
+        language: currentLanguage || 'ja',
+      }),
+    });
+    data = await response.json();
+  } catch (error) {
+    window.alert('Could not reach the server to refresh topics.');
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = previousText || 'Refresh topic list now';
+    }
+    return;
+  }
+
+  if (!response.ok || data.error) {
+    window.alert(data.error || 'Could not refresh topic list.');
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = previousText || 'Refresh topic list now';
+    }
+    return;
+  }
+
+  if (data.refreshed) {
+    window.alert('Topic list refreshed from OpenAI.');
+  } else {
+    window.alert(data.error || 'OpenAI topic refresh was not available. Kept current topic list.');
+  }
+  await loadDailyGame();
+}
+
 async function exitReviewMode() {
   if (!isReviewMode) return;
   isReviewMode = false;
@@ -2083,6 +2258,7 @@ function wireGameActions() {
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
   const weeklyExamBtn = document.getElementById('weekly-exam-btn');
   const levelExamBtn = document.getElementById('level-exam-btn');
+  const refreshTopicSequenceBtn = document.getElementById('refresh-topic-sequence-btn');
   const closedTopicsBtn = document.getElementById('closed-topics-btn');
   const exitReviewBtn = document.getElementById('exit-review-btn');
   const reviewTopicBtns = Array.from(document.querySelectorAll('.closed-topic-review-btn'));
@@ -2105,6 +2281,7 @@ function wireGameActions() {
   pronunciationStopRecordBtn?.addEventListener('click', stopPronunciationRecording);
   weeklyExamBtn?.addEventListener('click', takeWeeklyExam);
   levelExamBtn?.addEventListener('click', takeLevelExam);
+  refreshTopicSequenceBtn?.addEventListener('click', refreshTopicSequenceNow);
   closedTopicsBtn?.addEventListener('click', toggleClosedTopics);
   exitReviewBtn?.addEventListener('click', exitReviewMode);
   reviewTopicBtns.forEach((btn) => {
@@ -2249,6 +2426,7 @@ async function loadDailyGame() {
   dailyTopic = data.topic || null;
   dailyLesson = data.lesson || null;
   dailyProgress = data.daily_progress || null;
+  levelUpNotice = data.level_up_notice || null;
   dailyGameCards = data.daily_games || [];
   extraGameCards = data.extra_games || [];
   extraGameCardsByType.clear();

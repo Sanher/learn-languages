@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 logger = logging.getLogger("learn_languages.japanese.memory")
 
@@ -262,6 +262,28 @@ class ProgressMemory:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS topic_lessons_cache (
+                    language TEXT NOT NULL,
+                    topic_key TEXT NOT NULL,
+                    lessons_by_level_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at_iso TEXT NOT NULL DEFAULT '',
+                    refresh_required INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (language, topic_key)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS topic_sequence_cache (
+                    language TEXT PRIMARY KEY,
+                    topics_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at_iso TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'fallback'
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_item_review_due
                 ON item_review_state (learner_id, language, due_day_iso)
                 """
@@ -278,6 +300,8 @@ class ProgressMemory:
             self._ensure_column(conn, "daily_topic_progress", "daily_game_scores_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "daily_topic_progress", "daily_game_failures_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "learner_preferences", "secondary_translation_lang", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "topic_lessons_cache", "refresh_required", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "topic_sequence_cache", "source", "TEXT NOT NULL DEFAULT 'fallback'")
         logger.info("memory_schema_ready db_path=%s", self.db_path)
 
     @staticmethod
@@ -456,6 +480,207 @@ class ProgressMemory:
                     str(updated_at_iso or ""),
                 ),
             )
+
+    def load_topic_lessons_cache(self, *, language: str, topic_key: str) -> tuple[dict[int, dict[str, Any]] | None, bool]:
+        normalized_language = str(language or "").strip().lower()
+        normalized_topic = str(topic_key or "").strip()
+        if not normalized_language or not normalized_topic:
+            return None, False
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT lessons_by_level_json, COALESCE(refresh_required, 0)
+                FROM topic_lessons_cache
+                WHERE language = ? AND topic_key = ?
+                """,
+                (normalized_language, normalized_topic),
+            ).fetchone()
+        if row is None:
+            return None, False
+
+        raw_json = str(row[0] or "").strip()
+        refresh_required = int(row[1] or 0) > 0
+        if not raw_json:
+            return None, refresh_required
+
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            logger.warning("topic_lessons_cache_invalid_json language=%s topic=%s", normalized_language, normalized_topic)
+            return None, refresh_required
+        if not isinstance(parsed, dict):
+            return None, refresh_required
+
+        lessons_by_level: dict[int, dict[str, Any]] = {}
+        for raw_level, raw_payload in parsed.items():
+            try:
+                level = int(raw_level)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw_payload, dict):
+                continue
+            lessons_by_level[level] = dict(raw_payload)
+        if not lessons_by_level:
+            return None, refresh_required
+        return lessons_by_level, refresh_required
+
+    def save_topic_lessons_cache(
+        self,
+        *,
+        language: str,
+        topic_key: str,
+        lessons_by_level: dict[int, dict[str, Any]],
+        updated_at_iso: str,
+        refresh_required: bool = False,
+    ) -> None:
+        normalized_language = str(language or "").strip().lower()
+        normalized_topic = str(topic_key or "").strip()
+        if not normalized_language or not normalized_topic:
+            return
+
+        normalized_payload: dict[str, dict[str, Any]] = {}
+        for level, payload in lessons_by_level.items():
+            try:
+                key = str(int(level))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                normalized_payload[key] = dict(payload)
+        if not normalized_payload:
+            return
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO topic_lessons_cache (
+                    language, topic_key, lessons_by_level_json, updated_at_iso, refresh_required
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (language, topic_key) DO UPDATE SET
+                    lessons_by_level_json = excluded.lessons_by_level_json,
+                    updated_at_iso = excluded.updated_at_iso,
+                    refresh_required = excluded.refresh_required
+                """,
+                (
+                    normalized_language,
+                    normalized_topic,
+                    json.dumps(normalized_payload, ensure_ascii=False),
+                    str(updated_at_iso or ""),
+                    1 if bool(refresh_required) else 0,
+                ),
+            )
+        logger.info(
+            "topic_lessons_cache_saved language=%s topic=%s levels=%s refresh_required=%s",
+            normalized_language,
+            normalized_topic,
+            len(normalized_payload),
+            bool(refresh_required),
+        )
+
+    def set_topic_lessons_refresh_required(self, *, language: str, topic_key: str, required: bool = True) -> None:
+        normalized_language = str(language or "").strip().lower()
+        normalized_topic = str(topic_key or "").strip()
+        if not normalized_language or not normalized_topic:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO topic_lessons_cache (
+                    language, topic_key, lessons_by_level_json, updated_at_iso, refresh_required
+                )
+                VALUES (?, ?, '{}', '', ?)
+                ON CONFLICT (language, topic_key) DO UPDATE SET
+                    refresh_required = excluded.refresh_required
+                """,
+                (
+                    normalized_language,
+                    normalized_topic,
+                    1 if bool(required) else 0,
+                ),
+            )
+        logger.info(
+            "topic_lessons_refresh_flag_updated language=%s topic=%s required=%s",
+            normalized_language,
+            normalized_topic,
+            bool(required),
+        )
+
+    def load_topic_sequence_cache(self, *, language: str) -> tuple[list[dict[str, Any]] | None, str]:
+        normalized_language = str(language or "").strip().lower()
+        if not normalized_language:
+            return None, "fallback"
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT topics_json, COALESCE(source, 'fallback')
+                FROM topic_sequence_cache
+                WHERE language = ?
+                """,
+                (normalized_language,),
+            ).fetchone()
+        if row is None:
+            return None, "fallback"
+        raw_json = str(row[0] or "").strip()
+        source = str(row[1] or "fallback").strip().lower() or "fallback"
+        if not raw_json:
+            return None, source
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            logger.warning("topic_sequence_cache_invalid_json language=%s", normalized_language)
+            return None, source
+        if not isinstance(parsed, list):
+            return None, source
+        topics: list[dict[str, Any]] = []
+        for raw_item in parsed:
+            if isinstance(raw_item, dict):
+                topics.append(dict(raw_item))
+        if not topics:
+            return None, source
+        return topics, source
+
+    def save_topic_sequence_cache(
+        self,
+        *,
+        language: str,
+        topics: list[dict[str, Any]],
+        updated_at_iso: str,
+        source: str = "fallback",
+    ) -> None:
+        normalized_language = str(language or "").strip().lower()
+        if not normalized_language:
+            return
+
+        normalized_topics: list[dict[str, Any]] = []
+        for row in topics:
+            if isinstance(row, dict):
+                normalized_topics.append(dict(row))
+        if not normalized_topics:
+            return
+        normalized_source = str(source or "fallback").strip().lower() or "fallback"
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO topic_sequence_cache (language, topics_json, updated_at_iso, source)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (language) DO UPDATE SET
+                    topics_json = excluded.topics_json,
+                    updated_at_iso = excluded.updated_at_iso,
+                    source = excluded.source
+                """,
+                (
+                    normalized_language,
+                    json.dumps(normalized_topics, ensure_ascii=False),
+                    str(updated_at_iso or ""),
+                    normalized_source,
+                ),
+            )
+        logger.info(
+            "topic_sequence_cache_saved language=%s topics=%s source=%s",
+            normalized_language,
+            len(normalized_topics),
+            normalized_source,
+        )
 
     def level_for_language(self, learner_id: str, language: str, default_level: int = 1) -> int:
         prefs = self.load_or_create_preferences(learner_id)
@@ -815,6 +1040,21 @@ class ProgressMemory:
                 (learner_id, language, int(threshold)),
             ).fetchone()
         return int(row[0] if row else 0)
+
+    def recent_topic_scores(self, learner_id: str, language: str, topic_key: str, limit: int = 5) -> list[int]:
+        normalized_limit = max(1, int(limit))
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT daily_score
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND topic_key = ?
+                ORDER BY day_iso DESC
+                LIMIT ?
+                """,
+                (learner_id, language, topic_key, normalized_limit),
+            ).fetchall()
+        return [int(row[0] or 0) for row in rows]
 
     def retention_ratio(
         self,

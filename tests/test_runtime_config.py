@@ -252,6 +252,259 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(activities[0]["game"], "sentence_order")
                 self.assertEqual(activities[1]["game"], "context_quiz")
 
+    def test_generate_topic_lessons_returns_progressive_levels(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            fallback_lessons = {
+                1: {
+                    "title": "Fallback 1",
+                    "objective": "Fallback objective 1",
+                    "theory_points": ["Point 1", "Point 2"],
+                    "example_script": "私は学生です。",
+                    "example_romanized": "watashi wa gakusei desu",
+                    "example_literal_translation": "I topic student am",
+                },
+                2: {
+                    "title": "Fallback 2",
+                    "objective": "Fallback objective 2",
+                    "theory_points": ["Point 1", "Point 2"],
+                    "example_script": "今日は仕事があります。",
+                    "example_romanized": "kyou wa shigoto ga arimasu",
+                    "example_literal_translation": "today topic work exists",
+                },
+                3: {
+                    "title": "Fallback 3",
+                    "objective": "Fallback objective 3",
+                    "theory_points": ["Point 1", "Point 2"],
+                    "example_script": "明日友達と映画を見ます。",
+                    "example_romanized": "ashita tomodachi to eiga o mimasu",
+                    "example_literal_translation": "tomorrow with friend movie watch",
+                },
+            }
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps(
+                                        {
+                                            "lessons_by_level": {
+                                                "1": {
+                                                    "title": "Beginner identity patterns",
+                                                    "objective": "Build basic self-introduction sentences.",
+                                                    "theory_points": [
+                                                        "Use wa to mark topic.",
+                                                        "Keep noun + desu ending.",
+                                                    ],
+                                                    "example_script": "私は学生です。",
+                                                    "example_romanized": "watashi wa gakusei desu",
+                                                    "example_literal_translation": "I topic student am",
+                                                },
+                                                "2": {
+                                                    "title": "Daily routine statements",
+                                                    "objective": "Describe daily schedule context naturally.",
+                                                    "theory_points": [
+                                                        "Add time words early.",
+                                                        "Use ga for existence/subject focus.",
+                                                    ],
+                                                    "example_script": "今日は仕事があります。",
+                                                    "example_romanized": "kyou wa shigoto ga arimasu",
+                                                    "example_literal_translation": "today topic work exists",
+                                                },
+                                                "3": {
+                                                    "title": "Advanced plan chaining",
+                                                    "objective": "Connect time, companion and action in one sentence.",
+                                                    "theory_points": [
+                                                        "Anchor with time at start.",
+                                                        "Keep verb at the end.",
+                                                    ],
+                                                    "example_script": "明日友達と映画を見ます。",
+                                                    "example_romanized": "ashita tomodachi to eiga o mimasu",
+                                                    "example_literal_translation": "tomorrow with friend movie watch",
+                                                },
+                                            }
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_topic_lessons(
+                        language="ja",
+                        topic_key="identity_and_plans",
+                        topic_title="Identity and Daily Plans",
+                        topic_description="topic test",
+                        fallback_lessons_by_level=fallback_lessons,
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "openai")
+                lessons = result.get("lessons_by_level", {})
+                self.assertEqual(lessons[1]["title"], "Beginner identity patterns")
+                self.assertEqual(lessons[2]["title"], "Daily routine statements")
+                self.assertEqual(lessons[3]["title"], "Advanced plan chaining")
+
+    def test_generate_topic_lessons_falls_back_when_levels_are_incomplete(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            fallback_lessons = {
+                1: {"title": "Fallback 1", "objective": "o1", "theory_points": ["a", "b"], "example_script": "a", "example_romanized": "a", "example_literal_translation": "a"},
+                2: {"title": "Fallback 2", "objective": "o2", "theory_points": ["a", "b"], "example_script": "b", "example_romanized": "b", "example_literal_translation": "b"},
+                3: {"title": "Fallback 3", "objective": "o3", "theory_points": ["a", "b"], "example_script": "c", "example_romanized": "c", "example_literal_translation": "c"},
+            }
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": '{"lessons_by_level":{"1":{"title":"ok","objective":"ok","theory_points":["a","b"],"example_script":"a","example_romanized":"a","example_literal_translation":"a"}}}',
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_topic_lessons(
+                        language="ja",
+                        topic_key="identity_and_plans",
+                        topic_title="Identity and Daily Plans",
+                        topic_description="topic test",
+                        fallback_lessons_by_level=fallback_lessons,
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "fallback")
+                self.assertIn("Missing lesson levels", result.get("error", ""))
+                self.assertEqual(result.get("lessons_by_level", {}), fallback_lessons)
+
+    def test_generate_topic_sequence_returns_topics_ordered_by_stage(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            fallback_topics = [
+                {
+                    "topic_key": "identity_and_plans",
+                    "title": "Identity and Daily Plans",
+                    "description": "Fallback identity topic.",
+                    "stage": "basic",
+                }
+            ]
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps(
+                                        {
+                                            "topics": [
+                                                {
+                                                    "topic_key": "future_hypotheticals",
+                                                    "title": "Future hypotheticals",
+                                                    "description": "Discuss hypothetical futures.",
+                                                    "stage": "advanced",
+                                                },
+                                                {
+                                                    "topic_key": "basic_greetings",
+                                                    "title": "Basic greetings",
+                                                    "description": "Use simple daily greetings.",
+                                                    "stage": "basic",
+                                                },
+                                                {
+                                                    "topic_key": "routine_narration",
+                                                    "title": "Routine narration",
+                                                    "description": "Describe weekly routine.",
+                                                    "stage": "intermediate",
+                                                },
+                                            ]
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_topic_sequence(
+                        language="ja",
+                        fallback_topics=fallback_topics,
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "openai")
+                topics = result.get("topics", [])
+                self.assertEqual(len(topics), 3)
+                self.assertEqual(topics[0]["stage"], "basic")
+                self.assertEqual(topics[1]["stage"], "intermediate")
+                self.assertEqual(topics[2]["stage"], "advanced")
+                self.assertEqual(topics[0]["topic_key"], "basic_greetings")
+                self.assertEqual(topics[2]["topic_key"], "future_hypotheticals")
+
+    def test_generate_topic_sequence_falls_back_when_output_is_invalid(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            fallback_topics = [
+                {
+                    "topic_key": "identity_and_plans",
+                    "title": "Identity and Daily Plans",
+                    "description": "Fallback identity topic.",
+                    "stage": "basic",
+                }
+            ]
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": '{"not_topics":[]}',
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_topic_sequence(
+                        language="ja",
+                        fallback_topics=fallback_topics,
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "fallback")
+                self.assertEqual(result.get("topics"), fallback_topics)
+                self.assertIn("Missing topics", result.get("error", ""))
+
     def test_generate_extra_game_prompt_falls_back_on_http_status_error(self) -> None:
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
             clear_cached_options()

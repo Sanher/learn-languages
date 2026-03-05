@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -125,6 +126,78 @@ class OpenAIPlanner:
             }
             for game in ordered_games
         ]
+
+    @staticmethod
+    def _extract_output_text(payload: dict[str, Any]) -> str:
+        content_text = ""
+        for block in payload.get("output", []):
+            for item in block.get("content", []):
+                if item.get("type") == "output_text":
+                    content_text += item.get("text", "")
+        return content_text.strip()
+
+    @staticmethod
+    def _extract_outer_json(raw_text: str) -> str:
+        candidate = str(raw_text or "").strip()
+        first_brace = candidate.find("{")
+        last_brace = candidate.rfind("}")
+        if first_brace != -1 and last_brace > first_brace:
+            return candidate[first_brace : last_brace + 1]
+        return candidate
+
+    @staticmethod
+    def _normalize_topic_lesson(raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        title = str(raw.get("title") or "").strip()
+        objective = str(raw.get("objective") or "").strip()
+        example_script = str(raw.get("example_script") or "").strip()
+        example_romanized = str(raw.get("example_romanized") or "").strip()
+        example_literal_translation = str(raw.get("example_literal_translation") or "").strip()
+        raw_theory_points = raw.get("theory_points")
+        if not isinstance(raw_theory_points, list):
+            return None
+        theory_points: list[str] = []
+        for item in raw_theory_points:
+            point = str(item or "").strip()
+            if point:
+                theory_points.append(point)
+        if not title or not objective or not example_script or not example_romanized or not example_literal_translation:
+            return None
+        if len(theory_points) < 2:
+            return None
+        return {
+            "title": title,
+            "objective": objective,
+            "theory_points": theory_points[:5],
+            "example_script": example_script,
+            "example_romanized": example_romanized,
+            "example_literal_translation": example_literal_translation,
+        }
+
+    @staticmethod
+    def _slugify_topic_key(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+        return normalized[:80] if normalized else ""
+
+    def _normalize_topic_sequence_entry(self, raw: Any, *, index: int) -> dict[str, str] | None:
+        if not isinstance(raw, dict):
+            return None
+        title = str(raw.get("title") or "").strip()
+        description = str(raw.get("description") or "").strip()
+        stage = str(raw.get("stage") or "").strip().lower()
+        if stage not in {"basic", "intermediate", "advanced"}:
+            stage = "basic"
+        candidate_key = str(raw.get("topic_key") or "").strip()
+        topic_key = self._slugify_topic_key(candidate_key) or self._slugify_topic_key(title) or f"topic_{index + 1}"
+        if not title or not description:
+            return None
+        return {
+            "topic_key": topic_key,
+            "title": title,
+            "description": description,
+            "stage": stage,
+        }
 
     def _is_translation_circuit_open(self) -> bool:
         return time.monotonic() < self._translation_circuit_open_until
@@ -384,6 +457,286 @@ class OpenAIPlanner:
         return {
             "source": "openai",
             "activities": activities,
+            "raw": raw_text,
+        }
+
+    async def generate_topic_lessons(
+        self,
+        *,
+        language: str,
+        topic_key: str,
+        topic_title: str,
+        topic_description: str,
+        fallback_lessons_by_level: dict[int, dict[str, Any]],
+    ) -> dict[str, Any]:
+        # Keep deterministic fallback structure in case provider output is partial/invalid.
+        fallback_levels = sorted(int(level) for level in fallback_lessons_by_level.keys())
+        fallback_lessons = {
+            int(level): dict(value)
+            for level, value in fallback_lessons_by_level.items()
+            if isinstance(value, dict)
+        }
+        if not self.api_key:
+            return {
+                "source": "fallback",
+                "lessons_by_level": fallback_lessons,
+            }
+
+        levels_hint = ",".join(str(level) for level in fallback_levels)
+        system_prompt = (
+            "You are a Japanese pedagogy planner. "
+            "Return strict JSON only, no markdown. "
+            "Produce a progressive lesson ladder from beginner to advanced. "
+            "Output key 'lessons_by_level' with keys '1', '2', '3'. "
+            "Each lesson must include: title, objective, theory_points (list of 2-5 bullets), "
+            "example_script (Japanese), example_romanized, example_literal_translation."
+        )
+        user_prompt = (
+            f"Language={language}\n"
+            f"Topic key={topic_key}\n"
+            f"Topic title={topic_title}\n"
+            f"Topic description={topic_description}\n"
+            f"Required levels={levels_hint}\n"
+            "Keep all fields in English except example_script."
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "input": self._responses_input(system_prompt, user_prompt),
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            detail = self._http_error_detail(exc)
+            logger.warning(
+                "topic_lessons_provider_error language=%s topic=%s detail=%s",
+                language,
+                topic_key,
+                detail,
+            )
+            return {
+                "source": "fallback",
+                "lessons_by_level": fallback_lessons,
+                "error": f"Topic lessons request failed: {detail}",
+            }
+
+        raw_text = self._extract_output_text(payload)
+        if not raw_text:
+            logger.warning("topic_lessons_empty_output language=%s topic=%s", language, topic_key)
+            return {
+                "source": "fallback",
+                "lessons_by_level": fallback_lessons,
+                "error": "Empty topic lessons output.",
+            }
+
+        try:
+            parsed = json.loads(self._extract_outer_json(raw_text))
+        except json.JSONDecodeError:
+            logger.warning("topic_lessons_invalid_json language=%s topic=%s", language, topic_key)
+            return {
+                "source": "fallback",
+                "lessons_by_level": fallback_lessons,
+                "raw": raw_text,
+                "error": "Invalid JSON topic lessons output.",
+            }
+
+        lessons_raw = parsed.get("lessons_by_level")
+        if not isinstance(lessons_raw, dict):
+            logger.warning("topic_lessons_missing_levels language=%s topic=%s", language, topic_key)
+            return {
+                "source": "fallback",
+                "lessons_by_level": fallback_lessons,
+                "raw": raw_text,
+                "error": "Missing lessons_by_level in topic lessons output.",
+            }
+
+        normalized: dict[int, dict[str, Any]] = {}
+        missing_levels: list[int] = []
+        for level in fallback_levels:
+            raw_lesson = lessons_raw.get(str(level), lessons_raw.get(level))
+            lesson_payload = self._normalize_topic_lesson(raw_lesson)
+            if lesson_payload is None:
+                missing_levels.append(level)
+                continue
+            normalized[level] = lesson_payload
+
+        if missing_levels:
+            logger.warning(
+                "topic_lessons_incomplete language=%s topic=%s missing_levels=%s",
+                language,
+                topic_key,
+                ",".join(str(level) for level in missing_levels),
+            )
+            return {
+                "source": "fallback",
+                "lessons_by_level": fallback_lessons,
+                "raw": raw_text,
+                "error": f"Missing lesson levels in topic lessons output: {','.join(str(level) for level in missing_levels)}",
+            }
+
+        logger.info(
+            "topic_lessons_generated language=%s topic=%s levels=%s model=%s",
+            language,
+            topic_key,
+            ",".join(str(level) for level in fallback_levels),
+            self.model,
+        )
+        return {
+            "source": "openai",
+            "lessons_by_level": normalized,
+            "raw": raw_text,
+        }
+
+    async def generate_topic_sequence(
+        self,
+        *,
+        language: str,
+        fallback_topics: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        stage_order = {"basic": 0, "intermediate": 1, "advanced": 2}
+        normalized_fallback: list[dict[str, str]] = []
+        for idx, row in enumerate(fallback_topics):
+            normalized = self._normalize_topic_sequence_entry(row, index=idx)
+            if normalized is not None:
+                normalized_fallback.append(normalized)
+        if not normalized_fallback:
+            normalized_fallback = [
+                {
+                    "topic_key": "identity_and_plans",
+                    "title": "Identity and Daily Plans",
+                    "description": "Build sentences about who you are, what happens today, and plans for tomorrow.",
+                    "stage": "basic",
+                }
+            ]
+        if not self.api_key:
+            return {
+                "source": "fallback",
+                "topics": normalized_fallback,
+            }
+
+        system_prompt = (
+            "You are a Japanese curriculum planner. "
+            "Return strict JSON only, no markdown. "
+            "Output key 'topics' with a list ordered from basic to advanced. "
+            "Each topic item must include: topic_key, title, description, stage. "
+            "Allowed stage values: basic, intermediate, advanced. "
+            "Keep title/description in English."
+        )
+        user_prompt = (
+            f"Language={language}\n"
+            "Create a practical progression of Japanese topics from basic to advanced.\n"
+            "Return 6 to 15 topics.\n"
+            "Use short stable topic_key values in snake_case.\n"
+            f"Fallback topic sample={json.dumps(normalized_fallback, ensure_ascii=False)}"
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "input": self._responses_input(system_prompt, user_prompt),
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            detail = self._http_error_detail(exc)
+            logger.warning("topic_sequence_provider_error language=%s detail=%s", language, detail)
+            return {
+                "source": "fallback",
+                "topics": normalized_fallback,
+                "error": f"Topic sequence request failed: {detail}",
+            }
+
+        raw_text = self._extract_output_text(payload)
+        if not raw_text:
+            logger.warning("topic_sequence_empty_output language=%s", language)
+            return {
+                "source": "fallback",
+                "topics": normalized_fallback,
+                "error": "Empty topic sequence output.",
+            }
+
+        try:
+            parsed = json.loads(self._extract_outer_json(raw_text))
+        except json.JSONDecodeError:
+            logger.warning("topic_sequence_invalid_json language=%s", language)
+            return {
+                "source": "fallback",
+                "topics": normalized_fallback,
+                "raw": raw_text,
+                "error": "Invalid JSON topic sequence output.",
+            }
+
+        topics_raw = parsed.get("topics")
+        if not isinstance(topics_raw, list):
+            logger.warning("topic_sequence_missing_topics language=%s", language)
+            return {
+                "source": "fallback",
+                "topics": normalized_fallback,
+                "raw": raw_text,
+                "error": "Missing topics in topic sequence output.",
+            }
+
+        normalized_topics: list[dict[str, str]] = []
+        for idx, row in enumerate(topics_raw):
+            normalized = self._normalize_topic_sequence_entry(row, index=idx)
+            if normalized is not None:
+                normalized_topics.append(normalized)
+        if not normalized_topics:
+            logger.warning("topic_sequence_no_valid_topics language=%s", language)
+            return {
+                "source": "fallback",
+                "topics": normalized_fallback,
+                "raw": raw_text,
+                "error": "No valid topics in topic sequence output.",
+            }
+
+        ordered_candidates = sorted(
+            enumerate(normalized_topics),
+            key=lambda item: (stage_order.get(item[1]["stage"], 99), item[0]),
+        )
+        ordered_topics: list[dict[str, str]] = []
+        seen_keys: set[str] = set()
+        for _idx, topic in ordered_candidates:
+            key = str(topic.get("topic_key") or "").strip()
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            ordered_topics.append(topic)
+        if not ordered_topics:
+            logger.warning("topic_sequence_deduped_empty language=%s", language)
+            return {
+                "source": "fallback",
+                "topics": normalized_fallback,
+                "raw": raw_text,
+                "error": "No topics after normalization/deduplication.",
+            }
+
+        logger.info(
+            "topic_sequence_generated language=%s topics=%s model=%s",
+            language,
+            len(ordered_topics),
+            self.model,
+        )
+        return {
+            "source": "openai",
+            "topics": ordered_topics,
             "raw": raw_text,
         }
 

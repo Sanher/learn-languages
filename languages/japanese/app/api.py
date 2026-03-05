@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
 import os
-from datetime import date, datetime, timedelta
+import re
+from datetime import UTC, date, datetime, timedelta
 from math import log2
 from pathlib import Path
 from random import Random
 from time import perf_counter
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -47,7 +49,7 @@ from .game_engine import DailyGamePlanner, LearnerSnapshot
 from .memory import ItemReviewState, ProgressMemory
 from .services.elevenlabs_client import ElevenLabsService
 from .services.openai_client import OpenAIPlanner
-from .topic_flow import TOPICS_BY_LANGUAGE, TopicDefinition, topic_for_day
+from .topic_flow import TOPICS_BY_LANGUAGE, TopicDefinition
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
@@ -82,6 +84,8 @@ SRS_MIN_EASE = 1.3
 SRS_MAX_INTERVAL_DAYS = 3650
 WEEKLY_EXAM_MODE = os.getenv("LEARN_LANGUAGES_WEEKLY_EXAM_MODE", "legacy").strip().lower()
 WEEKLY_EXAM_FORCE_LEGACY = WEEKLY_EXAM_MODE != "cumulative"
+TOPIC_MASTERY_WINDOW_DAYS = 5
+TOPIC_EXAM_MIN_MASTERY_LEVEL = 3
 GAME_NAME_ALIASES = {
     GAME_TYPE_KANJI_MATCH: "Kanji Match",
     ALIAS_GAME_TYPE_KANA_SPEED_ROUND: "Kana Speed Round",
@@ -115,6 +119,10 @@ openai_planner = OpenAIPlanner()
 elevenlabs = ElevenLabsService()
 registry = GameServiceRegistry()
 game_services: dict[str, Any] = {}
+# Cache only successful AI lesson ladders so daily/review calls do not repeat token usage.
+_TOPIC_LESSONS_AI_CACHE: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
+_TOPIC_SEQUENCE_CACHE: dict[str, tuple[TopicDefinition, ...]] = {}
+_TOPIC_SEQUENCE_LOCKS: dict[str, asyncio.Lock] = {}
 logger.info(
     "provider_config openai_key=%s openai_model=%s elevenlabs_key=%s elevenlabs_voice_id=%s elevenlabs_model_id=%s weekly_exam_mode=%s",
     bool(openai_planner.api_key),
@@ -192,6 +200,11 @@ class TopicReviewRequest(BaseModel):
     learner_id: str = DEFAULT_LEARNER_ID
     language: str = "ja"
     topic_key: str
+
+
+class TopicSequenceRefreshRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
 
 
 class LanguageUpdateRequest(BaseModel):
@@ -577,9 +590,262 @@ def _learning_contract_payload(*, daily_required_games: int) -> dict[str, Any]:
     }
 
 
+def _slugify_topic_key(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    return normalized[:80] if normalized else ""
+
+
+def _topic_stage_for_position(index: int, total: int) -> str:
+    if total <= 1:
+        return "basic"
+    ratio = float(index) / float(max(1, total - 1))
+    if ratio < 0.34:
+        return "basic"
+    if ratio < 0.67:
+        return "intermediate"
+    return "advanced"
+
+
+def _topic_sequence_lock(language: str) -> asyncio.Lock:
+    normalized_language = str(language or "").strip().lower()
+    lock = _TOPIC_SEQUENCE_LOCKS.get(normalized_language)
+    if lock is None:
+        lock = asyncio.Lock()
+        _TOPIC_SEQUENCE_LOCKS[normalized_language] = lock
+    return lock
+
+
+def _fallback_topics_for_language(language: str) -> tuple[TopicDefinition, ...]:
+    normalized_language = str(language or "").strip().lower()
+    topics = tuple(TOPICS_BY_LANGUAGE.get(normalized_language, ()))
+    if not topics:
+        logger.warning("topic_sequence_missing_fallback language=%s", normalized_language)
+        raise ValueError(f"No topic definitions configured for language={normalized_language}")
+    return topics
+
+
+def _topic_seed_from_definition(topic: TopicDefinition, *, stage: str = "basic") -> dict[str, str]:
+    normalized_stage = str(stage or "").strip().lower()
+    if normalized_stage not in {"basic", "intermediate", "advanced"}:
+        normalized_stage = "basic"
+    return {
+        "topic_key": topic.topic_key,
+        "title": topic.title,
+        "description": topic.description,
+        "stage": normalized_stage,
+    }
+
+
+def _topic_seeds_from_definitions(topics: tuple[TopicDefinition, ...]) -> list[dict[str, str]]:
+    total = len(topics)
+    seeds: list[dict[str, str]] = []
+    for index, topic in enumerate(topics):
+        seeds.append(_topic_seed_from_definition(topic, stage=_topic_stage_for_position(index, total)))
+    return seeds
+
+
+def _topic_definitions_from_seed_list(language: str, topic_rows: list[dict[str, Any]]) -> tuple[TopicDefinition, ...]:
+    fallback_topics = _fallback_topics_for_language(language)
+    template_topic = fallback_topics[0]
+    static_by_key = {topic.topic_key: topic for topic in fallback_topics}
+    definitions: list[TopicDefinition] = []
+    seen_keys: set[str] = set()
+    for row in topic_rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        description = str(row.get("description") or "").strip()
+        stage = str(row.get("stage") or "").strip().lower()
+        candidate_key = str(row.get("topic_key") or "").strip()
+        topic_key = _slugify_topic_key(candidate_key) or _slugify_topic_key(title)
+        if stage not in {"basic", "intermediate", "advanced"}:
+            stage = "basic"
+        if not topic_key or not title or not description or topic_key in seen_keys:
+            continue
+        source_topic = static_by_key.get(topic_key, template_topic)
+        definitions.append(
+            TopicDefinition(
+                topic_key=topic_key,
+                language=language,
+                title=title,
+                description=description,
+                lessons_by_level=source_topic.lessons_by_level,
+                daily_games=source_topic.daily_games,
+                extra_games=source_topic.extra_games,
+            )
+        )
+        seen_keys.add(topic_key)
+    if not definitions:
+        return fallback_topics
+    return tuple(definitions)
+
+
+def _load_topic_sequence_from_persistence(language: str) -> tuple[TopicDefinition, ...] | None:
+    normalized_language = str(language or "").strip().lower()
+    topic_rows, source = memory.load_topic_sequence_cache(language=normalized_language)
+    if not topic_rows:
+        return None
+    definitions = _topic_definitions_from_seed_list(normalized_language, topic_rows)
+    if not definitions:
+        return None
+    logger.info(
+        "topic_sequence_persisted_hit language=%s topics=%s source=%s",
+        normalized_language,
+        len(definitions),
+        source,
+    )
+    return definitions
+
+
+def _topics_for_language(language: str) -> tuple[TopicDefinition, ...]:
+    normalized_language = str(language or "").strip().lower()
+    cached = _TOPIC_SEQUENCE_CACHE.get(normalized_language)
+    if cached:
+        return cached
+    persisted = _load_topic_sequence_from_persistence(normalized_language)
+    if persisted:
+        _TOPIC_SEQUENCE_CACHE[normalized_language] = persisted
+        return persisted
+    fallback_topics = _fallback_topics_for_language(normalized_language)
+    _TOPIC_SEQUENCE_CACHE[normalized_language] = fallback_topics
+    logger.info(
+        "topic_sequence_runtime_fallback language=%s topics=%s",
+        normalized_language,
+        len(fallback_topics),
+    )
+    return fallback_topics
+
+
+async def _ensure_topic_sequence_bootstrap(language: str) -> tuple[TopicDefinition, ...]:
+    normalized_language = str(language or "").strip().lower()
+    cached = _TOPIC_SEQUENCE_CACHE.get(normalized_language)
+    if cached:
+        return cached
+    lock = _topic_sequence_lock(normalized_language)
+    async with lock:
+        cached = _TOPIC_SEQUENCE_CACHE.get(normalized_language)
+        if cached:
+            return cached
+
+        persisted = _load_topic_sequence_from_persistence(normalized_language)
+        if persisted:
+            _TOPIC_SEQUENCE_CACHE[normalized_language] = persisted
+            return persisted
+
+        fallback_topics = _fallback_topics_for_language(normalized_language)
+        fallback_seed_rows = _topic_seeds_from_definitions(fallback_topics)
+        generated = await openai_planner.generate_topic_sequence(
+            language=normalized_language,
+            fallback_topics=fallback_seed_rows,
+        )
+        source = str(generated.get("source", "fallback")).strip().lower() or "fallback"
+        generated_rows = generated.get("topics")
+        if isinstance(generated_rows, list):
+            resolved_topics = _topic_definitions_from_seed_list(normalized_language, generated_rows)
+        else:
+            resolved_topics = fallback_topics
+        if not resolved_topics:
+            resolved_topics = fallback_topics
+        _TOPIC_SEQUENCE_CACHE[normalized_language] = resolved_topics
+        memory.save_topic_sequence_cache(
+            language=normalized_language,
+            topics=_topic_seeds_from_definitions(resolved_topics),
+            updated_at_iso=datetime.now(UTC).isoformat(),
+            source=source,
+        )
+        logger.info(
+            "topic_sequence_bootstrap_done language=%s topics=%s source=%s",
+            normalized_language,
+            len(resolved_topics),
+            source,
+        )
+        return resolved_topics
+
+
+async def _force_topic_sequence_refresh(language: str) -> dict[str, Any]:
+    normalized_language = str(language or "").strip().lower()
+    lock = _topic_sequence_lock(normalized_language)
+    async with lock:
+        existing_topics = _topics_for_language(normalized_language)
+        fallback_topics = _fallback_topics_for_language(normalized_language)
+        fallback_seed_rows = _topic_seeds_from_definitions(fallback_topics)
+        generated = await openai_planner.generate_topic_sequence(
+            language=normalized_language,
+            fallback_topics=fallback_seed_rows,
+        )
+        source = str(generated.get("source", "fallback")).strip().lower() or "fallback"
+        generated_rows = generated.get("topics")
+        if source == "openai" and isinstance(generated_rows, list):
+            resolved_topics = _topic_definitions_from_seed_list(normalized_language, generated_rows)
+            if resolved_topics:
+                _TOPIC_SEQUENCE_CACHE[normalized_language] = resolved_topics
+                memory.save_topic_sequence_cache(
+                    language=normalized_language,
+                    topics=_topic_seeds_from_definitions(resolved_topics),
+                    updated_at_iso=datetime.now(UTC).isoformat(),
+                    source=source,
+                )
+                logger.info(
+                    "topic_sequence_forced_refresh_applied language=%s topics=%s source=%s",
+                    normalized_language,
+                    len(resolved_topics),
+                    source,
+                )
+                return {
+                    "refreshed": True,
+                    "source": source,
+                    "topics": resolved_topics,
+                    "error": "",
+                }
+
+        error = str(generated.get("error", "")).strip()
+        # Keep the previously active sequence when refresh does not yield a valid OpenAI topic list.
+        logger.warning(
+            "topic_sequence_forced_refresh_skipped language=%s source=%s error=%s",
+            normalized_language,
+            source or "fallback",
+            error or "unknown",
+        )
+        return {
+            "refreshed": False,
+            "source": source or "fallback",
+            "topics": existing_topics,
+            "error": error,
+        }
+
+
+def _select_active_topic(learner_id: str, language: str, topics: tuple[TopicDefinition, ...]) -> TopicDefinition:
+    if not topics:
+        raise ValueError(f"No topic definitions configured for language={language}")
+    closed_keys = {
+        item.topic_key
+        for item in memory.list_closed_topics(learner_id=learner_id, language=language)
+    }
+    for topic in topics:
+        if topic.topic_key not in closed_keys:
+            logger.info(
+                "topic_sequence_active learner_id=%s language=%s topic=%s closed_topics=%s",
+                learner_id,
+                language,
+                topic.topic_key,
+                len(closed_keys),
+            )
+            return topic
+    selected = topics[-1]
+    logger.info(
+        "topic_sequence_all_closed learner_id=%s language=%s topic=%s closed_topics=%s",
+        learner_id,
+        language,
+        selected.topic_key,
+        len(closed_keys),
+    )
+    return selected
+
+
 def _daily_topic_for(learner_id: str, language: str) -> tuple[TopicDefinition, Any, str]:
     today = date.today()
-    topic = topic_for_day(learner_id=learner_id, language=language, target_day=today)
+    topics = _topics_for_language(language)
+    topic = _select_active_topic(learner_id=learner_id, language=language, topics=topics)
     progress = memory.load_or_create_daily_topic_progress(
         learner_id=learner_id,
         day_iso=today.isoformat(),
@@ -589,25 +855,247 @@ def _daily_topic_for(learner_id: str, language: str) -> tuple[TopicDefinition, A
     return topic, progress, today.isoformat()
 
 
-def _topic_lesson_payload(topic: TopicDefinition, level: int, secondary_translation_language: str | None = None) -> dict[str, Any]:
-    lesson = topic.lesson_for_level(level)
+def _fallback_topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str, Any]]:
+    lessons: dict[int, dict[str, Any]] = {}
+    for level, lesson in topic.lessons_by_level.items():
+        lessons[int(level)] = {
+            "title": lesson.title,
+            "objective": lesson.objective,
+            "theory_points": list(lesson.theory_points),
+            "example_script": lesson.example_script,
+            "example_romanized": lesson.example_romanized,
+            "example_literal_translation": lesson.example_literal_translation,
+        }
+    return lessons
+
+
+async def _topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str, Any]]:
+    cache_key = (topic.language, topic.topic_key)
+    cached = _TOPIC_LESSONS_AI_CACHE.get(cache_key)
+    if cached is not None:
+        logger.info(
+            "topic_lessons_cache_hit language=%s topic=%s levels=%s",
+            topic.language,
+            topic.topic_key,
+            len(cached),
+        )
+        return cached
+
+    fallback_lessons = _fallback_topic_lessons_by_level(topic)
+    persisted_lessons, refresh_required = memory.load_topic_lessons_cache(
+        language=topic.language,
+        topic_key=topic.topic_key,
+    )
+    if persisted_lessons is not None and not refresh_required:
+        _TOPIC_LESSONS_AI_CACHE[cache_key] = persisted_lessons
+        logger.info(
+            "topic_lessons_persisted_hit language=%s topic=%s levels=%s",
+            topic.language,
+            topic.topic_key,
+            len(persisted_lessons),
+        )
+        return persisted_lessons
+    if refresh_required:
+        logger.info(
+            "topic_lessons_refresh_required language=%s topic=%s trigger=post_restart",
+            topic.language,
+            topic.topic_key,
+        )
+
+    generated = await openai_planner.generate_topic_lessons(
+        language=topic.language,
+        topic_key=topic.topic_key,
+        topic_title=topic.title,
+        topic_description=topic.description,
+        fallback_lessons_by_level=fallback_lessons,
+    )
+    source = str(generated.get("source", "fallback")).strip().lower()
+    lessons_by_level = generated.get("lessons_by_level")
+    if source == "openai" and isinstance(lessons_by_level, dict):
+        normalized: dict[int, dict[str, Any]] = {}
+        for level, lesson_data in lessons_by_level.items():
+            try:
+                parsed_level = int(level)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(lesson_data, dict):
+                normalized[parsed_level] = dict(lesson_data)
+        if normalized:
+            _TOPIC_LESSONS_AI_CACHE[cache_key] = normalized
+            logger.info(
+                "topic_lessons_cached language=%s topic=%s levels=%s source=openai",
+                topic.language,
+                topic.topic_key,
+                len(normalized),
+            )
+            memory.save_topic_lessons_cache(
+                language=topic.language,
+                topic_key=topic.topic_key,
+                lessons_by_level=normalized,
+                updated_at_iso=datetime.now(UTC).isoformat(),
+                refresh_required=False,
+            )
+            return normalized
+
+    if persisted_lessons is not None:
+        _TOPIC_LESSONS_AI_CACHE[cache_key] = persisted_lessons
+        logger.info(
+            "topic_lessons_stale_persisted_used language=%s topic=%s levels=%s",
+            topic.language,
+            topic.topic_key,
+            len(persisted_lessons),
+        )
+        return persisted_lessons
+
+    logger.info(
+        "topic_lessons_fallback language=%s topic=%s source=%s detail=%s",
+        topic.language,
+        topic.topic_key,
+        source or "fallback",
+        str(generated.get("error", "")).strip() or "no_detail",
+    )
+    return fallback_lessons
+
+
+def _topic_lesson_payload(
+    topic: TopicDefinition,
+    level: int,
+    secondary_translation_language: str | None = None,
+    lessons_by_level: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    selected_level = int(level)
+    if lessons_by_level and selected_level in lessons_by_level:
+        lesson_payload = dict(lessons_by_level[selected_level])
+    else:
+        lesson = topic.lesson_for_level(selected_level)
+        lesson_payload = {
+            "title": lesson.title,
+            "objective": lesson.objective,
+            "theory_points": list(lesson.theory_points),
+            "example_script": lesson.example_script,
+            "example_romanized": lesson.example_romanized,
+            "example_literal_translation": lesson.example_literal_translation,
+        }
+
+    theory_points_raw = lesson_payload.get("theory_points")
+    theory_points = [str(item).strip() for item in theory_points_raw if str(item).strip()] if isinstance(theory_points_raw, list) else []
     payload = {
         "topic_key": topic.topic_key,
         "topic_title": topic.title,
         "topic_description": topic.description,
         "level": level,
-        "title": lesson.title,
-        "objective": lesson.objective,
-        "theory_points": list(lesson.theory_points),
-        "example_script": lesson.example_script,
-        "example_romanized": lesson.example_romanized,
-        "example_literal_translation": lesson.example_literal_translation,
+        "title": str(lesson_payload.get("title", "")).strip(),
+        "objective": str(lesson_payload.get("objective", "")).strip(),
+        "theory_points": theory_points,
+        "example_script": str(lesson_payload.get("example_script", "")).strip(),
+        "example_romanized": str(lesson_payload.get("example_romanized", "")).strip(),
+        "example_literal_translation": str(lesson_payload.get("example_literal_translation", "")).strip(),
     }
     return _augment_with_secondary_translations(
         payload,
         secondary_language=secondary_translation_language,
         context=f"lesson.{topic.topic_key}.level{level}",
         memo={},
+    )
+
+
+def _prewarm_lesson_daily_translation_cache(
+    *,
+    learner_id: str,
+    language: str,
+    topic: TopicDefinition,
+    level: int,
+    daily_progress: dict[str, Any],
+) -> None:
+    secondary_language = _secondary_translation_for_learner(learner_id)
+    if not secondary_language:
+        logger.info(
+            "translation_prewarm_skipped learner_id=%s language=%s topic=%s reason=secondary_language_disabled",
+            learner_id,
+            language,
+            topic.topic_key,
+        )
+        return
+    if not openai_planner.api_key:
+        logger.info(
+            "translation_prewarm_skipped learner_id=%s language=%s topic=%s reason=openai_not_configured",
+            learner_id,
+            language,
+            topic.topic_key,
+        )
+        return
+
+    daily_pairs = topic.daily_plan_for_level(level)
+    daily_game_types = [game_type for game_type, _activity_id in daily_pairs]
+    daily_cards: list[dict[str, Any]] = []
+    for game_type, activity_id in daily_pairs:
+        card = _build_card_for_activity_with_level_fallback(
+            game_type=game_type,
+            language=language,
+            level=level,
+            activity_id=activity_id,
+            secondary_translation_language=None,
+        )
+        if card is not None:
+            daily_cards.append(card)
+
+    extra_cards = _extra_game_cards_metadata(
+        daily_game_types=daily_game_types,
+        language=language,
+        level=level,
+    )
+    all_cards: list[dict[str, Any]] = []
+    for game_type, activity_id in [*topic.daily_plan_for_level(level), *topic.extra_plan_for_level(level)]:
+        card = _build_card_for_activity_with_level_fallback(
+            game_type=game_type,
+            language=language,
+            level=level,
+            activity_id=activity_id,
+            secondary_translation_language=None,
+        )
+        if card is not None:
+            all_cards.append(card)
+
+    logger.info(
+        "translation_prewarm_started learner_id=%s language=%s topic=%s level=%s daily=%s extras=%s all=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        level,
+        len(daily_cards),
+        len(extra_cards),
+        len(all_cards),
+    )
+    # Warm translation cache for lesson + cards so next /api/games/daily load is mostly cache hits.
+    _translate_response_for_learner(
+        learner_id=learner_id,
+        context="lesson_complete_prewarm",
+        payload={
+            "topic": {
+                "topic_key": topic.topic_key,
+                "title": topic.title,
+                "description": topic.description,
+            },
+            "lesson": _topic_lesson_payload(
+                topic=topic,
+                level=level,
+                secondary_translation_language=None,
+                lessons_by_level=_TOPIC_LESSONS_AI_CACHE.get((topic.language, topic.topic_key)),
+            ),
+            "daily_progress": daily_progress,
+            "daily_games": daily_cards,
+            "extra_games": extra_cards,
+            "available_games": [*daily_cards, *extra_cards],
+            "all_games": all_cards,
+            "learning_contract": _learning_contract_payload(daily_required_games=len(daily_cards)),
+        },
+    )
+    logger.info(
+        "translation_prewarm_done learner_id=%s language=%s topic=%s level=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        level,
     )
 
 
@@ -629,6 +1117,18 @@ def _weekly_exam_due(last_exam_day_iso: str | None, today_iso: str) -> bool:
     return (today - last_day) >= timedelta(days=7)
 
 
+def _topic_mastery_level(*, recent_scores: list[int], window_days: int = TOPIC_MASTERY_WINDOW_DAYS) -> tuple[int, float]:
+    if not recent_scores:
+        return 1, 0.0
+    sample_days = len(recent_scores)
+    average_score = round(sum(int(score) for score in recent_scores) / sample_days, 1)
+    if sample_days >= int(window_days) and average_score >= 150.0:
+        return 3, average_score
+    if sample_days >= 3 and average_score >= 100.0:
+        return 2, average_score
+    return 1, average_score
+
+
 def _level_exam_flags(
     *,
     current_level: int,
@@ -641,15 +1141,14 @@ def _level_exam_flags(
 ) -> dict[str, bool]:
     failure_total = sum(int(value) for value in topic_failures.values())
     ready_to_2 = (
-        current_level == 1
-        and not level_1_to_2_passed
+        not level_1_to_2_passed
         and weekly_passed_count >= 1
         and high_score_days >= 1
         and (retention_ratio is None or retention_ratio >= 70.0)
         and failure_total <= 12
     )
     ready_to_3 = (
-        current_level == 2
+        level_1_to_2_passed
         and not level_2_to_3_passed
         and weekly_passed_count >= 2
         and high_score_days >= 5
@@ -663,7 +1162,7 @@ def _level_exam_flags(
 
 
 def _topic_title(language: str, topic_key: str) -> str:
-    for topic in TOPICS_BY_LANGUAGE.get(language, ()):
+    for topic in _topics_for_language(language):
         if topic.topic_key == topic_key:
             return topic.title
     return topic_key
@@ -673,7 +1172,7 @@ def _topic_definition_for_key(language: str, topic_key: str) -> TopicDefinition 
     normalized = str(topic_key or "").strip()
     if not normalized:
         return None
-    for topic in TOPICS_BY_LANGUAGE.get(language, ()):
+    for topic in _topics_for_language(language):
         if topic.topic_key == normalized:
             return topic
     return None
@@ -757,7 +1256,7 @@ def _resolve_attempt_topic_key(learner_id: str, language: str, payload: dict[str
     if explicit_topic:
         return explicit_topic
     try:
-        today_topic = topic_for_day(learner_id=learner_id, language=language, target_day=date.today())
+        today_topic, _progress, _today_iso = _daily_topic_for(learner_id=learner_id, language=language)
     except ValueError:
         return None
     return today_topic.topic_key
@@ -864,6 +1363,17 @@ def _progress_insights(
     )
     weekly_exam_due = _weekly_exam_due(assessment.weekly_exam_last_day_iso, today_iso=today_iso)
     closed_topics_count = memory.count_closed_topics(learner_id=learner_id, language=language)
+    recent_topic_scores = memory.recent_topic_scores(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+        limit=TOPIC_MASTERY_WINDOW_DAYS,
+    )
+    topic_mastery_level, topic_mastery_average_score = _topic_mastery_level(
+        recent_scores=recent_topic_scores,
+        window_days=TOPIC_MASTERY_WINDOW_DAYS,
+    )
+    topic_mastery_ready_for_weekly_exam = topic_mastery_level >= TOPIC_EXAM_MIN_MASTERY_LEVEL
     return {
         "topic_days_count": int(topic_days_count),
         "topic_days_message": f"You have worked on this topic for {topic_days_count} day(s).",
@@ -880,6 +1390,65 @@ def _progress_insights(
         "ready_to_level_2": bool(level_exam_ready_flags["ready_to_level_2"]),
         "ready_to_level_3": bool(level_exam_ready_flags["ready_to_level_3"]),
         "closed_topics_count": int(closed_topics_count),
+        "topic_mastery_level": int(topic_mastery_level),
+        "topic_mastery_required_level": int(TOPIC_EXAM_MIN_MASTERY_LEVEL),
+        "topic_mastery_window_days": int(TOPIC_MASTERY_WINDOW_DAYS),
+        "topic_mastery_sample_days": int(len(recent_topic_scores)),
+        "topic_mastery_average_score": float(topic_mastery_average_score),
+        "topic_mastery_ready_for_weekly_exam": bool(topic_mastery_ready_for_weekly_exam),
+    }
+
+
+def _level_progress_payload(
+    *,
+    current_level: int,
+    daily_score: int,
+    topic_day_target_score: int,
+    ready_to_level_2: bool,
+    ready_to_level_3: bool,
+) -> dict[str, Any]:
+    normalized_level = max(1, int(current_level))
+    score = max(0, min(300, int(daily_score)))
+    max_level = 3
+    if normalized_level >= max_level:
+        return {
+            "current_level": normalized_level,
+            "next_level": None,
+            "points_current": score,
+            "points_target": 300,
+            "points_remaining": 0,
+            "progress_percent": 100,
+            "ready_for_level_exam": False,
+            "level_cap_reached": True,
+            "status_message": "Maximum level reached.",
+        }
+
+    next_level = normalized_level + 1
+    baseline_target = 170 if next_level == 2 else 210
+    adaptive_target = int(round(max(1, int(topic_day_target_score)) * 0.95))
+    points_target = min(300, max(baseline_target, adaptive_target))
+    points_remaining = max(0, points_target - score)
+    progress_percent = int(round((score / points_target) * 100)) if points_target > 0 else 0
+    ready_for_level_exam = bool(ready_to_level_2) if next_level == 2 else bool(ready_to_level_3)
+    points_met = score >= points_target
+
+    if ready_for_level_exam:
+        status_message = f"Ready for level exam {normalized_level} -> {next_level}."
+    elif points_met:
+        status_message = "Point target reached. Keep consistency to unlock the level exam."
+    else:
+        status_message = f"{points_remaining} point(s) needed for level exam target."
+
+    return {
+        "current_level": normalized_level,
+        "next_level": next_level,
+        "points_current": score,
+        "points_target": points_target,
+        "points_remaining": points_remaining,
+        "progress_percent": max(0, min(100, progress_percent)),
+        "ready_for_level_exam": bool(ready_for_level_exam),
+        "level_cap_reached": False,
+        "status_message": status_message,
     }
 
 
@@ -921,6 +1490,13 @@ def _enrich_daily_progress_payload(
             current_level=current_level,
             daily_score=int(daily_progress.get("daily_score", 0)),
         )
+    )
+    enriched["level_progress"] = _level_progress_payload(
+        current_level=current_level,
+        daily_score=int(enriched.get("daily_score", 0)),
+        topic_day_target_score=int(enriched.get("topic_day_target_score", 150)),
+        ready_to_level_2=bool(enriched.get("ready_to_level_2")),
+        ready_to_level_3=bool(enriched.get("ready_to_level_3")),
     )
     return enriched
 
@@ -1511,14 +2087,25 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
     inferred_level = _service_level_from_difficulty(difficulty)
     stored_level = memory.level_for_language(req.learner_id, preferred_language, default_level=1)
     current_level = max(stored_level, inferred_level)
+    auto_promoted_from_level: int | None = None
     if current_level != stored_level:
+        auto_promoted_from_level = stored_level
         memory.set_language_level(req.learner_id, preferred_language, current_level)
+        logger.info(
+            "daily_level_promoted learner_id=%s language=%s from_level=%s to_level=%s difficulty=%s",
+            req.learner_id,
+            preferred_language,
+            stored_level,
+            current_level,
+            difficulty,
+        )
 
     requested_level = req.level_override_today
     today_level = current_level
     # Daily level override is disabled; users can review past topics instead.
     level_up_blocked = bool(requested_level is not None and int(requested_level) != int(current_level))
 
+    await _ensure_topic_sequence_bootstrap(preferred_language)
     topic, progress, today_iso = _daily_topic_for(learner_id=req.learner_id, language=preferred_language)
     progress = memory.set_daily_level_state(
         learner_id=req.learner_id,
@@ -1621,15 +2208,26 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
         "title": topic.title,
         "description": topic.description,
     }
+    lesson_ladder = await _topic_lessons_by_level(topic)
     response["lesson"] = _topic_lesson_payload(
         topic=topic,
         level=today_level,
         secondary_translation_language=secondary_translation_language,
+        lessons_by_level=lesson_ladder,
     )
     response["daily_progress"] = daily_progress
     response["daily_games"] = daily_cards
     response["extra_games"] = extra_cards
     response["level_up_blocked"] = level_up_blocked
+    response["level_up_notice"] = (
+        {
+            "from_level": auto_promoted_from_level,
+            "to_level": current_level,
+            "message": f"Level up! You reached level {current_level}.",
+        }
+        if auto_promoted_from_level is not None and current_level > auto_promoted_from_level
+        else None
+    )
     response["selected_game"] = selected_game
     response["available_games"] = available_cards
     response["all_games"] = all_cards
@@ -1660,7 +2258,7 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
 
 
 @app.post("/api/games/lesson/complete")
-def complete_daily_lesson(req: DailyLessonCompleteRequest) -> dict:
+def complete_daily_lesson(req: DailyLessonCompleteRequest, background_tasks: BackgroundTasks) -> dict:
     learner_id = req.learner_id or DEFAULT_LEARNER_ID
     language = (req.language or "ja").strip().lower()
     if language not in AVAILABLE_LANGUAGES:
@@ -1701,6 +2299,15 @@ def complete_daily_lesson(req: DailyLessonCompleteRequest) -> dict:
         learner_id,
         language,
         topic.topic_key,
+    )
+    # Async prewarm after lesson completion to make subsequent daily loads faster for translated UI fields.
+    background_tasks.add_task(
+        _prewarm_lesson_daily_translation_cache,
+        learner_id=learner_id,
+        language=language,
+        topic=topic,
+        level=level_state,
+        daily_progress=daily_progress,
     )
     return _translate_response_for_learner(
         learner_id=learner_id,
@@ -1873,6 +2480,47 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
     }
 
 
+@app.post("/api/topics/refresh")
+async def refresh_topic_sequence(req: TopicSequenceRefreshRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("topic_refresh_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+    logger.info("topic_refresh_requested learner_id=%s language=%s", learner_id, language)
+    refresh_result = await _force_topic_sequence_refresh(language)
+    topics: tuple[TopicDefinition, ...] = tuple(refresh_result.get("topics") or ())
+    if not topics:
+        logger.warning("topic_refresh_empty learner_id=%s language=%s", learner_id, language)
+        return {"error": "No topics available for this language."}
+    active_topic = _select_active_topic(learner_id=learner_id, language=language, topics=topics)
+    payload = {
+        "refreshed": bool(refresh_result.get("refreshed")),
+        "source": str(refresh_result.get("source", "fallback") or "fallback"),
+        "error": str(refresh_result.get("error", "") or ""),
+        "topic_count": len(topics),
+        "active_topic": {
+            "topic_key": active_topic.topic_key,
+            "title": active_topic.title,
+            "description": active_topic.description,
+        },
+    }
+    logger.info(
+        "topic_refresh_done learner_id=%s language=%s refreshed=%s source=%s topics=%s active_topic=%s",
+        learner_id,
+        language,
+        payload["refreshed"],
+        payload["source"],
+        payload["topic_count"],
+        active_topic.topic_key,
+    )
+    return _translate_response_for_learner(
+        learner_id=learner_id,
+        context="topic_refresh",
+        payload=payload,
+    )
+
+
 @app.post("/api/topics/review")
 async def load_topic_review(req: TopicReviewRequest) -> dict:
     learner_id = req.learner_id or DEFAULT_LEARNER_ID
@@ -1953,6 +2601,7 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
         len(review_cards),
         ai_prompts_review,
     )
+    lesson_ladder = await _topic_lessons_by_level(topic)
     return _translate_response_for_learner(
         learner_id=learner_id,
         context="topic_review",
@@ -1968,6 +2617,7 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
             topic=topic,
             level=current_level,
             secondary_translation_language=secondary_translation_language,
+            lessons_by_level=lesson_ladder,
         ),
         "review_mode": True,
         "review_games": review_cards,
@@ -2018,6 +2668,25 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             payload={
             "error": "Weekly mini-exam is not due yet.",
             "daily_progress": insights,
+            },
+        )
+    if not bool(insights.get("topic_mastery_ready_for_weekly_exam")):
+        logger.info(
+            "weekly_exam_mastery_locked learner_id=%s language=%s topic=%s mastery_level=%s required=%s sample_days=%s avg_score=%.1f",
+            learner_id,
+            language,
+            topic.topic_key,
+            int(insights.get("topic_mastery_level", 1)),
+            int(insights.get("topic_mastery_required_level", TOPIC_EXAM_MIN_MASTERY_LEVEL)),
+            int(insights.get("topic_mastery_sample_days", 0)),
+            float(insights.get("topic_mastery_average_score", 0.0)),
+        )
+        return _translate_response_for_learner(
+            learner_id=learner_id,
+            context="weekly_exam.mastery_locked",
+            payload={
+                "error": "Weekly topic exam is locked. Reach topic mastery level 3 first.",
+                "daily_progress": insights,
             },
         )
 
@@ -2274,15 +2943,19 @@ def take_level_exam(req: LevelExamRequest) -> dict:
     topic, progress, today_iso = _daily_topic_for(learner_id=learner_id, language=language)
     current_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
     target_level = int(req.target_level or (current_level + 1))
-    if target_level <= current_level:
-        return {"error": f"Target level must be above current level ({current_level})."}
+    if target_level < 2:
+        return {"error": "Target level must be 2 or 3."}
     if target_level > 3:
         return {"error": "Target level is not supported."}
+
+    from_level = 1 if target_level == 2 else 2
+    if target_level == 3 and not memory.level_exam_passed(learner_id=learner_id, language=language, from_level=1, to_level=2):
+        return {"error": "Pass level exam 1 -> 2 before attempting 2 -> 3."}
 
     already_passed = memory.level_exam_passed(
         learner_id=learner_id,
         language=language,
-        from_level=current_level,
+        from_level=from_level,
         to_level=target_level,
     )
     if already_passed:
@@ -2331,19 +3004,27 @@ def take_level_exam(req: LevelExamRequest) -> dict:
         memory.mark_level_exam_passed(
             learner_id=learner_id,
             language=language,
-            from_level=current_level,
+            from_level=from_level,
             to_level=target_level,
         )
-        memory.set_language_level(learner_id=learner_id, language=language, level=target_level)
+        desired_level = max(current_level, target_level)
+        memory.set_language_level(learner_id=learner_id, language=language, level=desired_level)
         memory.mark_topic_closed(
             learner_id=learner_id,
             language=language,
             topic_key=topic.topic_key,
             closed_day_iso=today_iso,
             closed_level=target_level,
-            reason=f"level_exam_{current_level}_to_{target_level}",
+            reason=f"level_exam_{from_level}_to_{target_level}",
         )
-        promoted = True
+        # Defer topic lesson refresh to next process restart: runtime cache remains stable now,
+        # but persisted flag forces regeneration the next time cache is cold.
+        memory.set_topic_lessons_refresh_required(
+            language=language,
+            topic_key=topic.topic_key,
+            required=True,
+        )
+        promoted = desired_level > current_level
 
     refreshed_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
     refreshed_progress = memory.load_or_create_daily_topic_progress(
