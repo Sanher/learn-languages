@@ -252,6 +252,118 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(activities[0]["game"], "sentence_order")
                 self.assertEqual(activities[1]["game"], "context_quiz")
 
+    def test_generate_extra_game_prompt_falls_back_on_http_status_error(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+                response = httpx.Response(
+                    400,
+                    request=request,
+                    content=b'{"error":{"message":"invalid_request"}}',
+                )
+                mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                    "bad request",
+                    request=request,
+                    response=response,
+                )
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_extra_game_prompt(
+                        language="ja",
+                        topic_title="Identity",
+                        game_type="kana_speed_round",
+                        level=1,
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "fallback")
+                self.assertEqual(
+                    result.get("text"),
+                    "Topic: Identity. Try this kana_speed_round activity at level 1.",
+                )
+                self.assertIn("Extra game prompt request failed: HTTP 400", result.get("error", ""))
+
+    def test_generate_extra_game_prompt_falls_back_when_output_is_empty(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "   ",
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_extra_game_prompt(
+                        language="ja",
+                        topic_title="Identity",
+                        game_type="pronunciation_match",
+                        level=2,
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "fallback")
+                self.assertEqual(result.get("error"), "Empty extra game prompt output.")
+
+    def test_generate_extra_game_prompt_uses_string_content_for_responses_input(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
+                mock_http = mock_client.return_value.__aenter__.return_value
+                mock_response = MagicMock()
+                mock_response.raise_for_status.return_value = None
+                mock_response.json.return_value = {
+                    "output": [
+                        {
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "Practice this sentence first.",
+                                }
+                            ]
+                        }
+                    ]
+                }
+                mock_http.post = AsyncMock(return_value=mock_response)
+
+                result = asyncio.run(
+                    planner.generate_extra_game_prompt(
+                        language="ja",
+                        topic_title="Identity",
+                        game_type="sentence_order",
+                        level=1,
+                    )
+                )
+
+                self.assertEqual(result.get("source"), "openai")
+                self.assertEqual(result.get("text"), "Practice this sentence first.")
+                _, kwargs = mock_http.post.call_args
+                payload = kwargs["json"]
+                self.assertIn("input", payload)
+                self.assertIsInstance(payload["input"], list)
+                self.assertGreaterEqual(len(payload["input"]), 2)
+                self.assertIsInstance(payload["input"][0]["content"], str)
+                self.assertIsInstance(payload["input"][1]["content"], str)
+                self.assertNotIsInstance(payload["input"][0]["content"], list)
+
 
 if __name__ == "__main__":
     unittest.main()

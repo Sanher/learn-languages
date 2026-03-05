@@ -89,6 +89,26 @@ class OpenAIPlanner:
         self._translation_consecutive_failures = 0
         self._translation_circuit_open_until = 0.0
 
+    @staticmethod
+    def _responses_input(system_prompt: str, user_prompt: str) -> list[dict[str, str]]:
+        # Keep message payload shape compatible with Responses API across provider versions.
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+    @staticmethod
+    def _http_error_detail(exc: httpx.HTTPError) -> str:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            body = (exc.response.text or "").strip().replace("\n", " ")
+            if len(body) > 240:
+                body = body[:240].rstrip() + "..."
+            if body:
+                return f"HTTP {status}: {body}"
+            return f"HTTP {status}"
+        return f"{type(exc).__name__}: {exc}"
+
     def _fallback_daily_activities(self, *, difficulty: int, games: list[str]) -> list[dict[str, str]]:
         ordered_games: list[str] = []
         seen: set[str] = set()
@@ -204,20 +224,19 @@ class OpenAIPlanner:
                     },
                     json={
                         "model": self.model,
-                        "input": [
-                            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-                            {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
-                        ],
+                        "input": self._responses_input(system_prompt, user_prompt),
                     },
                 )
                 response.raise_for_status()
                 payload = response.json()
         except httpx.HTTPError as exc:
-            self._mark_translation_failure(reason=type(exc).__name__)
+            detail = self._http_error_detail(exc)
+            self._mark_translation_failure(reason=detail[:120])
+            logger.warning("translation_provider_error detail=%s", detail)
             return {
                 "source": "fallback",
                 "translated_text": "",
-                "error": f"Translation request failed: {type(exc).__name__}",
+                "error": f"Translation request failed: {detail}",
             }
 
         translated_text = ""
@@ -267,21 +286,18 @@ class OpenAIPlanner:
                     },
                     json={
                         "model": self.model,
-                        "input": [
-                            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-                            {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
-                        ],
-                        "text": {"format": {"type": "json_object"}},
+                        "input": self._responses_input(system_prompt, user_prompt),
                     },
                 )
                 response.raise_for_status()
                 payload = response.json()
         except httpx.HTTPError as exc:
-            logger.warning("daily_content_provider_error detail=%s", type(exc).__name__)
+            detail = self._http_error_detail(exc)
+            logger.warning("daily_content_provider_error detail=%s", detail)
             return {
                 "source": "fallback",
                 "activities": fallback_activities,
-                "error": f"Daily content request failed: {type(exc).__name__}",
+                "error": f"Daily content request failed: {detail}",
             }
 
         text_outputs = payload.get("output", [])
@@ -379,10 +395,11 @@ class OpenAIPlanner:
         game_type: str,
         level: int,
     ) -> dict[str, Any]:
+        fallback_text = f"Topic: {topic_title}. Try this {game_type} activity at level {level}."
         if not self.api_key:
             return {
                 "source": "fallback",
-                "text": f"Topic: {topic_title}. Try this {game_type} activity at level {level}.",
+                "text": fallback_text,
             }
 
         system_prompt = (
@@ -395,23 +412,35 @@ class OpenAIPlanner:
             "Return plain text only."
         )
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/responses",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "input": [
-                        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-                        {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
-                    ],
-                },
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "input": self._responses_input(system_prompt, user_prompt),
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            detail = self._http_error_detail(exc)
+            logger.warning(
+                "extra_game_prompt_provider_error language=%s game_type=%s level=%s detail=%s",
+                language,
+                game_type,
+                level,
+                detail,
             )
-            response.raise_for_status()
-            payload = response.json()
+            return {
+                "source": "fallback",
+                "text": fallback_text,
+                "error": f"Extra game prompt request failed: {detail}",
+            }
 
         text_outputs = payload.get("output", [])
         content_text = ""
@@ -420,9 +449,23 @@ class OpenAIPlanner:
                 if item.get("type") == "output_text":
                     content_text += item.get("text", "")
 
+        normalized_text = content_text.strip()
+        if not normalized_text:
+            logger.warning(
+                "extra_game_prompt_empty_output language=%s game_type=%s level=%s",
+                language,
+                game_type,
+                level,
+            )
+            return {
+                "source": "fallback",
+                "text": fallback_text,
+                "error": "Empty extra game prompt output.",
+            }
+
         return {
             "source": "openai",
-            "text": content_text.strip(),
+            "text": normalized_text,
         }
 
     async def transcribe_audio(
