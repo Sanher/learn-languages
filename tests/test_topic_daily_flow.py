@@ -533,6 +533,23 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(kwargs["level"], 1)
         self.assertEqual(kwargs["topic"].topic_key, lesson["topic_key"])
 
+    def test_translation_prewarm_builds_cards_without_signature_error(self) -> None:
+        topic = api._topic_definition_for_key(language="ja", topic_key="identity_and_plans")
+        self.assertIsNotNone(topic)
+        api.memory.set_secondary_translation_language(self.learner_id, "es")
+        with (
+            unittest.mock.patch.object(api.openai_planner, "api_key", "test-openai-key"),
+            unittest.mock.patch.object(api, "_translate_response_for_learner", return_value={}) as mock_translate,
+        ):
+            api._prewarm_lesson_daily_translation_cache(
+                learner_id=self.learner_id,
+                language="ja",
+                topic=topic,
+                level=1,
+                daily_progress={"daily_score": 0, "daily_score_max": 300},
+            )
+        self.assertEqual(mock_translate.call_count, 1)
+
     def test_level_override_cannot_increase(self) -> None:
         response = self.client.post(
             "/api/games/daily",

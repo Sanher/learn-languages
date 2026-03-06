@@ -33,6 +33,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
 .top-right {
@@ -40,7 +41,10 @@ body {
 }
 
 #topbar-level-progress {
-  width: min(320px, 100%);
+  width: 100%;
+  max-width: 320px;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .label {
@@ -77,6 +81,7 @@ body {
   border: 1px solid #334155;
   border-radius: 8px;
   background: #020617;
+  box-sizing: border-box;
 }
 
 .top-right .level-progress {
@@ -309,6 +314,24 @@ button.is-loading {
   border-radius: 10px;
   padding: 12px;
   background: #101a30;
+}
+
+.game-card-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.loading-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  color: #dbeafe;
+}
+
+.loading-topic-hint {
+  margin: 0;
 }
 
 .game-card-collapsed,

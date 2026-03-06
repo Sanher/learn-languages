@@ -10,6 +10,7 @@ const secondaryTranslationStatusEl = document.getElementById('secondary-translat
 const LANGUAGE_ALIASES = {
   ja: 'Japanese',
 };
+const TOPIC_HINT_STORAGE_KEY = 'learn_languages_last_topic_title';
 
 let availableLanguages = ['ja'];
 let learnerId = 'ha_default_user';
@@ -330,6 +331,76 @@ function updateTopbar() {
   if (topbarLevelProgressEl) {
     topbarLevelProgressEl.innerHTML = renderLevelProgressBlock({ compact: true, includeNotice: false });
   }
+}
+
+function readStoredTopicHint() {
+  try {
+    return String(window.localStorage.getItem(TOPIC_HINT_STORAGE_KEY) || '').trim();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function writeStoredTopicHint(title) {
+  const normalized = String(title || '').trim();
+  if (!normalized) return;
+  try {
+    window.localStorage.setItem(TOPIC_HINT_STORAGE_KEY, normalized);
+  } catch (_error) {
+    // Ignore storage failures (private mode / blocked storage).
+  }
+}
+
+function resolveTopicHintForLoading() {
+  const liveHint = String(
+    (dailyTopic && dailyTopic.title)
+    || (dailyLesson && dailyLesson.topic_title)
+    || ''
+  ).trim();
+  if (liveHint) return liveHint;
+  return readStoredTopicHint();
+}
+
+function renderDailyLoadingState() {
+  const topicHint = resolveTopicHintForLoading();
+  const topicHintHtml = topicHint
+    ? `<p class="muted loading-topic-hint">Today's topic: ${escapeHtml(topicHint)}</p>`
+    : '<p class="muted loading-topic-hint">Preparing today\'s topic...</p>';
+
+  gameZoneEl.classList.remove('hidden');
+  gameZoneEl.innerHTML = `
+    <section class="game-card game-card-loading">
+      <div class="loading-row">
+        <span class="btn-spinner" aria-hidden="true"></span>
+        <strong>Loading today&apos;s lesson...</strong>
+      </div>
+      ${topicHintHtml}
+    </section>
+  `;
+
+  if (gamesSidebarEl) {
+    gamesSidebarEl.innerHTML = `
+      <h4>Available games</h4>
+      <p class="muted">Loading today&apos;s board...</p>
+    `;
+  }
+}
+
+function renderDailyLoadErrorState(message) {
+  const safeMessage = String(message || '').trim() || 'Could not load today\'s lesson.';
+  gameZoneEl.classList.remove('hidden');
+  gameZoneEl.innerHTML = `
+    <section class="game-card-locked">
+      <p class="alert">${escapeHtml(safeMessage)}</p>
+      <div class="lesson-actions">
+        <button id="retry-initial-load-btn" type="button" class="ghost-btn">Retry</button>
+      </div>
+    </section>
+  `;
+  const retryBtn = document.getElementById('retry-initial-load-btn');
+  retryBtn?.addEventListener('click', () => {
+    void loadDailyGame();
+  });
 }
 
 function gameAttemptKey(game) {
@@ -2408,12 +2479,30 @@ function getDragAfterElement(container, y) {
 }
 
 async function loadDailyGame() {
-  const res = await fetch(apiUrl('api/games/daily'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ learner_id: learnerId }),
-  });
-  const data = await res.json();
+  renderDailyLoadingState();
+
+  let res;
+  let data;
+  try {
+    res = await fetch(apiUrl('api/games/daily'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ learner_id: learnerId }),
+    });
+    data = await res.json();
+  } catch (_error) {
+    renderDailyLoadErrorState('Could not reach the server while loading today\'s lesson.');
+    return;
+  }
+
+  if (!res.ok || !data || typeof data !== 'object') {
+    renderDailyLoadErrorState('Server returned an invalid response while loading today\'s lesson.');
+    return;
+  }
+  if (data.error) {
+    renderDailyLoadErrorState(data.error);
+    return;
+  }
 
   learnerId = data.learner_id || learnerId;
   availableLanguages = data.available_languages || ['ja'];
@@ -2425,6 +2514,7 @@ async function loadDailyGame() {
   isReviewMode = false;
   dailyTopic = data.topic || null;
   dailyLesson = data.lesson || null;
+  writeStoredTopicHint((dailyTopic && dailyTopic.title) || (dailyLesson && dailyLesson.topic_title) || '');
   dailyProgress = data.daily_progress || null;
   levelUpNotice = data.level_up_notice || null;
   dailyGameCards = data.daily_games || [];

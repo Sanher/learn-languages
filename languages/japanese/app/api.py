@@ -1007,96 +1007,105 @@ def _prewarm_lesson_daily_translation_cache(
     level: int,
     daily_progress: dict[str, Any],
 ) -> None:
-    secondary_language = _secondary_translation_for_learner(learner_id)
-    if not secondary_language:
-        logger.info(
-            "translation_prewarm_skipped learner_id=%s language=%s topic=%s reason=secondary_language_disabled",
-            learner_id,
-            language,
-            topic.topic_key,
-        )
-        return
-    if not openai_planner.api_key:
-        logger.info(
-            "translation_prewarm_skipped learner_id=%s language=%s topic=%s reason=openai_not_configured",
-            learner_id,
-            language,
-            topic.topic_key,
-        )
-        return
+    try:
+        secondary_language = _secondary_translation_for_learner(learner_id)
+        if not secondary_language:
+            logger.info(
+                "translation_prewarm_skipped learner_id=%s language=%s topic=%s reason=secondary_language_disabled",
+                learner_id,
+                language,
+                topic.topic_key,
+            )
+            return
+        if not openai_planner.api_key:
+            logger.info(
+                "translation_prewarm_skipped learner_id=%s language=%s topic=%s reason=openai_not_configured",
+                learner_id,
+                language,
+                topic.topic_key,
+            )
+            return
 
-    daily_pairs = topic.daily_plan_for_level(level)
-    daily_game_types = [game_type for game_type, _activity_id in daily_pairs]
-    daily_cards: list[dict[str, Any]] = []
-    for game_type, activity_id in daily_pairs:
-        card = _build_card_for_activity_with_level_fallback(
-            game_type=game_type,
-            language=language,
-            level=level,
-            activity_id=activity_id,
-            secondary_translation_language=None,
-        )
-        if card is not None:
-            daily_cards.append(card)
-
-    extra_cards = _extra_game_cards_metadata(
-        daily_game_types=daily_game_types,
-        language=language,
-        level=level,
-    )
-    all_cards: list[dict[str, Any]] = []
-    for game_type, activity_id in [*topic.daily_plan_for_level(level), *topic.extra_plan_for_level(level)]:
-        card = _build_card_for_activity_with_level_fallback(
-            game_type=game_type,
-            language=language,
-            level=level,
-            activity_id=activity_id,
-            secondary_translation_language=None,
-        )
-        if card is not None:
-            all_cards.append(card)
-
-    logger.info(
-        "translation_prewarm_started learner_id=%s language=%s topic=%s level=%s daily=%s extras=%s all=%s",
-        learner_id,
-        language,
-        topic.topic_key,
-        level,
-        len(daily_cards),
-        len(extra_cards),
-        len(all_cards),
-    )
-    # Warm translation cache for lesson + cards so next /api/games/daily load is mostly cache hits.
-    _translate_response_for_learner(
-        learner_id=learner_id,
-        context="lesson_complete_prewarm",
-        payload={
-            "topic": {
-                "topic_key": topic.topic_key,
-                "title": topic.title,
-                "description": topic.description,
-            },
-            "lesson": _topic_lesson_payload(
-                topic=topic,
-                level=level,
+        daily_pairs = topic.daily_plan_for_level(level)
+        daily_game_types = [game_type for game_type, _activity_id in daily_pairs]
+        daily_cards: list[dict[str, Any]] = []
+        for game_type, activity_id in daily_pairs:
+            card = _build_card_for_activity_with_level_fallback(
+                game_type=game_type,
+                language=language,
+                preferred_level=level,
+                activity_id=activity_id,
                 secondary_translation_language=None,
-                lessons_by_level=_TOPIC_LESSONS_AI_CACHE.get((topic.language, topic.topic_key)),
-            ),
-            "daily_progress": daily_progress,
-            "daily_games": daily_cards,
-            "extra_games": extra_cards,
-            "available_games": [*daily_cards, *extra_cards],
-            "all_games": all_cards,
-            "learning_contract": _learning_contract_payload(daily_required_games=len(daily_cards)),
-        },
-    )
-    logger.info(
-        "translation_prewarm_done learner_id=%s language=%s topic=%s level=%s",
-        learner_id,
-        language,
-        topic.topic_key,
-        level,
-    )
+            )
+            if card is not None:
+                daily_cards.append(card)
+
+        extra_cards = _extra_game_cards_metadata(
+            daily_game_types=daily_game_types,
+            language=language,
+            level=level,
+        )
+        all_cards: list[dict[str, Any]] = []
+        for game_type, activity_id in [*topic.daily_plan_for_level(level), *topic.extra_plan_for_level(level)]:
+            card = _build_card_for_activity_with_level_fallback(
+                game_type=game_type,
+                language=language,
+                preferred_level=level,
+                activity_id=activity_id,
+                secondary_translation_language=None,
+            )
+            if card is not None:
+                all_cards.append(card)
+
+        logger.info(
+            "translation_prewarm_started learner_id=%s language=%s topic=%s level=%s daily=%s extras=%s all=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            level,
+            len(daily_cards),
+            len(extra_cards),
+            len(all_cards),
+        )
+        # Warm translation cache for lesson + cards so next /api/games/daily load is mostly cache hits.
+        _translate_response_for_learner(
+            learner_id=learner_id,
+            context="lesson_complete_prewarm",
+            payload={
+                "topic": {
+                    "topic_key": topic.topic_key,
+                    "title": topic.title,
+                    "description": topic.description,
+                },
+                "lesson": _topic_lesson_payload(
+                    topic=topic,
+                    level=level,
+                    secondary_translation_language=None,
+                    lessons_by_level=_TOPIC_LESSONS_AI_CACHE.get((topic.language, topic.topic_key)),
+                ),
+                "daily_progress": daily_progress,
+                "daily_games": daily_cards,
+                "extra_games": extra_cards,
+                "available_games": [*daily_cards, *extra_cards],
+                "all_games": all_cards,
+                "learning_contract": _learning_contract_payload(daily_required_games=len(daily_cards)),
+            },
+        )
+        logger.info(
+            "translation_prewarm_done learner_id=%s language=%s topic=%s level=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            level,
+        )
+    except Exception:
+        logger.exception(
+            "translation_prewarm_failed learner_id=%s language=%s topic=%s level=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            level,
+        )
 
 
 def _target_score_for_topic_day(topic_day_index: int) -> int:
