@@ -1056,6 +1056,37 @@ class ProgressMemory:
             ).fetchall()
         return [int(row[0] or 0) for row in rows]
 
+    def latest_daily_topic_progress_before(
+        self,
+        *,
+        learner_id: str,
+        language: str,
+        before_day_iso: str,
+    ) -> DailyTopicProgress | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json,
+                       level_state, daily_score, daily_game_scores_json, daily_game_failures_json
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND day_iso < ?
+                ORDER BY day_iso DESC
+                LIMIT 1
+                """,
+                (learner_id, language, before_day_iso),
+            ).fetchone()
+        if not row:
+            return None
+        logger.debug(
+            "daily_topic_progress_previous_loaded learner_id=%s before_day=%s language=%s actual_day=%s topic=%s",
+            learner_id,
+            before_day_iso,
+            language,
+            row[1],
+            row[3],
+        )
+        return DailyTopicProgress(*row)
+
     def retention_ratio(
         self,
         learner_id: str,

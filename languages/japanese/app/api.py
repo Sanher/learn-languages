@@ -1444,7 +1444,7 @@ def _level_progress_payload(
     if ready_for_level_exam:
         status_message = f"Ready for level exam {normalized_level} -> {next_level}."
     elif points_met:
-        status_message = "Point target reached. Keep consistency to unlock the level exam."
+        status_message = f"Point target reached. Level {next_level} will be active on the next day."
     else:
         status_message = f"{points_remaining} point(s) needed for level exam target."
 
@@ -1508,6 +1508,111 @@ def _enrich_daily_progress_payload(
         ready_to_level_3=bool(enriched.get("ready_to_level_3")),
     )
     return enriched
+
+
+def _maybe_promote_level_from_previous_day(
+    *,
+    learner_id: str,
+    language: str,
+    today_iso: str,
+    current_level: int,
+) -> tuple[int, dict[str, Any] | None]:
+    # Promote only when a new day starts so the current daily flow never mixes cards from two levels.
+    normalized_level = max(1, int(current_level))
+    if normalized_level >= 3:
+        return normalized_level, None
+
+    previous_progress = memory.latest_daily_topic_progress_before(
+        learner_id=learner_id,
+        language=language,
+        before_day_iso=today_iso,
+    )
+    if previous_progress is None:
+        return normalized_level, None
+
+    previous_level = max(1, int(previous_progress.level_state or normalized_level))
+    if previous_level != normalized_level:
+        logger.info(
+            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=level_changed prev_level=%s current_level=%s",
+            learner_id,
+            language,
+            previous_progress.day_iso,
+            previous_level,
+            normalized_level,
+        )
+        return normalized_level, None
+
+    topic = _topic_definition_for_key(language=language, topic_key=previous_progress.topic_key)
+    if topic is None:
+        logger.warning(
+            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=unknown_topic topic=%s",
+            learner_id,
+            language,
+            previous_progress.day_iso,
+            previous_progress.topic_key,
+        )
+        return normalized_level, None
+
+    daily_game_types = [game_type for game_type, _activity_id in topic.daily_plan_for_level(previous_level)]
+    previous_payload = _daily_progress_payload(progress=previous_progress, daily_game_types=daily_game_types)
+    day_completed = bool(previous_payload.get("extras_unlocked"))
+    if not bool(previous_payload.get("lesson_completed")) or not day_completed:
+        logger.info(
+            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=incomplete_day lesson_completed=%s day_completed=%s",
+            learner_id,
+            language,
+            previous_progress.day_iso,
+            previous_payload.get("lesson_completed"),
+            day_completed,
+        )
+        return normalized_level, None
+
+    topic_days_count = memory.count_days_on_topic(
+        learner_id=learner_id,
+        language=language,
+        topic_key=previous_progress.topic_key,
+    )
+    previous_level_progress = _level_progress_payload(
+        current_level=previous_level,
+        daily_score=int(previous_payload.get("daily_score", 0)),
+        topic_day_target_score=_target_score_for_topic_day(topic_days_count),
+        ready_to_level_2=False,
+        ready_to_level_3=False,
+    )
+    points_target = int(previous_level_progress["points_target"])
+    achieved_score = int(previous_payload.get("daily_score", 0))
+    if achieved_score < points_target:
+        logger.info(
+            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=target_not_met score=%s target=%s",
+            learner_id,
+            language,
+            previous_progress.day_iso,
+            achieved_score,
+            points_target,
+        )
+        return normalized_level, None
+
+    next_level = min(3, previous_level + 1)
+    if next_level <= normalized_level:
+        return normalized_level, None
+
+    memory.set_language_level(learner_id=learner_id, language=language, level=next_level)
+    logger.info(
+        "daily_level_score_promoted learner_id=%s language=%s prev_day=%s topic=%s from_level=%s to_level=%s score=%s target=%s",
+        learner_id,
+        language,
+        previous_progress.day_iso,
+        previous_progress.topic_key,
+        previous_level,
+        next_level,
+        achieved_score,
+        points_target,
+    )
+    return next_level, {
+        "from_level": previous_level,
+        "to_level": next_level,
+        "message": f"Level up! You reached level {next_level}.",
+    }
 
 
 def _extract_kana_sequence(prompt: str) -> str:
@@ -2097,6 +2202,7 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
     stored_level = memory.level_for_language(req.learner_id, preferred_language, default_level=1)
     current_level = max(stored_level, inferred_level)
     auto_promoted_from_level: int | None = None
+    level_up_notice: dict[str, Any] | None = None
     if current_level != stored_level:
         auto_promoted_from_level = stored_level
         memory.set_language_level(req.learner_id, preferred_language, current_level)
@@ -2108,6 +2214,21 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
             current_level,
             difficulty,
         )
+        level_up_notice = {
+            "from_level": auto_promoted_from_level,
+            "to_level": current_level,
+            "message": f"Level up! You reached level {current_level}.",
+        }
+
+    today_iso = date.today().isoformat()
+    current_level, previous_day_notice = _maybe_promote_level_from_previous_day(
+        learner_id=req.learner_id,
+        language=preferred_language,
+        today_iso=today_iso,
+        current_level=current_level,
+    )
+    if previous_day_notice is not None:
+        level_up_notice = previous_day_notice
 
     requested_level = req.level_override_today
     today_level = current_level
@@ -2228,15 +2349,7 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
     response["daily_games"] = daily_cards
     response["extra_games"] = extra_cards
     response["level_up_blocked"] = level_up_blocked
-    response["level_up_notice"] = (
-        {
-            "from_level": auto_promoted_from_level,
-            "to_level": current_level,
-            "message": f"Level up! You reached level {current_level}.",
-        }
-        if auto_promoted_from_level is not None and current_level > auto_promoted_from_level
-        else None
-    )
+    response["level_up_notice"] = level_up_notice
     response["selected_game"] = selected_game
     response["available_games"] = available_cards
     response["all_games"] = all_cards

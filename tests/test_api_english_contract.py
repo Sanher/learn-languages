@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 from uuid import uuid4
 
 from fastapi.testclient import TestClient

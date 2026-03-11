@@ -88,3 +88,8 @@ Original prompt: puedes añadir un cuadro de respuesta para todos los juegos, co
 - Added payload inspection in `languages/japanese/web/app.js` to detect missing secondary lines in responses and show/hide the warning status.
 - Added topbar status element in `languages/japanese/web/index.html` and warning style in `languages/japanese/web/styles.css`.
 - Added API contract assertions in `tests/test_api_english_contract.py` for `secondary_translation_provider_available`.
+
+## 2026-03-08 (Codex model migration)
+- Codex was automatically migrated to GPT 5.4 during the session.
+- Working context was preserved well enough to continue from the current repository state, recent commits, pending requirements, and in-session task history.
+- Practical note: continuity has been preserved for implementation work, but this entry records the migration explicitly in case later debugging depends on model/runtime changes.

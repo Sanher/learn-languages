@@ -16,6 +16,14 @@ MORA_EXPECTED_TEXT_BY_ITEM = {
 }
 
 
+class _FrozenDate(date):
+    _today = date.today()
+
+    @classmethod
+    def today(cls):  # type: ignore[override]
+        return cls._today
+
+
 class TopicDailyFlowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
@@ -576,6 +584,114 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertIn("Level up!", notice["message"])
         self.assertEqual(data["current_level"], 2)
         self.assertEqual(data["today_level"], 2)
+
+    def test_daily_score_level_up_persists_on_next_day_and_changes_lesson_level(self) -> None:
+        first_day = date(2026, 3, 10)
+        second_day = first_day + timedelta(days=1)
+        topic_definition = api._topic_definition_for_key(language="ja", topic_key="identity_and_plans")
+        self.assertIsNotNone(topic_definition)
+        fallback_ladder = api._fallback_topic_lessons_by_level(topic_definition)
+
+        with (
+            unittest.mock.patch.object(api, "date", _FrozenDate),
+            unittest.mock.patch.object(
+                api,
+                "_topic_lessons_by_level",
+                new=unittest.mock.AsyncMock(return_value=fallback_ladder),
+            ),
+        ):
+            _FrozenDate._today = first_day
+            daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+            self.assertEqual(daily.status_code, 200)
+            daily_data = daily.json()
+            self.assertEqual(daily_data["current_level"], 1)
+            self.assertEqual(daily_data["lesson"]["title"], "Topic marker basics")
+
+            lesson_complete = self.client.post(
+                "/api/games/lesson/complete",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": daily_data["lesson"]["topic_key"],
+                },
+            )
+            self.assertEqual(lesson_complete.status_code, 200)
+
+            for card in daily_data["daily_games"]:
+                payload = self._payload_for_daily_card(card)
+                evaluation = self.client.post(
+                    "/api/games/evaluate",
+                    json={
+                        "learner_id": self.learner_id,
+                        "game_type": card["game_type"],
+                        "language": "ja",
+                        "level": card["level"],
+                        "retry_count": 0,
+                        "payload": payload,
+                    },
+                )
+                self.assertEqual(evaluation.status_code, 200)
+                self.assertNotIn("error", evaluation.json())
+
+            end_of_day = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+            self.assertEqual(end_of_day.status_code, 200)
+            self.assertEqual(end_of_day.json()["current_level"], 1)
+            self.assertEqual(end_of_day.json()["daily_progress"]["daily_score"], 300)
+            self.assertIn("Level 2 will be active on the next day", end_of_day.json()["daily_progress"]["level_progress"]["status_message"])
+
+            _FrozenDate._today = second_day
+            next_day = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(next_day.status_code, 200)
+        next_day_data = next_day.json()
+        self.assertEqual(next_day_data["current_level"], 2)
+        self.assertEqual(next_day_data["today_level"], 2)
+        self.assertEqual(api.memory.level_for_language(self.learner_id, "ja", default_level=1), 2)
+        self.assertEqual(next_day_data["lesson"]["title"], "Today and routine context")
+        self.assertEqual(next_day_data["level_up_notice"]["from_level"], 1)
+        self.assertEqual(next_day_data["level_up_notice"]["to_level"], 2)
+
+    def test_incomplete_previous_day_does_not_promote_level(self) -> None:
+        first_day = date(2026, 3, 10)
+        second_day = first_day + timedelta(days=1)
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = first_day
+            daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+            self.assertEqual(daily.status_code, 200)
+            daily_data = daily.json()
+
+            lesson_complete = self.client.post(
+                "/api/games/lesson/complete",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": daily_data["lesson"]["topic_key"],
+                },
+            )
+            self.assertEqual(lesson_complete.status_code, 200)
+
+            first_card = daily_data["daily_games"][0]
+            evaluation = self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": first_card["game_type"],
+                    "language": "ja",
+                    "level": first_card["level"],
+                    "retry_count": 0,
+                    "payload": self._payload_for_daily_card(first_card),
+                },
+            )
+            self.assertEqual(evaluation.status_code, 200)
+
+            _FrozenDate._today = second_day
+            next_day = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(next_day.status_code, 200)
+        next_day_data = next_day.json()
+        self.assertEqual(next_day_data["current_level"], 1)
+        self.assertIsNone(next_day_data.get("level_up_notice"))
 
     def test_level_override_is_disabled_even_when_lowering(self) -> None:
         api.memory.set_language_level(self.learner_id, "ja", 3)
