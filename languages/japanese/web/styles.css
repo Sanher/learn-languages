@@ -661,10 +661,6 @@ button.is-loading {
   align-items: center;
 }
 
-.kanji-match-row.with-meaning-input {
-  grid-template-columns: 50px minmax(170px, 1fr) minmax(150px, 1fr) minmax(200px, 1.2fr);
-}
-
 .kanji-reading-dropzone {
   min-height: 50px;
   border: 2px dashed #64748b;
@@ -683,31 +679,21 @@ button.is-loading {
 
 .kanji-meaning-preview {
   color: #bfdbfe;
-  min-height: 24px;
-  display: inline-flex;
-  align-items: center;
-}
-
-.kanji-meaning-answer {
+  min-height: 44px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  justify-content: center;
+  gap: 2px;
 }
 
-.kanji-meaning-status {
-  min-height: 16px;
+.kanji-reading-kana {
+  color: #93c5fd;
+  font-size: 13px;
 }
 
-.status-correct {
-  color: #86efac;
-}
-
-.status-almost {
-  color: #fde68a;
-}
-
-.status-incorrect {
-  color: #fca5a5;
+.kanji-meaning-copy {
+  display: block;
+  line-height: 1.35;
 }
 
 .kanji-reading-ok .kanji-reading-dropzone {
@@ -796,8 +782,7 @@ pre {
   .board {
     grid-template-columns: 1fr;
   }
-  .kanji-match-row,
-  .kanji-match-row.with-meaning-input {
+  .kanji-match-row {
     grid-template-columns: 1fr;
     gap: 6px;
   }

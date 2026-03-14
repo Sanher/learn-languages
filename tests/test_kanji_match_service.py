@@ -19,12 +19,12 @@ class KanjiMatchServiceTests(unittest.TestCase):
         self.assertIn("Readings (romaji)", activities[0].prompt)
         self.assertIn("Meaning bank", activities[0].prompt)
 
-    def test_advanced_activity_hides_banco_and_lecturas(self) -> None:
+    def test_advanced_activity_hides_romaji_but_keeps_meaning_bank(self) -> None:
         service = KanjiMatchService()
         activities = service.get_activities(language="ja", level=3)
         self.assertTrue(activities)
         self.assertNotIn("Readings (romaji)", activities[0].prompt)
-        self.assertIn("Write the meaning", activities[0].prompt)
+        self.assertIn("Meaning bank", activities[0].prompt)
 
     def test_western_language_is_not_eligible(self) -> None:
         service = KanjiMatchService()
@@ -74,7 +74,7 @@ class KanjiMatchServiceTests(unittest.TestCase):
         self.assertFalse(result["require_meaning_input"])
         self.assertEqual(len(result["reading_results"]), 2)
 
-    def test_advanced_meaning_uses_quality_labels(self) -> None:
+    def test_advanced_mode_keeps_reading_only_scoring(self) -> None:
         service = KanjiMatchService()
         expected_pairs = service.get_pairs(language="ja", level=2)[2:4]
         result = service.evaluate_attempt(
@@ -85,21 +85,22 @@ class KanjiMatchServiceTests(unittest.TestCase):
                     expected_pairs[0].symbol: expected_pairs[0].reading_romaji,
                     expected_pairs[1].symbol: expected_pairs[1].reading_romaji,
                 },
-                learner_meanings={
-                    expected_pairs[0].symbol: expected_pairs[0].meaning,
-                    expected_pairs[1].symbol: "lif",
-                },
                 level=2,
             )
         )
 
-        self.assertTrue(result["require_meaning_input"])
+        self.assertFalse(result["require_meaning_input"])
         self.assertEqual(result["reading_accuracy"], 1.0)
-        self.assertEqual(result["meaning_accuracy"], 0.75)
-        self.assertEqual(result["score"], 88)
-        statuses = {item["symbol"]: item["status"] for item in result["meaning_results"]}
-        self.assertIn("correct", statuses.values())
-        self.assertIn("almost_correct", statuses.values())
+        self.assertEqual(result["score"], 100)
+        self.assertEqual(result["meaning_results"], [])
+
+    def test_attempt_view_exposes_kana_and_hides_meaning_input(self) -> None:
+        service = KanjiMatchService()
+        view = service.build_attempt_view(language="ja", level=2)
+
+        self.assertFalse(view["require_meaning_input"])
+        self.assertIn("学", view["reading_kana"])
+        self.assertTrue(view["reading_kana"]["学"])
 
     def test_service_is_reusable_through_registry(self) -> None:
         registry = GameServiceRegistry()

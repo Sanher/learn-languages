@@ -15,6 +15,7 @@ from language_games.services import (
 )
 
 logger = logging.getLogger("learn_languages.japanese.topic_flow")
+TOPIC_DAILY_ROTATION_COUNT = 4
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,29 @@ class TopicDefinition:
 
     def daily_plan_for_level(self, level: int) -> list[tuple[str, str]]:
         return [(item.game_type, item.activity_id_for_level(level)) for item in self.daily_games]
+
+    def daily_pool_for_level(self, level: int) -> list[tuple[str, str]]:
+        pool: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for item in (*self.daily_games, *self.extra_games):
+            if item.game_type in seen:
+                continue
+            seen.add(item.game_type)
+            pool.append((item.game_type, item.activity_id_for_level(level)))
+        return pool
+
+    def daily_plan_for_day(self, level: int, learner_id: str, target_day: date) -> list[tuple[str, str]]:
+        pool = self.daily_pool_for_level(level)
+        if not pool:
+            return []
+
+        ordered = pool.copy()
+        # Keep the pool order stable per learner/topic while rotating the visible daily set each day.
+        seed = f"{self.topic_key}:{self.language}:{learner_id}:{level}"
+        Random(seed).shuffle(ordered)
+        daily_count = min(max(1, TOPIC_DAILY_ROTATION_COUNT), len(ordered))
+        offset = target_day.toordinal() % len(ordered)
+        return [ordered[(offset + idx) % len(ordered)] for idx in range(daily_count)]
 
     def extra_plan_for_level(self, level: int) -> list[tuple[str, str]]:
         return [(item.game_type, item.activity_id_for_level(level)) for item in self.extra_games]

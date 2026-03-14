@@ -63,7 +63,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             language="ja",
             tokens=["きょう", "は", "すし", "を", "たべます"],
             gap_positions=[2],
-            options=[],
+            options=["すし", "てんぷら", "うどん"],
             script_line="今日は寿司を食べます。",
             romanized_line="kyou wa sushi o tabemasu",
             literal_translation="today topic sushi object eat",
@@ -74,7 +74,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             language="ja",
             tokens=["えき", "に", "いきます"],
             gap_positions=[0],
-            options=[],
+            options=["えき", "うち", "みせ"],
             script_line="駅に行きます。",
             romanized_line="eki ni ikimasu",
             literal_translation="station to go",
@@ -87,7 +87,7 @@ JAPANESE_LISTENING_GAP_FILL_ITEMS_BY_LEVEL: dict[int, list[ListeningGapFillItem]
             language="ja",
             tokens=["あした", "ともだち", "と", "えいが", "を", "みます"],
             gap_positions=[3],
-            options=[],
+            options=["えいが", "ほん", "おんがく"],
             script_line="明日友達と映画を見ます。",
             romanized_line="ashita tomodachi to eiga o mimasu",
             literal_translation="tomorrow friend with movie object watch",
@@ -274,7 +274,8 @@ class ListeningGapFillService:
         hide_translation_hint: bool = False,
     ) -> dict:
         show_romanized = bool(support.show_romanized_line and item.romanized_line is not None)
-        show_options = bool(support.show_options and item.options)
+        # Drag fragments should remain available in the UI even when written hints are reduced.
+        show_options = bool(item.options)
         show_translation_hint = bool(support.show_translation_hint and not hide_translation_hint)
         return {
             "show_kanji_line": self._is_eastern_script(item.language),

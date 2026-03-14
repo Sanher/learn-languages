@@ -176,6 +176,7 @@ class PronunciationMatchService:
 
         result["match_threshold"] = threshold
         result["is_match"] = confidence >= threshold
+        result["score"] = 100 if result["is_match"] else round(confidence * 100)
         result["feedback_level"] = self._feedback_level(confidence=confidence, threshold=threshold)
         result["feedback"] = self._feedback_text(
             is_match=result["is_match"],

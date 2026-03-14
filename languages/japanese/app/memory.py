@@ -44,7 +44,7 @@ class LearnerPreferences:
 
 @dataclass
 class DailyTopicProgress:
-    # Daily progression gate for topic lesson + 3 required games.
+    # Daily progression gate for topic lesson + rotating required games.
     learner_id: str
     day_iso: str
     language: str
@@ -893,7 +893,7 @@ class ProgressMemory:
         game_type: str,
         score: int,
         allowed_daily_games: list[str],
-        max_total_score: int = 300,
+        max_total_score: int = 400,
     ) -> DailyTopicProgress:
         progress = self.load_or_create_daily_topic_progress(
             learner_id=learner_id,

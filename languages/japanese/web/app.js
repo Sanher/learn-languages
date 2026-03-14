@@ -324,7 +324,7 @@ function updateTopbar() {
   renderSecondaryTranslationSelector();
   renderSecondaryTranslationStatus();
   const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
-  const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
+  const scoreMax = dailyScoreMaxValue();
   if (todayScoreEl) {
     todayScoreEl.textContent = `Today's score: ${score}/${scoreMax}`;
   }
@@ -461,6 +461,10 @@ function dailyProgressCounts() {
   return { completedCount, totalCount };
 }
 
+function dailyScoreMaxValue() {
+  return Number((dailyProgress && dailyProgress.daily_score_max) || (Math.max(1, dailyGameCards.length || 1) * 100));
+}
+
 function areDailyGamesCompleted() {
   if (isReviewMode) return false;
   const { completedCount, totalCount } = dailyProgressCounts();
@@ -516,7 +520,7 @@ function renderLessonPanel() {
   const points = renderTranslatedList(dailyLesson, 'theory_points');
   const lessonLevelProgressHtml = renderLevelProgressBlock({ compact: false, includeNotice: true });
   const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
-  const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 3);
+  const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 0);
   const extraCompletedCount = Number((dailyProgress && dailyProgress.extra_games_completed_count) || 0);
   const extraCompletedLine = extraCompletedCount > 0
     ? `<p class="muted">Extra topic tasks completed today: ${extraCompletedCount}. These do not count toward daily score.</p>`
@@ -527,11 +531,13 @@ function renderLessonPanel() {
     : '<button id="complete-lesson-btn" type="button" class="ghost-btn">Complete lesson and start games</button>';
   const unlockLine = areExtrasUnlocked()
     ? '<p class="muted">Extra games for this topic are unlocked.</p>'
-    : '<p class="muted">Finish lesson + 3 daily games to unlock extra topic games.</p>';
+    : `<p class="muted">Finish lesson + ${totalCount} daily games to unlock extra topic games.</p>`;
   const topicDays = Number((dailyProgress && dailyProgress.topic_days_count) || 0);
   const targetScore = Number((dailyProgress && dailyProgress.topic_day_target_score) || 150);
   const targetReached = Boolean(dailyProgress && dailyProgress.topic_day_target_reached);
+  const dailyScoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || (Math.max(1, totalCount) * 100));
   const highScoreDays = Number((dailyProgress && dailyProgress.high_score_days_over_240) || 0);
+  const highScoreThreshold = Number((dailyProgress && dailyProgress.high_score_threshold) || 240);
   const retention = (dailyProgress && dailyProgress.retention_ratio_percent);
   const failures = (dailyProgress && dailyProgress.topic_failure_totals) || {};
   const failureSummary = Object.keys(failures).length > 0
@@ -593,7 +599,7 @@ function renderLessonPanel() {
         ${topicTitleHtml || `<p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>`}
         <p class="muted">
           ${lessonDone ? 'Lesson completed.' : 'Lesson pending.'}
-          ${lessonDone ? ' You can review the theory at any time.' : ' Complete it to unlock today\'s 3 games.'}
+          ${lessonDone ? ' You can review the theory at any time.' : ` Complete it to unlock today\'s ${totalCount} games.`}
         </p>
         ${lessonLevelProgressHtml}
         <div class="lesson-actions lesson-actions-inline">
@@ -626,8 +632,8 @@ function renderLessonPanel() {
       <p class="muted">Daily progress: ${completedCount}/${totalCount} games completed.</p>
       ${extraCompletedLine}
       <p class="muted">Days on this topic: ${topicDays}.</p>
-      <p class="muted">Target score for this day: ${targetScore}/300 (${targetReached ? 'reached' : 'pending'}).</p>
-      <p class="muted">High-score days (>240): ${highScoreDays}.</p>
+      <p class="muted">Target score for this day: ${targetScore}/${dailyScoreMax} (${targetReached ? 'reached' : 'pending'}).</p>
+      <p class="muted">High-score days (>${highScoreThreshold}): ${highScoreDays}.</p>
       <p class="muted">Retention (vs previous days): ${retention == null ? 'n/a' : `${retention}%`}.</p>
       <p class="muted">Failures by game: ${escapeHtml(failureSummary)}</p>
       ${unlockLine}
@@ -648,7 +654,8 @@ function renderLessonPanel() {
 function renderTodaySummaryPanel() {
   if (!areDailyGamesCompleted()) return '';
   const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
-  const scoreMax = Number((dailyProgress && dailyProgress.daily_score_max) || 300);
+  const scoreMax = dailyScoreMaxValue();
+  const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 0);
   const extraCompletedCount = Number((dailyProgress && dailyProgress.extra_games_completed_count) || 0);
   const extraSummaryLine = extraCompletedCount > 0
     ? `<p class="muted">Extra topic tasks completed today: ${extraCompletedCount}. They do not count toward daily score.</p>`
@@ -661,7 +668,7 @@ function renderTodaySummaryPanel() {
     <section class="game-summary-card">
       <h2>Today's results</h2>
       <p><strong>Score:</strong> ${score}/${scoreMax}</p>
-      <p class="muted">Daily lesson + 3 daily games completed. Progress has been saved.</p>
+      <p class="muted">Daily lesson + ${totalCount} daily games completed. Progress has been saved.</p>
       ${extraSummaryLine}
       <p class="muted">You can continue with extra topic games using the list on the right.</p>
       ${scoreRows ? `<ul class="result-list">${scoreRows}</ul>` : ''}
@@ -701,11 +708,12 @@ function renderSingleGame(game) {
   const lessonHtml = renderLessonPanel();
   const summaryHtml = renderTodaySummaryPanel();
   if (!isLessonCompleted()) {
+    const { totalCount } = dailyProgressCounts();
     gameZoneEl.classList.remove('hidden');
     gameZoneEl.innerHTML = `
       ${lessonHtml}
       <section class="game-card-locked">
-        <p class="muted">Complete the lesson to unlock today's 3 topic games.</p>
+        <p class="muted">Complete the lesson to unlock today's ${totalCount} topic games.</p>
       </section>
     `;
     return;
@@ -952,7 +960,6 @@ function renderSingleGame(game) {
     `;
   } else if (gameType === 'kanji_match') {
     const pairs = payload.pairs || [];
-    const requireMeaningInput = Boolean(payload.require_meaning_input || Number(game.level || 1) >= 2);
     const readingBankTokens = seededShuffle(
       pairs.map((pair, index) => ({ pair, index })),
       `${game.activity_id || game.game_type}-kanji-reading-bank`
@@ -973,20 +980,11 @@ function renderSingleGame(game) {
       .join('');
     const rows = pairs
       .map((pair) => {
-        const meaningInput = requireMeaningInput
-          ? `
-            <div class="kanji-meaning-answer">
-              <input data-k="kanji-meaning:${escapeHtml(pair.symbol)}" placeholder="approximate meaning" />
-              <small class="kanji-meaning-status muted" data-meaning-status-for="${escapeHtml(pair.symbol)}"></small>
-            </div>
-          `
-          : "";
         return `
           <div
-            class="kanji-match-row ${requireMeaningInput ? 'with-meaning-input' : ''}"
+            class="kanji-match-row"
             data-symbol="${escapeHtml(pair.symbol)}"
             data-expected-reading="${escapeHtml(pair.reading_romaji || '')}"
-            data-meaning="${escapeHtml(pair.meaning || '')}"
           >
             <span class="kanji-symbol">${escapeHtml(pair.symbol)}</span>
             <span
@@ -997,7 +995,6 @@ function renderSingleGame(game) {
               data-placeholder="Drop romaji"
             ></span>
             <span class="kanji-meaning-preview" data-meaning-preview-for="${escapeHtml(pair.symbol)}"></span>
-            ${meaningInput}
           </div>
         `;
       })
@@ -1164,7 +1161,7 @@ function renderSidebar(games) {
     ? ''
     : `
       <h4>Extra topic games</h4>
-      ${extrasUnlocked ? '' : '<p class="muted">Locked until lesson + 3 daily games.</p>'}
+      ${extrasUnlocked ? '' : `<p class="muted">Locked until lesson + ${dailyProgressCounts().totalCount} daily games.</p>`}
       <div class="sidebar-list">${extraList}</div>
     `;
 
@@ -1320,6 +1317,26 @@ function kanjiRowBySymbol(symbol) {
   return rows.find((row) => row.dataset.symbol === symbol) || null;
 }
 
+function kanjiPairBySymbol(symbol) {
+  const pairs = Array.isArray(selectedGame?.payload?.pairs) ? selectedGame.payload.pairs : [];
+  return pairs.find((pair) => String(pair.symbol || '') === String(symbol || '')) || null;
+}
+
+function renderKanjiMeaningPreview(pair) {
+  if (!pair) return '';
+  const kana = String(pair.reading_kana || '').trim();
+  const meaningBundle = translationBundleForField(pair, 'meaning');
+  const meaningHtml = renderBilingualValue(meaningBundle);
+  const parts = [];
+  if (kana) {
+    parts.push(`<span class="kanji-reading-kana">${escapeHtml(kana)}</span>`);
+  }
+  if (meaningHtml) {
+    parts.push(`<span class="kanji-meaning-copy">${meaningHtml}</span>`);
+  }
+  return parts.join('');
+}
+
 function setTokenLocked(token, locked) {
   if (!token) return;
   token.dataset.locked = locked ? 'true' : 'false';
@@ -1383,13 +1400,13 @@ function syncKanjiReadingPreview() {
   const rows = Array.from(gameZoneEl.querySelectorAll('.kanji-match-row[data-symbol]'));
   rows.forEach((row) => {
     const expectedReading = String(row.dataset.expectedReading || '').trim();
-    const meaning = String(row.dataset.meaning || '').trim();
+    const pair = kanjiPairBySymbol(row.dataset.symbol || '');
     const token = row.querySelector('.kanji-reading-dropzone .dnd-token');
     const learnerReading = token ? String(token.dataset.tokenText || token.textContent || '').trim() : '';
     const isMatch = learnerReading && learnerReading === expectedReading;
     const preview = row.querySelector('[data-meaning-preview-for]');
     if (preview) {
-      preview.textContent = isMatch ? meaning : '';
+      preview.innerHTML = isMatch ? renderKanjiMeaningPreview(pair) : '';
     }
     const zone = row.querySelector('.kanji-reading-dropzone');
     if (zone) {
@@ -1402,11 +1419,6 @@ function syncKanjiReadingPreview() {
     row.classList.toggle('kanji-reading-ok', Boolean(isMatch));
     row.classList.toggle('kanji-reading-miss', Boolean(learnerReading) && !isMatch);
     row.classList.remove('kanji-eval-correct', 'kanji-eval-wrong');
-    const statusEl = row.querySelector('[data-meaning-status-for]');
-    if (statusEl) {
-      statusEl.textContent = '';
-      statusEl.classList.remove('status-correct', 'status-almost', 'status-incorrect');
-    }
     if (!learnerReading) {
       row.classList.remove('kanji-reading-miss');
     }
@@ -1416,7 +1428,6 @@ function syncKanjiReadingPreview() {
 function applyKanjiEvaluationFeedback(data) {
   if (!selectedGame || selectedGame.game_type !== 'kanji_match') return;
   const readingResults = Array.isArray(data.reading_results) ? data.reading_results : [];
-  const meaningResults = Array.isArray(data.meaning_results) ? data.meaning_results : [];
 
   readingResults.forEach((result) => {
     const symbol = String(result.symbol || '');
@@ -1434,26 +1445,6 @@ function applyKanjiEvaluationFeedback(data) {
     }
     row.classList.toggle('kanji-eval-correct', isCorrect);
     row.classList.toggle('kanji-eval-wrong', !isCorrect);
-  });
-
-  meaningResults.forEach((result) => {
-    const symbol = String(result.symbol || '');
-    const status = String(result.status || '');
-    const statusEl = gameZoneEl.querySelector(`[data-meaning-status-for="${symbol}"]`);
-    if (!statusEl) return;
-    statusEl.classList.remove('status-correct', 'status-almost', 'status-incorrect');
-    if (status === 'correct') {
-      statusEl.textContent = 'Meaning: correct';
-      statusEl.classList.add('status-correct');
-      return;
-    }
-    if (status === 'almost_correct') {
-      statusEl.textContent = 'Meaning: almost correct';
-      statusEl.classList.add('status-almost');
-      return;
-    }
-    statusEl.textContent = 'Meaning: incorrect';
-    statusEl.classList.add('status-incorrect');
   });
 }
 

@@ -22,24 +22,26 @@ class ListeningGapFillServiceTests(unittest.TestCase):
         self.assertTrue(view["show_translation_hint"])
         self.assertFalse(view["show_literal_translation"])
 
-    def test_intermediate_japanese_hides_options_but_keeps_romanized(self) -> None:
+    def test_intermediate_japanese_keeps_drag_options_and_romanized(self) -> None:
         service = ListeningGapFillService()
         item = service.get_items(language="ja", level=2)[0]
 
         view = service.build_attempt_view(language="ja", item_id=item.item_id, level=2, show_translation=False)
         self.assertTrue(view["show_kanji_line"])
         self.assertTrue(view["show_romanized_line"])
-        self.assertFalse(view["show_options"])
+        self.assertTrue(view["show_options"])
+        self.assertTrue(view["options"])
         self.assertFalse(view["show_translation_hint"])
 
-    def test_advanced_japanese_shows_only_kanji(self) -> None:
+    def test_advanced_japanese_shows_kanji_only_but_keeps_drag_options(self) -> None:
         service = ListeningGapFillService()
         item = service.get_items(language="ja", level=3)[0]
 
         view = service.build_attempt_view(language="ja", item_id=item.item_id, level=3, show_translation=False)
         self.assertTrue(view["show_kanji_line"])
         self.assertFalse(view["show_romanized_line"])
-        self.assertFalse(view["show_options"])
+        self.assertTrue(view["show_options"])
+        self.assertTrue(view["options"])
         self.assertFalse(view["show_translation_hint"])
 
     def test_translation_always_shows_after_submit_and_hides_on_retry(self) -> None:

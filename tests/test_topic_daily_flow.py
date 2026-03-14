@@ -8,6 +8,10 @@ from fastapi.testclient import TestClient
 from languages.japanese.app import api
 from languages.japanese.app.api import app
 
+EXPECTED_DAILY_COUNT = api.TOPIC_DAILY_REQUIRED_GAME_COUNT
+EXPECTED_DAILY_SCORE_MAX = api._daily_score_cap_for_game_count(EXPECTED_DAILY_COUNT)
+EXPECTED_TOPIC_DAY_ONE_TARGET = api._target_score_for_topic_day(1, daily_score_cap=EXPECTED_DAILY_SCORE_MAX)
+EXPECTED_LEVEL_TWO_TARGET = api._scale_daily_threshold(170, EXPECTED_DAILY_SCORE_MAX)
 
 MORA_EXPECTED_TEXT_BY_ITEM = {
     "ja-mora-romanization-1-1": "watashi wa gakusei desu",
@@ -34,7 +38,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         with api.memory._conn() as conn:
             conn.execute("DELETE FROM topic_sequence_cache WHERE language = 'ja'")
 
-    def test_daily_response_contains_lesson_and_three_topic_games(self) -> None:
+    def test_daily_response_contains_lesson_and_four_topic_games(self) -> None:
         response = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -42,14 +46,14 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertIn("topic", data)
         self.assertIn("lesson", data)
         self.assertIn("daily_progress", data)
-        self.assertEqual(len(data.get("daily_games", [])), 3)
+        self.assertEqual(len(data.get("daily_games", [])), EXPECTED_DAILY_COUNT)
         self.assertGreaterEqual(len(data.get("extra_games", [])), 1)
         self.assertTrue(all(bool(card.get("deferred_load")) for card in data.get("extra_games", [])))
         self.assertFalse(data["daily_progress"]["lesson_completed"])
         self.assertEqual(data["daily_progress"]["daily_score"], 0)
-        self.assertEqual(data["daily_progress"]["daily_score_max"], 300)
+        self.assertEqual(data["daily_progress"]["daily_score_max"], EXPECTED_DAILY_SCORE_MAX)
         self.assertEqual(data["daily_progress"]["topic_days_count"], 1)
-        self.assertEqual(data["daily_progress"]["topic_day_target_score"], 150)
+        self.assertEqual(data["daily_progress"]["topic_day_target_score"], EXPECTED_TOPIC_DAY_ONE_TARGET)
         self.assertEqual(data["daily_progress"]["high_score_days_over_240"], 0)
         self.assertEqual(data["daily_progress"]["closed_topics_count"], 0)
         self.assertEqual(data["daily_progress"]["extra_games_completed_count"], 0)
@@ -59,12 +63,40 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(level_progress.get("current_level"), 1)
         self.assertEqual(level_progress.get("next_level"), 2)
         self.assertEqual(level_progress.get("points_current"), 0)
-        self.assertEqual(level_progress.get("points_target"), 170)
-        self.assertEqual(level_progress.get("points_remaining"), 170)
+        self.assertEqual(level_progress.get("points_target"), EXPECTED_LEVEL_TWO_TARGET)
+        self.assertEqual(level_progress.get("points_remaining"), EXPECTED_LEVEL_TWO_TARGET)
         self.assertFalse(level_progress.get("level_cap_reached"))
         self.assertIsNone(data.get("selected_game"))
 
-    def test_lesson_plus_three_daily_games_unlocks_extras(self) -> None:
+    def test_daily_game_rotation_is_stable_on_same_day(self) -> None:
+        frozen_day = date(2026, 3, 20)
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = frozen_day
+            first = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+            second = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_games = [card["game_type"] for card in first.json()["daily_games"]]
+        second_games = [card["game_type"] for card in second.json()["daily_games"]]
+        self.assertEqual(first_games, second_games)
+
+    def test_daily_game_rotation_changes_on_next_day(self) -> None:
+        first_day = date(2026, 3, 20)
+        second_day = first_day + timedelta(days=1)
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = first_day
+            first = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+            _FrozenDate._today = second_day
+            second = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_games = [card["game_type"] for card in first.json()["daily_games"]]
+        second_games = [card["game_type"] for card in second.json()["daily_games"]]
+        self.assertNotEqual(first_games, second_games)
+
+    def test_lesson_plus_four_daily_games_unlocks_extras(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
         daily_data = daily.json()
@@ -102,8 +134,8 @@ class TopicDailyFlowTests(unittest.TestCase):
         after_data = after.json()
         self.assertTrue(after_data["daily_progress"]["extras_unlocked"])
         self.assertGreaterEqual(len(after_data.get("available_games", [])), 6)
-        self.assertEqual(after_data["daily_progress"]["daily_score"], 300)
-        self.assertEqual(after_data["daily_progress"]["daily_score_max"], 300)
+        self.assertEqual(after_data["daily_progress"]["daily_score"], EXPECTED_DAILY_SCORE_MAX)
+        self.assertEqual(after_data["daily_progress"]["daily_score_max"], EXPECTED_DAILY_SCORE_MAX)
 
     def test_daily_uses_openai_topic_lesson_ladder_when_available(self) -> None:
         ai_lessons = {
@@ -554,7 +586,7 @@ class TopicDailyFlowTests(unittest.TestCase):
                 language="ja",
                 topic=topic,
                 level=1,
-                daily_progress={"daily_score": 0, "daily_score_max": 300},
+                daily_progress={"daily_score": 0, "daily_score_max": EXPECTED_DAILY_SCORE_MAX},
             )
         self.assertEqual(mock_translate.call_count, 1)
 
@@ -636,7 +668,7 @@ class TopicDailyFlowTests(unittest.TestCase):
             end_of_day = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
             self.assertEqual(end_of_day.status_code, 200)
             self.assertEqual(end_of_day.json()["current_level"], 1)
-            self.assertEqual(end_of_day.json()["daily_progress"]["daily_score"], 300)
+            self.assertEqual(end_of_day.json()["daily_progress"]["daily_score"], EXPECTED_DAILY_SCORE_MAX)
             self.assertIn("Level 2 will be active on the next day", end_of_day.json()["daily_progress"]["level_progress"]["status_message"])
 
             _FrozenDate._today = second_day
@@ -852,7 +884,16 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(unlocked.status_code, 200)
         unlocked_data = unlocked.json()
         score_before = unlocked_data["daily_progress"]["daily_score"]
-        self.assertEqual(score_before, 300)
+        self.assertEqual(score_before, EXPECTED_DAILY_SCORE_MAX)
+        supported_extras = {
+            "sentence_order",
+            "listening_gap_fill",
+            "mora_romanization",
+            "grammar_particle_fix",
+            "context_quiz",
+            "pronunciation_match",
+        }
+        target_extra = next(card for card in unlocked_data["extra_games"] if card["game_type"] in supported_extras)
 
         extra_load = self.client.post(
             "/api/games/extra/load",
@@ -860,16 +901,12 @@ class TopicDailyFlowTests(unittest.TestCase):
                 "learner_id": self.learner_id,
                 "language": "ja",
                 "topic_key": unlocked_data["topic"]["topic_key"],
-                "game_type": "grammar_particle_fix",
+                "game_type": target_extra["game_type"],
             },
         )
         self.assertEqual(extra_load.status_code, 200)
         extra_card = extra_load.json()["card"]
-
-        extra_payload = {
-            "item_id": extra_card["activity_id"],
-            "selected_particle": (extra_card.get("payload", {}).get("options") or ["は"])[0],
-        }
+        extra_payload = self._payload_for_daily_card(extra_card)
         evaluated = self.client.post(
             "/api/games/evaluate",
             json={
@@ -889,7 +926,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         after_data = after.json()
         self.assertEqual(after_data["daily_progress"]["daily_score"], score_before)
         self.assertGreaterEqual(after_data["daily_progress"]["extra_games_completed_count"], 1)
-        self.assertIn("grammar_particle_fix", after_data["daily_progress"]["extra_games_completed_types"])
+        self.assertIn(target_extra["game_type"], after_data["daily_progress"]["extra_games_completed_types"])
 
     def test_extra_game_prefers_due_item_from_closed_topic(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
@@ -919,6 +956,12 @@ class TopicDailyFlowTests(unittest.TestCase):
                 },
             )
 
+        unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(unlocked.status_code, 200)
+        unlocked_data = unlocked.json()
+        target_game_type = unlocked_data["extra_games"][0]["game_type"]
+        target_activity_id = api.game_services[target_game_type].get_activities(language="ja", level=2)[0].activity_id
+
         today_iso = date.today().isoformat()
         api.memory.mark_topic_closed(
             learner_id=self.learner_id,
@@ -932,8 +975,8 @@ class TopicDailyFlowTests(unittest.TestCase):
             learner_id=self.learner_id,
             language="ja",
             topic_key=topic_key,
-            game_type="grammar_particle_fix",
-            item_id="ja-particle-2-1",
+            game_type=target_game_type,
+            item_id=target_activity_id,
             due_day_iso=today_iso,
             interval_days=2,
             ease=2.4,
@@ -949,12 +992,12 @@ class TopicDailyFlowTests(unittest.TestCase):
                 "learner_id": self.learner_id,
                 "language": "ja",
                 "topic_key": topic_key,
-                "game_type": "grammar_particle_fix",
+                "game_type": target_game_type,
             },
         )
         self.assertEqual(extra.status_code, 200)
         card = extra.json()["card"]
-        self.assertEqual(card["activity_id"], "ja-particle-2-1")
+        self.assertEqual(card["activity_id"], target_activity_id)
         self.assertEqual(card.get("selection_source"), "due_closed_topic")
         self.assertEqual(card.get("topic_key"), topic_key)
 
@@ -1105,7 +1148,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertFalse(data["daily_progress"]["topic_mastery_ready_for_weekly_exam"])
         self.assertLess(data["daily_progress"]["topic_mastery_level"], 3)
 
-    def test_daily_score_stays_capped_at_300_after_duplicate_daily_evaluations(self) -> None:
+    def test_daily_score_stays_capped_at_400_after_duplicate_daily_evaluations(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
         daily_data = daily.json()
@@ -1151,7 +1194,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         after = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(after.status_code, 200)
         daily_progress = after.json()["daily_progress"]
-        self.assertEqual(daily_progress["daily_score"], 300)
+        self.assertEqual(daily_progress["daily_score"], EXPECTED_DAILY_SCORE_MAX)
         self.assertLessEqual(daily_progress["daily_score"], daily_progress["daily_score_max"])
 
 
@@ -1167,18 +1210,15 @@ class TopicDailyFlowTests(unittest.TestCase):
                 "topic_key": daily_data["lesson"]["topic_key"],
             },
         )
-        sentence_card = next(card for card in daily_data["daily_games"] if card["game_type"] == "sentence_order")
-        bad_payload = {
-            "item_id": sentence_card["activity_id"],
-            "ordered_tokens_by_user": ["x", "y", "z"],
-        }
+        failing_card = daily_data["daily_games"][0]
+        bad_payload = self._bad_payload_for_card(failing_card)
         evaluation = self.client.post(
             "/api/games/evaluate",
             json={
                 "learner_id": self.learner_id,
-                "game_type": sentence_card["game_type"],
+                "game_type": failing_card["game_type"],
                 "language": "ja",
-                "level": sentence_card["level"],
+                "level": failing_card["level"],
                 "retry_count": 0,
                 "payload": bad_payload,
             },
@@ -1187,7 +1227,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         eval_data = evaluation.json()
         self.assertIn("daily_progress", eval_data)
         failures = eval_data["daily_progress"]["topic_failure_totals"]
-        self.assertGreaterEqual(int(failures.get("sentence_order", 0)), 1)
+        self.assertGreaterEqual(int(failures.get(failing_card["game_type"], 0)), 1)
 
     def test_weekly_exam_and_level_exam_flow(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
@@ -1476,7 +1516,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(daily.status_code, 200)
         daily_data = daily.json()
         topic_key = daily_data["topic"]["topic_key"]
-        sentence_card = next(card for card in daily_data["daily_games"] if card["game_type"] == "sentence_order")
+        sentence_card = next(card for card in daily_data["all_games"] if card["game_type"] == "sentence_order")
 
         first_payload = self._payload_for_daily_card(sentence_card)
         first = self.client.post(
@@ -1591,9 +1631,6 @@ class TopicDailyFlowTests(unittest.TestCase):
     def _seed_topic_mastery_level_three(self, topic_key: str, language: str = "ja") -> None:
         topic_definition = api._topic_definition_for_key(language, topic_key)
         self.assertIsNotNone(topic_definition)
-        daily_games = [game for game, _activity_id in topic_definition.daily_plan_for_level(1)]
-        self.assertGreaterEqual(len(daily_games), 1)
-
         existing_days = api.memory.count_days_on_topic(
             learner_id=self.learner_id,
             language=language,
@@ -1604,9 +1641,21 @@ class TopicDailyFlowTests(unittest.TestCase):
         if missing_days <= 0:
             return
 
-        per_game_score = max(1, 150 // len(daily_games))
         for idx in range(missing_days):
-            day_iso = (date.today() - timedelta(days=idx + 1)).isoformat()
+            target_day = date.today() - timedelta(days=idx + 1)
+            day_iso = target_day.isoformat()
+            daily_games = [
+                game
+                for game, _activity_id in topic_definition.daily_plan_for_day(
+                    level=1,
+                    learner_id=self.learner_id,
+                    target_day=target_day,
+                )
+            ]
+            self.assertGreaterEqual(len(daily_games), 1)
+            daily_score_cap = api._daily_score_cap_for_game_count(len(daily_games))
+            target_score = api._target_score_for_topic_day(1, daily_score_cap=daily_score_cap)
+            per_game_score = max(1, (target_score + len(daily_games) - 1) // len(daily_games))
             api.memory.mark_lesson_completed(
                 learner_id=self.learner_id,
                 day_iso=day_iso,
@@ -1648,6 +1697,80 @@ class TopicDailyFlowTests(unittest.TestCase):
 
         if game_type == "mora_romanization":
             payload["user_romanized_text"] = MORA_EXPECTED_TEXT_BY_ITEM.get(card["activity_id"], "")
+            return payload
+
+        if game_type == "grammar_particle_fix":
+            item = next(
+                item
+                for item in api.game_services[game_type].get_items(language=card["language"], level=card["level"])
+                if item.item_id == card["activity_id"]
+            )
+            payload["selected_particle"] = item.correct_particle
+            return payload
+
+        if game_type == "context_quiz":
+            item = next(
+                item
+                for item in api.game_services[game_type].get_items(language=card["language"], level=card["level"])
+                if item.item_id == card["activity_id"]
+            )
+            payload["selected_option_id"] = next(option.option_id for option in item.options if option.is_correct)
+            return payload
+
+        if game_type == "pronunciation_match":
+            payload["expected_text"] = card_payload.get("expected_text", card["prompt"])
+            payload["recognized_text"] = payload["expected_text"]
+            payload["audio_duration_seconds"] = 2.0
+            payload["speech_seconds"] = 1.8
+            payload["pause_seconds"] = 0.2
+            payload["pitch_track_hz"] = [150.0, 151.0, 149.0]
+            return payload
+
+        raise AssertionError(f"Unsupported daily game in topic flow test: {game_type}")
+
+    def _bad_payload_for_card(self, card: dict) -> dict:
+        payload = {"item_id": card["activity_id"]}
+        game_type = card["game_type"]
+        card_payload = card.get("payload", {})
+
+        if game_type == "sentence_order":
+            payload["ordered_tokens_by_user"] = ["x", "y", "z"]
+            return payload
+
+        if game_type == "listening_gap_fill":
+            gap_positions = card_payload.get("gap_positions", [])
+            payload["user_gap_tokens"] = ["__wrong__" for _ in gap_positions]
+            return payload
+
+        if game_type == "mora_romanization":
+            payload["user_romanized_text"] = "incorrect answer"
+            return payload
+
+        if game_type == "grammar_particle_fix":
+            item = next(
+                item
+                for item in api.game_services[game_type].get_items(language=card["language"], level=card["level"])
+                if item.item_id == card["activity_id"]
+            )
+            payload["selected_particle"] = next(choice for choice in item.choices if choice != item.correct_particle)
+            return payload
+
+        if game_type == "context_quiz":
+            item = next(
+                item
+                for item in api.game_services[game_type].get_items(language=card["language"], level=card["level"])
+                if item.item_id == card["activity_id"]
+            )
+            payload["selected_option_id"] = next(option.option_id for option in item.options if not option.is_correct)
+            return payload
+
+        if game_type == "pronunciation_match":
+            payload["expected_text"] = card_payload.get("expected_text", card["prompt"])
+            payload["recognized_text"] = "まちがい"
+            payload["audio_duration_seconds"] = 2.0
+            payload["speech_seconds"] = 1.8
+            payload["pause_seconds"] = 0.2
+            payload["pitch_track_hz"] = [150.0, 151.0, 149.0]
             return payload
 
         raise AssertionError(f"Unsupported daily game in topic flow test: {game_type}")

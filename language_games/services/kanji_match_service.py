@@ -32,32 +32,33 @@ class KanjiPair:
     symbol: str
     meaning: str
     reading_romaji: str
+    reading_kana: str
 
 
 JAPANESE_KANJI_PAIRS_BY_LEVEL: dict[int, list[KanjiPair]] = {
     1: [
-        KanjiPair("日", "day/sun", "nichi / hi"),
-        KanjiPair("月", "month/moon", "getsu / tsuki"),
-        KanjiPair("水", "water", "sui / mizu"),
-        KanjiPair("火", "fire", "ka / hi"),
-        KanjiPair("木", "tree", "moku / ki"),
-        KanjiPair("山", "mountain", "san / yama"),
+        KanjiPair("日", "day/sun", "nichi / hi", "にち / ひ"),
+        KanjiPair("月", "month/moon", "getsu / tsuki", "げつ / つき"),
+        KanjiPair("水", "water", "sui / mizu", "すい / みず"),
+        KanjiPair("火", "fire", "ka / hi", "か / ひ"),
+        KanjiPair("木", "tree", "moku / ki", "もく / き"),
+        KanjiPair("山", "mountain", "san / yama", "さん / やま"),
     ],
     2: [
-        KanjiPair("学", "study", "gaku / mana"),
-        KanjiPair("校", "school", "kou"),
-        KanjiPair("先", "previous", "sen / saki"),
-        KanjiPair("生", "life/birth", "sei / ikiru"),
-        KanjiPair("電", "electricity", "den"),
-        KanjiPair("車", "car", "sha / kuruma"),
+        KanjiPair("学", "study", "gaku / mana", "がく / まな"),
+        KanjiPair("校", "school", "kou", "こう"),
+        KanjiPair("先", "previous", "sen / saki", "せん / さき"),
+        KanjiPair("生", "life/birth", "sei / ikiru", "せい / いきる"),
+        KanjiPair("電", "electricity", "den", "でん"),
+        KanjiPair("車", "car", "sha / kuruma", "しゃ / くるま"),
     ],
     3: [
-        KanjiPair("働", "work", "dou / hataraku"),
-        KanjiPair("験", "experience/exam", "ken"),
-        KanjiPair("説", "explain/opinion", "setsu / toku"),
-        KanjiPair("続", "continue", "zoku / tsudzuku"),
-        KanjiPair("準", "prepare/standard", "jun"),
-        KanjiPair("環", "ring/environment", "kan"),
+        KanjiPair("働", "work", "dou / hataraku", "どう / はたらく"),
+        KanjiPair("験", "experience/exam", "ken", "けん"),
+        KanjiPair("説", "explain/opinion", "setsu / toku", "せつ / とく"),
+        KanjiPair("続", "continue", "zoku / tsudzuku", "ぞく / つづく"),
+        KanjiPair("準", "prepare/standard", "jun", "じゅん"),
+        KanjiPair("環", "ring/environment", "kan", "かん"),
     ],
 }
 
@@ -149,9 +150,7 @@ class KanjiMatchService:
             }
 
         support = writing_support_profile(attempt.level)
-        require_meaning_input = bool(attempt.level >= 2)
         provided_readings = {symbol: (attempt.learner_readings.get(symbol, "") or "").strip() for symbol in expected_readings}
-        provided_meanings = attempt.learner_meanings or attempt.learner_matches
         # Compatibility: if legacy payload arrives without readings, keep exact-meaning evaluation mode.
         has_reading_answers = any(value for value in provided_readings.values())
         if not has_reading_answers:
@@ -162,7 +161,6 @@ class KanjiMatchService:
             )
 
         reading_hits = 0
-        meaning_points = 0.0
         mistakes: list[dict[str, str]] = []
         reading_results: list[dict[str, str | bool]] = []
         meaning_results: list[dict[str, str]] = []
@@ -190,56 +188,16 @@ class KanjiMatchService:
                 }
             )
 
-            if not require_meaning_input:
-                continue
-
-            expected_meaning = expected_meanings[symbol]
-            learner_meaning = (provided_meanings.get(symbol, "") or "").strip()
-            meaning_status = self._meaning_status(learner_meaning=learner_meaning, expected_meaning=expected_meaning)
-            meaning_results.append(
-                {
-                    "symbol": symbol,
-                    "expected_meaning": expected_meaning,
-                    "learner_meaning": learner_meaning,
-                    "status": meaning_status,
-                }
-            )
-            if meaning_status == "correct":
-                meaning_points += 1.0
-            elif meaning_status == "almost_correct":
-                meaning_points += 0.5
-                mistakes.append(
-                    {
-                        "symbol": symbol,
-                        "type": "meaning_almost",
-                        "expected_meaning": expected_meaning,
-                        "learner_meaning": learner_meaning,
-                    }
-                )
-            else:
-                mistakes.append(
-                    {
-                        "symbol": symbol,
-                        "type": "meaning",
-                        "expected_meaning": expected_meaning,
-                        "learner_meaning": learner_meaning,
-                    }
-                )
-
         reading_accuracy = reading_hits / total
-        meaning_accuracy = (meaning_points / total) if require_meaning_input else None
-        combined_accuracy = (
-            ((reading_accuracy * 0.5) + (meaning_accuracy * 0.5))
-            if require_meaning_input and meaning_accuracy is not None
-            else reading_accuracy
-        )
+        meaning_accuracy = None
+        combined_accuracy = reading_accuracy
         result = {
             "game_type": self.game_type,
             "language": attempt.language,
             "score": round(combined_accuracy * 100),
             "accuracy": round(combined_accuracy, 2),
             "reading_accuracy": round(reading_accuracy, 2),
-            "require_meaning_input": require_meaning_input,
+            "require_meaning_input": False,
             "reading_results": reading_results,
             "meaning_results": meaning_results,
             "mistakes": mistakes,
@@ -255,15 +213,13 @@ class KanjiMatchService:
                 hide_translation_hint=True,
             ),
         }
-        if meaning_accuracy is not None:
-            result["meaning_accuracy"] = round(meaning_accuracy, 2)
         logger.info(
             "evaluate_done language=%s level=%s score=%s reading_accuracy=%.2f meaning_accuracy=%s mistakes=%s",
             attempt.language,
             attempt.level,
             result["score"],
             reading_accuracy,
-            None if meaning_accuracy is None else round(meaning_accuracy, 2),
+            None,
             len(mistakes),
         )
         return result
@@ -328,10 +284,7 @@ class KanjiMatchService:
             lines = [f"Match kanji: {symbols}"]
             if support.show_romanized_line:
                 lines.append(f"Readings (romaji): {readings}")
-            if support.show_options:
-                lines.append(f"Meaning bank: {meanings}")
-            else:
-                lines.append("Write the meaning for each kanji.")
+            lines.append(f"Meaning bank: {meanings}")
             if support.show_translation_hint and group:
                 lines.append(f"Translation hint: {group[0].symbol} = {group[0].meaning}")
 
@@ -362,6 +315,7 @@ class KanjiMatchService:
             "kanji_symbols": [pair.symbol for pair in pairs],
             "show_romanized_line": bool(support.show_romanized_line),
             "reading_romaji": reading_map if support.show_romanized_line else {},
+            "reading_kana": {pair.symbol: pair.reading_kana for pair in pairs},
             "show_options": bool(support.show_options),
             "options": list(translation_map.values()) if support.show_options else [],
             "show_translation_hint": show_translation_hint,
@@ -369,7 +323,7 @@ class KanjiMatchService:
             "show_literal_translation": show_translation,
             "literal_translation": translation_map if show_translation else {},
             "retry_available": True,
-            "require_meaning_input": support.stage in {"intermediate", "advanced"},
+            "require_meaning_input": False,
         }
 
     @staticmethod

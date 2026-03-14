@@ -219,7 +219,10 @@ class ApiEnglishContractTests(unittest.TestCase):
         )
         daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
         self.assertEqual(daily.status_code, 200)
-        card = next((entry for entry in daily.json().get("daily_games", []) if entry.get("game_type") == "sentence_order"), None)
+        cards = daily.json()
+        card = next((entry for entry in cards.get("daily_games", []) if entry.get("game_type") == "sentence_order"), None)
+        if card is None:
+            card = next((entry for entry in cards.get("all_games", []) if entry.get("game_type") == "sentence_order"), None)
         self.assertIsNotNone(card)
         payload = {
             "item_id": card["activity_id"],
@@ -335,6 +338,21 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertIsNotNone(listening_card)
         payload = listening_card.get("payload", {})
         self.assertTrue(payload.get("tts_text"))
+
+    def test_listening_gap_fill_payload_keeps_drag_fragments_in_level_two(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user-listening-fragments", "level_override_today": 2},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        listening_card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "listening_gap_fill"),
+            None,
+        )
+        self.assertIsNotNone(listening_card)
+        payload = listening_card.get("payload", {})
+        self.assertTrue(payload.get("options"))
 
     def test_mora_romanization_payload_beginner_contains_mora_guides(self) -> None:
         response = self.client.post(
