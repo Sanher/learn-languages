@@ -293,7 +293,7 @@ function renderLevelProgressBlock(options = {}) {
     : `Level ${progress.currentLevel} -> ${progress.nextLevel}`;
   const summary = progress.levelCapReached
     ? 'Maximum level reached.'
-    : `${progress.pointsCurrent}/${progress.pointsTarget} points · ${progress.pointsRemaining} needed`;
+    : `${progress.pointsCurrent}/${progress.pointsTarget} accumulated points · ${progress.pointsRemaining} needed`;
   const status = progress.statusMessage || (progress.readyForExam
     ? 'Ready for level exam.'
     : summary);
@@ -899,6 +899,9 @@ function renderSingleGame(game) {
       })
       .join('');
     const options = payload.options || [];
+    // The backend explicitly declares whether the gap should be answered by drag-and-drop
+    // or by free text, so the UI never renders both input modes at the same time.
+    const usesDragOptions = payload.input_mode === 'drag' || options.length > 0;
     const optionTokens = options
       .map(
         (option, idx) => `
@@ -938,17 +941,23 @@ function renderSingleGame(game) {
     controls = `
       <div class="listening-controls">
         ${listenButton}
-        <label>Available fragments</label>
-        <div id="gap-options-bank" class="sentence-dropzone gap-options-bank dnd-zone" data-placeholder="Available options">
-          ${optionTokens}
-        </div>
+        ${
+          usesDragOptions
+            ? `
+              <label>Available fragments</label>
+              <div id="gap-options-bank" class="sentence-dropzone gap-options-bank dnd-zone" data-placeholder="Available options">
+                ${optionTokens}
+              </div>
+            `
+            : ''
+        }
         <fieldset class="response-group">
           <legend>Answer</legend>
-          <label>Drag here</label>
+          <label>${usesDragOptions ? 'Drag here' : 'Type the missing value(s)'}</label>
           <div class="gap-phrase-line">${phraseSlots}</div>
         </fieldset>
         ${
-          options.length === 0
+          !usesDragOptions
             ? `
               <div class="gap-inputs">
                 ${fallbackInputs}

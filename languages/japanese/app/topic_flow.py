@@ -81,7 +81,8 @@ class TopicDefinition:
         seed = f"{self.topic_key}:{self.language}:{learner_id}:{level}"
         Random(seed).shuffle(ordered)
         daily_count = min(max(1, TOPIC_DAILY_ROTATION_COUNT), len(ordered))
-        offset = target_day.toordinal() % len(ordered)
+        # Rotate in blocks so consecutive days feel materially different even with a small pool.
+        offset = (target_day.toordinal() * daily_count) % len(ordered)
         return [ordered[(offset + idx) % len(ordered)] for idx in range(daily_count)]
 
     def extra_plan_for_level(self, level: int) -> list[tuple[str, str]]:

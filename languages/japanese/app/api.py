@@ -1459,10 +1459,24 @@ def _progress_insights(
     }
 
 
+def _level_points_target(
+    *,
+    current_level: int,
+    daily_score_cap: int,
+    topic_day_target_score: int,
+) -> int:
+    normalized_level = max(1, int(current_level))
+    normalized_cap = max(DAILY_SCORE_PER_GAME, int(daily_score_cap))
+    next_level = min(3, normalized_level + 1)
+    baseline_target = _scale_daily_threshold(170 if next_level == 2 else 210, normalized_cap)
+    adaptive_target = int(round(max(1, int(topic_day_target_score)) * 0.95))
+    return min(normalized_cap, max(baseline_target, adaptive_target))
+
+
 def _level_progress_payload(
     *,
     current_level: int,
-    daily_score: int,
+    accumulated_score: int,
     daily_score_cap: int,
     topic_day_target_score: int,
     ready_to_level_2: bool,
@@ -1470,7 +1484,9 @@ def _level_progress_payload(
 ) -> dict[str, Any]:
     normalized_level = max(1, int(current_level))
     normalized_cap = max(DAILY_SCORE_PER_GAME, int(daily_score_cap))
-    score = max(0, min(normalized_cap, int(daily_score)))
+    # Level progression is cumulative across days within the current level.
+    # We still defer the actual promotion to the next day to avoid mixing levels in one session.
+    score = max(0, int(accumulated_score))
     max_level = 3
     if normalized_level >= max_level:
         return {
@@ -1486,9 +1502,11 @@ def _level_progress_payload(
         }
 
     next_level = normalized_level + 1
-    baseline_target = _scale_daily_threshold(170 if next_level == 2 else 210, normalized_cap)
-    adaptive_target = int(round(max(1, int(topic_day_target_score)) * 0.95))
-    points_target = min(normalized_cap, max(baseline_target, adaptive_target))
+    points_target = _level_points_target(
+        current_level=normalized_level,
+        daily_score_cap=normalized_cap,
+        topic_day_target_score=topic_day_target_score,
+    )
     points_remaining = max(0, points_target - score)
     progress_percent = int(round((score / points_target) * 100)) if points_target > 0 else 0
     ready_for_level_exam = bool(ready_to_level_2) if next_level == 2 else bool(ready_to_level_3)
@@ -1497,9 +1515,9 @@ def _level_progress_payload(
     if ready_for_level_exam:
         status_message = f"Ready for level exam {normalized_level} -> {next_level}."
     elif points_met:
-        status_message = f"Point target reached. Level {next_level} will be active on the next day."
+        status_message = f"Accumulated target reached. Level {next_level} will be active on the next day."
     else:
-        status_message = f"{points_remaining} point(s) needed for level exam target."
+        status_message = f"{points_remaining} accumulated point(s) needed for the next level."
 
     return {
         "current_level": normalized_level,
@@ -1555,14 +1573,21 @@ def _enrich_daily_progress_payload(
             daily_score_cap=daily_score_cap,
         )
     )
+    accumulated_level_score = memory.accumulated_level_score(
+        learner_id=learner_id,
+        language=language,
+        level_state=current_level,
+        up_to_day_iso=today_iso,
+    )
     enriched["level_progress"] = _level_progress_payload(
         current_level=current_level,
-        daily_score=int(enriched.get("daily_score", 0)),
+        accumulated_score=accumulated_level_score,
         daily_score_cap=daily_score_cap,
         topic_day_target_score=int(enriched.get("topic_day_target_score", 150)),
         ready_to_level_2=bool(enriched.get("ready_to_level_2")),
         ready_to_level_3=bool(enriched.get("ready_to_level_3")),
     )
+    enriched["level_progress"]["accumulated_points"] = int(accumulated_level_score)
     return enriched
 
 
@@ -1574,6 +1599,7 @@ def _maybe_promote_level_from_previous_day(
     current_level: int,
 ) -> tuple[int, dict[str, Any] | None]:
     # Promote only when a new day starts so the current daily flow never mixes cards from two levels.
+    # The target check uses accumulated score gathered while the learner stayed on the previous level.
     normalized_level = max(1, int(current_level))
     if normalized_level >= 3:
         return normalized_level, None
@@ -1636,26 +1662,25 @@ def _maybe_promote_level_from_previous_day(
         language=language,
         topic_key=previous_progress.topic_key,
     )
-    previous_level_progress = _level_progress_payload(
+    daily_score_cap = int(previous_payload.get("daily_score_max", _daily_score_cap_for_game_count(len(daily_game_types))))
+    points_target = _level_points_target(
         current_level=previous_level,
-        daily_score=int(previous_payload.get("daily_score", 0)),
-        daily_score_cap=int(previous_payload.get("daily_score_max", _daily_score_cap_for_game_count(len(daily_game_types)))),
-        topic_day_target_score=_target_score_for_topic_day(
-            topic_days_count,
-            daily_score_cap=int(previous_payload.get("daily_score_max", _daily_score_cap_for_game_count(len(daily_game_types)))),
-        ),
-        ready_to_level_2=False,
-        ready_to_level_3=False,
+        daily_score_cap=daily_score_cap,
+        topic_day_target_score=_target_score_for_topic_day(topic_days_count, daily_score_cap=daily_score_cap),
     )
-    points_target = int(previous_level_progress["points_target"])
-    achieved_score = int(previous_payload.get("daily_score", 0))
-    if achieved_score < points_target:
+    accumulated_score = memory.accumulated_level_score(
+        learner_id=learner_id,
+        language=language,
+        level_state=previous_level,
+        up_to_day_iso=previous_progress.day_iso,
+    )
+    if accumulated_score < points_target:
         logger.info(
-            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=target_not_met score=%s target=%s",
+            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=target_not_met accumulated_score=%s target=%s",
             learner_id,
             language,
             previous_progress.day_iso,
-            achieved_score,
+            accumulated_score,
             points_target,
         )
         return normalized_level, None
@@ -1666,14 +1691,14 @@ def _maybe_promote_level_from_previous_day(
 
     memory.set_language_level(learner_id=learner_id, language=language, level=next_level)
     logger.info(
-        "daily_level_score_promoted learner_id=%s language=%s prev_day=%s topic=%s from_level=%s to_level=%s score=%s target=%s",
+        "daily_level_score_promoted learner_id=%s language=%s prev_day=%s topic=%s from_level=%s to_level=%s accumulated_score=%s target=%s",
         learner_id,
         language,
         previous_progress.day_iso,
         previous_progress.topic_key,
         previous_level,
         next_level,
-        achieved_score,
+        accumulated_score,
         points_target,
     )
     return next_level, {
@@ -1726,6 +1751,7 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
                 "tokens": item.tokens,
                 "gap_positions": item.gap_positions,
                 "options": item.options,
+                "input_mode": "drag" if item.options else "text",
                 "tts_text": item.script_line if language == "ja" else "",
             }
 

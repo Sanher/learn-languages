@@ -1041,6 +1041,38 @@ class ProgressMemory:
             ).fetchone()
         return int(row[0] if row else 0)
 
+    def accumulated_level_score(
+        self,
+        *,
+        learner_id: str,
+        language: str,
+        level_state: int,
+        up_to_day_iso: str | None = None,
+    ) -> int:
+        params: list[Any] = [learner_id, language, int(max(1, level_state))]
+        query = [
+            """
+            SELECT COALESCE(SUM(daily_score), 0)
+            FROM daily_topic_progress
+            WHERE learner_id = ? AND language = ? AND level_state = ?
+            """
+        ]
+        if up_to_day_iso:
+            query.append("AND day_iso <= ?")
+            params.append(str(up_to_day_iso))
+        with self._conn() as conn:
+            row = conn.execute("\n".join(query), tuple(params)).fetchone()
+        total = int(row[0] if row and row[0] is not None else 0)
+        logger.debug(
+            "accumulated_level_score_loaded learner_id=%s language=%s level_state=%s up_to_day=%s total=%s",
+            learner_id,
+            language,
+            int(max(1, level_state)),
+            up_to_day_iso or "latest",
+            total,
+        )
+        return total
+
     def recent_topic_scores(self, learner_id: str, language: str, topic_key: str, limit: int = 5) -> list[int]:
         normalized_limit = max(1, int(limit))
         with self._conn() as conn:
