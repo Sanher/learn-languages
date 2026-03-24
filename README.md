@@ -57,6 +57,16 @@ pip install -r requirements.txt
 - Selector de traducción secundaria en topbar (`Off | Español`) por `/api/ui/secondary-translation`
 - Las líneas de traducción usan bundles `*_translations` (EN base + ES secundaria cuando esté activa)
 
+## Topic and Rank Progression
+
+- Each day the learner gets one active topic, one lesson, and 4 required daily games.
+- `weekly exam` closes the current topic when passed.
+- Topic numeric level grows inside the current topic and resets to `1` when a new topic starts.
+- `level exam` promotes the learner between ranks (`beginner`, `medium`, `advanced`).
+- Rank promotion is unlocked by competency coverage, not by hardcoded mandatory topic ids.
+- `topic_level_current` sums the current topic level plus closed-topic levels inside the current rank.
+- `global_rank_level` sums the current topic level plus all closed-topic levels across ranks.
+
 ## Ejecutar tests
 
 ```bash

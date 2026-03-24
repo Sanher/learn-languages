@@ -245,6 +245,69 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertIn("feedback_translations", evaluated)
         self.assertEqual(evaluated["feedback_translations"]["en"], evaluated["feedback"])
         self.assertEqual(evaluated["feedback_translations"]["secondary_lang"], "es")
+        self.assertIn("display", evaluated)
+        self.assertIn("literal_translation_translations", evaluated["display"])
+        self.assertEqual(evaluated["display"]["literal_translation_translations"]["secondary_lang"], "es")
+
+    def test_grammar_particle_card_includes_literal_translation_bundle(self) -> None:
+        learner_id = "test-user-grammar-translation-card"
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+        self.assertEqual(daily.status_code, 200)
+        cards = daily.json()
+        card = next((entry for entry in cards.get("all_games", []) if entry.get("game_type") == "grammar_particle_fix"), None)
+        self.assertIsNotNone(card)
+        payload = card.get("payload", {})
+        self.assertTrue(payload.get("literal_translation"))
+        self.assertIn("literal_translation_translations", payload)
+        self.assertEqual(payload["literal_translation_translations"]["en"], payload["literal_translation"])
+        self.assertEqual(payload["literal_translation_translations"]["secondary_lang"], "es")
+
+    def test_context_quiz_evaluation_includes_display_translation_bundle(self) -> None:
+        learner_id = "test-user-context-translation-eval"
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+        self.assertEqual(daily.status_code, 200)
+        cards = daily.json()
+        card = next((entry for entry in cards.get("all_games", []) if entry.get("game_type") == "context_quiz"), None)
+        self.assertIsNotNone(card)
+        item = next(
+            item
+            for item in api.game_services["context_quiz"].get_items(language="ja", level=card["level"])
+            if item.item_id == card["activity_id"]
+        )
+        correct_option_id = next(option.option_id for option in item.options if option.is_correct)
+        evaluation = self.client.post(
+            "/api/games/evaluate",
+            json={
+                "learner_id": learner_id,
+                "game_type": "context_quiz",
+                "language": "ja",
+                "level": card["level"],
+                "retry_count": 0,
+                "payload": {
+                    "item_id": card["activity_id"],
+                    "selected_option_id": correct_option_id,
+                },
+            },
+        )
+        self.assertEqual(evaluation.status_code, 200)
+        evaluated = evaluation.json()
+        self.assertIn("display", evaluated)
+        self.assertIn("literal_translation_translations", evaluated["display"])
+        self.assertEqual(evaluated["display"]["literal_translation_translations"]["secondary_lang"], "es")
 
     def test_translation_cache_roundtrip(self) -> None:
         cache_key = f"test-cache-key-{uuid4().hex}"

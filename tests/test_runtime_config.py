@@ -405,6 +405,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     "title": "Identity and Daily Plans",
                     "description": "Fallback identity topic.",
                     "stage": "basic",
+                    "covers": ["identity", "basic_sentence_roles"],
                 }
             ]
             with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:
@@ -425,18 +426,21 @@ class RuntimeConfigTests(unittest.TestCase):
                                                     "title": "Future hypotheticals",
                                                     "description": "Discuss hypothetical futures.",
                                                     "stage": "advanced",
+                                                    "covers": ["conditionals", "formal_register"],
                                                 },
                                                 {
                                                     "topic_key": "basic_greetings",
                                                     "title": "Basic greetings",
                                                     "description": "Use simple daily greetings.",
                                                     "stage": "basic",
+                                                    "covers": ["identity", "basic_questions"],
                                                 },
                                                 {
                                                     "topic_key": "routine_narration",
                                                     "title": "Routine narration",
                                                     "description": "Describe weekly routine.",
                                                     "stage": "intermediate",
+                                                    "covers": ["time_and_routine", "everyday_actions"],
                                                 },
                                             ]
                                         }
@@ -462,6 +466,7 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(topics[1]["stage"], "intermediate")
                 self.assertEqual(topics[2]["stage"], "advanced")
                 self.assertEqual(topics[0]["topic_key"], "basic_greetings")
+                self.assertEqual(topics[0]["covers"], ["identity", "basic_questions"])
                 self.assertEqual(topics[2]["topic_key"], "future_hypotheticals")
 
     def test_generate_topic_sequence_falls_back_when_output_is_invalid(self) -> None:
@@ -474,6 +479,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     "title": "Identity and Daily Plans",
                     "description": "Fallback identity topic.",
                     "stage": "basic",
+                    "covers": ["identity", "basic_sentence_roles"],
                 }
             ]
             with patch("languages.japanese.app.services.openai_client.httpx.AsyncClient") as mock_client:

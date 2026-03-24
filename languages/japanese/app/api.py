@@ -49,7 +49,15 @@ from .game_engine import DailyGamePlanner, LearnerSnapshot
 from .memory import ItemReviewState, ProgressMemory
 from .services.elevenlabs_client import ElevenLabsService
 from .services.openai_client import OpenAIPlanner
-from .topic_flow import TOPICS_BY_LANGUAGE, TopicDefinition
+from .topic_flow import (
+    RANK_COMPETENCIES,
+    TOPICS_BY_LANGUAGE,
+    TopicDefinition,
+    language_competency_guidance,
+    normalize_topic_covers,
+    normalize_topic_stage,
+    required_competencies_for_stage,
+)
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
@@ -87,6 +95,7 @@ WEEKLY_EXAM_MODE = os.getenv("LEARN_LANGUAGES_WEEKLY_EXAM_MODE", "legacy").strip
 WEEKLY_EXAM_FORCE_LEGACY = WEEKLY_EXAM_MODE != "cumulative"
 TOPIC_MASTERY_WINDOW_DAYS = 5
 TOPIC_EXAM_MIN_MASTERY_LEVEL = 3
+WEEKLY_EXAM_MIN_LEVEL = 5
 TOPIC_DAILY_REQUIRED_GAME_COUNT = 4
 DAILY_SCORE_PER_GAME = 100
 GAME_NAME_ALIASES = {
@@ -639,23 +648,23 @@ def _fallback_topics_for_language(language: str) -> tuple[TopicDefinition, ...]:
     return topics
 
 
-def _topic_seed_from_definition(topic: TopicDefinition, *, stage: str = "basic") -> dict[str, str]:
-    normalized_stage = str(stage or "").strip().lower()
-    if normalized_stage not in {"basic", "intermediate", "advanced"}:
-        normalized_stage = "basic"
+def _topic_seed_from_definition(topic: TopicDefinition, *, stage: str = "basic") -> dict[str, Any]:
+    normalized_stage = normalize_topic_stage(stage or getattr(topic, "stage", "basic"))
     return {
         "topic_key": topic.topic_key,
         "title": topic.title,
         "description": topic.description,
         "stage": normalized_stage,
+        "covers": list(normalize_topic_covers(getattr(topic, "covers", ()), stage=normalized_stage)),
     }
 
 
-def _topic_seeds_from_definitions(topics: tuple[TopicDefinition, ...]) -> list[dict[str, str]]:
+def _topic_seeds_from_definitions(topics: tuple[TopicDefinition, ...]) -> list[dict[str, Any]]:
     total = len(topics)
-    seeds: list[dict[str, str]] = []
+    seeds: list[dict[str, Any]] = []
     for index, topic in enumerate(topics):
-        seeds.append(_topic_seed_from_definition(topic, stage=_topic_stage_for_position(index, total)))
+        stage = getattr(topic, "stage", "") or _topic_stage_for_position(index, total)
+        seeds.append(_topic_seed_from_definition(topic, stage=stage))
     return seeds
 
 
@@ -670,11 +679,10 @@ def _topic_definitions_from_seed_list(language: str, topic_rows: list[dict[str, 
             continue
         title = str(row.get("title") or "").strip()
         description = str(row.get("description") or "").strip()
-        stage = str(row.get("stage") or "").strip().lower()
+        stage = normalize_topic_stage(str(row.get("stage") or "").strip().lower())
         candidate_key = str(row.get("topic_key") or "").strip()
         topic_key = _slugify_topic_key(candidate_key) or _slugify_topic_key(title)
-        if stage not in {"basic", "intermediate", "advanced"}:
-            stage = "basic"
+        covers = normalize_topic_covers(row.get("covers"), stage=stage)
         if not topic_key or not title or not description or topic_key in seen_keys:
             continue
         source_topic = static_by_key.get(topic_key, template_topic)
@@ -687,6 +695,8 @@ def _topic_definitions_from_seed_list(language: str, topic_rows: list[dict[str, 
                 lessons_by_level=source_topic.lessons_by_level,
                 daily_games=source_topic.daily_games,
                 extra_games=source_topic.extra_games,
+                stage=stage,
+                covers=covers,
             )
         )
         seen_keys.add(topic_key)
@@ -695,10 +705,37 @@ def _topic_definitions_from_seed_list(language: str, topic_rows: list[dict[str, 
     return tuple(definitions)
 
 
+def _topic_rows_have_coverage(topic_rows: list[dict[str, Any]]) -> bool:
+    for row in topic_rows:
+        if not isinstance(row, dict):
+            return False
+        stage = normalize_topic_stage(str(row.get("stage") or "").strip().lower())
+        if not normalize_topic_covers(row.get("covers"), stage=stage):
+            return False
+    return bool(topic_rows)
+
+
+def _topic_competency_contract_for_language(language: str) -> tuple[dict[str, list[str]], dict[str, str]]:
+    normalized_language = str(language or "").strip().lower()
+    requirements = {
+        stage: list(values)
+        for stage, values in RANK_COMPETENCIES.items()
+    }
+    guidance = language_competency_guidance(normalized_language)
+    return requirements, guidance
+
+
 def _load_topic_sequence_from_persistence(language: str) -> tuple[TopicDefinition, ...] | None:
     normalized_language = str(language or "").strip().lower()
     topic_rows, source = memory.load_topic_sequence_cache(language=normalized_language)
     if not topic_rows:
+        return None
+    if not _topic_rows_have_coverage(topic_rows):
+        logger.warning(
+            "topic_sequence_persisted_missing_coverage language=%s source=%s",
+            normalized_language,
+            source,
+        )
         return None
     definitions = _topic_definitions_from_seed_list(normalized_language, topic_rows)
     if not definitions:
@@ -749,9 +786,12 @@ async def _ensure_topic_sequence_bootstrap(language: str) -> tuple[TopicDefiniti
 
         fallback_topics = _fallback_topics_for_language(normalized_language)
         fallback_seed_rows = _topic_seeds_from_definitions(fallback_topics)
+        competency_requirements, language_guidance = _topic_competency_contract_for_language(normalized_language)
         generated = await openai_planner.generate_topic_sequence(
             language=normalized_language,
             fallback_topics=fallback_seed_rows,
+            competency_requirements=competency_requirements,
+            language_guidance=language_guidance,
         )
         source = str(generated.get("source", "fallback")).strip().lower() or "fallback"
         generated_rows = generated.get("topics")
@@ -784,9 +824,12 @@ async def _force_topic_sequence_refresh(language: str) -> dict[str, Any]:
         existing_topics = _topics_for_language(normalized_language)
         fallback_topics = _fallback_topics_for_language(normalized_language)
         fallback_seed_rows = _topic_seeds_from_definitions(fallback_topics)
+        competency_requirements, language_guidance = _topic_competency_contract_for_language(normalized_language)
         generated = await openai_planner.generate_topic_sequence(
             language=normalized_language,
             fallback_topics=fallback_seed_rows,
+            competency_requirements=competency_requirements,
+            language_guidance=language_guidance,
         )
         source = str(generated.get("source", "fallback")).strip().lower() or "fallback"
         generated_rows = generated.get("topics")
@@ -1184,8 +1227,8 @@ def _topic_mastery_level(*, recent_scores: list[int], window_days: int = TOPIC_M
 
 def _level_exam_flags(
     *,
-    current_level: int,
-    weekly_passed_count: int,
+    current_rank: str,
+    required_competencies_met: bool,
     high_score_days: int,
     retention_ratio: float | None,
     topic_failures: dict[str, int],
@@ -1193,9 +1236,12 @@ def _level_exam_flags(
     level_2_to_3_passed: bool,
 ) -> dict[str, bool]:
     failure_total = sum(int(value) for value in topic_failures.values())
+    # Rank promotion no longer depends on hardcoded topic ids. Instead, the learner must
+    # have closed enough topics to cover the competency contract of the current rank.
     ready_to_2 = (
         not level_1_to_2_passed
-        and weekly_passed_count >= 1
+        and current_rank == "beginner"
+        and required_competencies_met
         and high_score_days >= 1
         and (retention_ratio is None or retention_ratio >= 70.0)
         and failure_total <= 12
@@ -1203,7 +1249,8 @@ def _level_exam_flags(
     ready_to_3 = (
         level_1_to_2_passed
         and not level_2_to_3_passed
-        and weekly_passed_count >= 2
+        and current_rank == "medium"
+        and required_competencies_met
         and high_score_days >= 5
         and (retention_ratio is not None and retention_ratio >= 80.0)
         and failure_total <= 8
@@ -1211,6 +1258,83 @@ def _level_exam_flags(
     return {
         "ready_to_level_2": bool(ready_to_2),
         "ready_to_level_3": bool(ready_to_3),
+    }
+
+
+def _rank_state(
+    *,
+    level_1_to_2_passed: bool,
+    level_2_to_3_passed: bool,
+) -> tuple[str, str | None]:
+    if level_2_to_3_passed:
+        return "advanced", None
+    if level_1_to_2_passed:
+        return "medium", "advanced"
+    return "beginner", "medium"
+
+
+def _closed_topic_rank(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized or "beginner"
+
+
+def _competency_stage_for_rank(rank: str | None) -> str:
+    normalized = str(rank or "").strip().lower()
+    if normalized == "medium":
+        return "intermediate"
+    if normalized == "advanced":
+        return "advanced"
+    return "basic"
+
+
+def _required_competencies_for_rank(rank: str | None) -> tuple[str, ...]:
+    return required_competencies_for_stage(_competency_stage_for_rank(rank))
+
+
+def _covered_competencies_for_rank(*, learner_id: str, language: str, rank: str) -> tuple[str, ...]:
+    covered: list[str] = []
+    seen: set[str] = set()
+    for item in memory.list_closed_topics(learner_id=learner_id, language=language):
+        if _closed_topic_rank(getattr(item, "closed_rank", "")) != str(rank or "").strip().lower():
+            continue
+        for competency in item.covers():
+            if competency in seen:
+                continue
+            seen.add(competency)
+            covered.append(competency)
+    return tuple(covered)
+
+
+def _rank_competency_state(*, learner_id: str, language: str, current_rank: str) -> dict[str, list[str]]:
+    required = list(_required_competencies_for_rank(current_rank))
+    covered = list(_covered_competencies_for_rank(learner_id=learner_id, language=language, rank=current_rank))
+    covered_set = set(covered)
+    missing = [competency for competency in required if competency not in covered_set]
+    return {
+        "required": required,
+        "covered": covered,
+        "missing": missing,
+    }
+
+
+def _level_totals_for_learner(
+    *,
+    learner_id: str,
+    language: str,
+    current_level: int,
+    current_rank: str,
+) -> dict[str, int]:
+    closed_topics = memory.list_closed_topics(learner_id=learner_id, language=language)
+    topic_level_current = int(max(1, current_level))
+    global_rank_level = int(max(1, current_level))
+    for item in closed_topics:
+        closed_level = max(1, int(item.closed_level))
+        global_rank_level += closed_level
+        if _closed_topic_rank(getattr(item, "closed_rank", "")) == current_rank:
+            topic_level_current += closed_level
+    return {
+        "topic_level_current": int(topic_level_current),
+        "global_rank_level": int(global_rank_level),
     }
 
 
@@ -1226,6 +1350,11 @@ def _topic_definition_for_key(language: str, topic_key: str) -> TopicDefinition 
     if not normalized:
         return None
     for topic in _topics_for_language(language):
+        if topic.topic_key == normalized:
+            return topic
+    # Closed topics may outlive the currently active generated sequence, so keep a fallback
+    # to the static language catalog when we need to resolve historical activity ids.
+    for topic in _fallback_topics_for_language(language):
         if topic.topic_key == normalized:
             return topic
     return None
@@ -1411,9 +1540,24 @@ def _progress_insights(
     assessment = memory.load_or_create_assessment_state(learner_id)
     level_1_to_2_passed = memory.level_exam_passed(learner_id, language, from_level=1, to_level=2)
     level_2_to_3_passed = memory.level_exam_passed(learner_id, language, from_level=2, to_level=3)
-    level_exam_ready_flags = _level_exam_flags(
+    current_rank, next_rank = _rank_state(
+        level_1_to_2_passed=level_1_to_2_passed,
+        level_2_to_3_passed=level_2_to_3_passed,
+    )
+    competency_state = _rank_competency_state(
+        learner_id=learner_id,
+        language=language,
+        current_rank=current_rank,
+    )
+    level_totals = _level_totals_for_learner(
+        learner_id=learner_id,
+        language=language,
         current_level=current_level,
-        weekly_passed_count=int(assessment.weekly_exam_passed_count),
+        current_rank=current_rank,
+    )
+    level_exam_ready_flags = _level_exam_flags(
+        current_rank=current_rank,
+        required_competencies_met=not competency_state["missing"],
         high_score_days=high_score_days_over_240,
         retention_ratio=retention_ratio_percent,
         topic_failures=topic_failure_totals,
@@ -1432,7 +1576,8 @@ def _progress_insights(
         recent_scores=recent_topic_scores,
         window_days=TOPIC_MASTERY_WINDOW_DAYS,
     )
-    topic_mastery_ready_for_weekly_exam = topic_mastery_level >= TOPIC_EXAM_MIN_MASTERY_LEVEL
+    weekly_exam_level_ready = int(current_level) >= WEEKLY_EXAM_MIN_LEVEL
+    topic_mastery_ready_for_weekly_exam = weekly_exam_level_ready and topic_mastery_level >= TOPIC_EXAM_MIN_MASTERY_LEVEL
     return {
         "topic_days_count": int(topic_days_count),
         "topic_days_message": f"You have worked on this topic for {topic_days_count} day(s).",
@@ -1449,12 +1594,22 @@ def _progress_insights(
         "level_exam_passed_2_to_3": bool(level_2_to_3_passed),
         "ready_to_level_2": bool(level_exam_ready_flags["ready_to_level_2"]),
         "ready_to_level_3": bool(level_exam_ready_flags["ready_to_level_3"]),
+        "current_rank": current_rank,
+        "next_rank": next_rank,
+        "required_rank_competencies": competency_state["required"],
+        "covered_rank_competencies": competency_state["covered"],
+        "missing_rank_competencies": competency_state["missing"],
+        "current_topic_level": int(max(1, current_level)),
+        "topic_level_current": int(level_totals["topic_level_current"]),
+        "global_rank_level": int(level_totals["global_rank_level"]),
         "closed_topics_count": int(closed_topics_count),
         "topic_mastery_level": int(topic_mastery_level),
         "topic_mastery_required_level": int(TOPIC_EXAM_MIN_MASTERY_LEVEL),
         "topic_mastery_window_days": int(TOPIC_MASTERY_WINDOW_DAYS),
         "topic_mastery_sample_days": int(len(recent_topic_scores)),
         "topic_mastery_average_score": float(topic_mastery_average_score),
+        "weekly_exam_level_ready": bool(weekly_exam_level_ready),
+        "weekly_exam_min_level": int(WEEKLY_EXAM_MIN_LEVEL),
         "topic_mastery_ready_for_weekly_exam": bool(topic_mastery_ready_for_weekly_exam),
     }
 
@@ -1467,10 +1622,13 @@ def _level_points_target(
 ) -> int:
     normalized_level = max(1, int(current_level))
     normalized_cap = max(DAILY_SCORE_PER_GAME, int(daily_score_cap))
-    next_level = min(3, normalized_level + 1)
-    baseline_target = _scale_daily_threshold(170 if next_level == 2 else 210, normalized_cap)
-    adaptive_target = int(round(max(1, int(topic_day_target_score)) * 0.95))
-    return min(normalized_cap, max(baseline_target, adaptive_target))
+    next_level = normalized_level + 1
+    # Keep early levels approachable, then increase the target with a logarithmic curve so
+    # higher numeric levels remain meaningful without exploding too fast.
+    baseline_target = int(round(normalized_cap * (0.26 + (0.20 * log2(next_level + 1)))))
+    adaptive_target = int(round(max(1, int(topic_day_target_score)) * (0.95 + (0.03 * log2(next_level + 1)))))
+    soft_cap = int(round(normalized_cap * (1.25 + (0.15 * log2(next_level + 1)))))
+    return max(max(1, normalized_cap // 2), min(soft_cap, max(baseline_target, adaptive_target)))
 
 
 def _level_progress_payload(
@@ -1481,27 +1639,17 @@ def _level_progress_payload(
     topic_day_target_score: int,
     ready_to_level_2: bool,
     ready_to_level_3: bool,
+    current_rank: str,
+    next_rank: str | None,
+    missing_rank_competencies: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized_level = max(1, int(current_level))
     normalized_cap = max(DAILY_SCORE_PER_GAME, int(daily_score_cap))
     # Level progression is cumulative across days within the current level.
     # We still defer the actual promotion to the next day to avoid mixing levels in one session.
     score = max(0, int(accumulated_score))
-    max_level = 3
-    if normalized_level >= max_level:
-        return {
-            "current_level": normalized_level,
-            "next_level": None,
-            "points_current": score,
-            "points_target": normalized_cap,
-            "points_remaining": 0,
-            "progress_percent": 100,
-            "ready_for_level_exam": False,
-            "level_cap_reached": True,
-            "status_message": "Maximum level reached.",
-        }
-
     next_level = normalized_level + 1
+    missing_competencies = [str(item).strip() for item in list(missing_rank_competencies or []) if str(item).strip()]
     points_target = _level_points_target(
         current_level=normalized_level,
         daily_score_cap=normalized_cap,
@@ -1509,13 +1657,22 @@ def _level_progress_payload(
     )
     points_remaining = max(0, points_target - score)
     progress_percent = int(round((score / points_target) * 100)) if points_target > 0 else 0
-    ready_for_level_exam = bool(ready_to_level_2) if next_level == 2 else bool(ready_to_level_3)
+    ready_for_level_exam = bool(ready_to_level_2) if current_rank == "beginner" else bool(ready_to_level_3) if current_rank == "medium" else False
     points_met = score >= points_target
 
-    if ready_for_level_exam:
-        status_message = f"Ready for level exam {normalized_level} -> {next_level}."
+    if ready_for_level_exam and next_rank:
+        status_message = f"Ready for {current_rank.title()} -> {next_rank.title()} exam."
     elif points_met:
         status_message = f"Accumulated target reached. Level {next_level} will be active on the next day."
+    elif next_rank and missing_competencies:
+        status_message = (
+            f"Close topics covering {len(missing_competencies)} more core skill(s) "
+            f"before the {next_rank.title()} rank exam unlocks."
+        )
+    elif normalized_level >= WEEKLY_EXAM_MIN_LEVEL and next_rank:
+        status_message = f"Level {WEEKLY_EXAM_MIN_LEVEL}+ reached in {current_rank.title()}. Weekly topic exams can unlock from here."
+    elif next_rank is None:
+        status_message = "Advanced rank active. Numeric levels can keep growing while you keep closing topics."
     else:
         status_message = f"{points_remaining} accumulated point(s) needed for the next level."
 
@@ -1528,6 +1685,9 @@ def _level_progress_payload(
         "progress_percent": max(0, min(100, progress_percent)),
         "ready_for_level_exam": bool(ready_for_level_exam),
         "level_cap_reached": False,
+        "current_rank": current_rank,
+        "next_rank": next_rank,
+        "weekly_exam_min_level": int(WEEKLY_EXAM_MIN_LEVEL),
         "status_message": status_message,
     }
 
@@ -1577,6 +1737,7 @@ def _enrich_daily_progress_payload(
         learner_id=learner_id,
         language=language,
         level_state=current_level,
+        topic_key=topic_key,
         up_to_day_iso=today_iso,
     )
     enriched["level_progress"] = _level_progress_payload(
@@ -1586,6 +1747,9 @@ def _enrich_daily_progress_payload(
         topic_day_target_score=int(enriched.get("topic_day_target_score", 150)),
         ready_to_level_2=bool(enriched.get("ready_to_level_2")),
         ready_to_level_3=bool(enriched.get("ready_to_level_3")),
+        current_rank=str(enriched.get("current_rank", "beginner")),
+        next_rank=(str(enriched["next_rank"]) if enriched.get("next_rank") else None),
+        missing_rank_competencies=list(enriched.get("missing_rank_competencies", [])),
     )
     enriched["level_progress"]["accumulated_points"] = int(accumulated_level_score)
     return enriched
@@ -1601,8 +1765,6 @@ def _maybe_promote_level_from_previous_day(
     # Promote only when a new day starts so the current daily flow never mixes cards from two levels.
     # The target check uses accumulated score gathered while the learner stayed on the previous level.
     normalized_level = max(1, int(current_level))
-    if normalized_level >= 3:
-        return normalized_level, None
 
     previous_progress = memory.latest_daily_topic_progress_before(
         learner_id=learner_id,
@@ -1621,6 +1783,17 @@ def _maybe_promote_level_from_previous_day(
             previous_progress.day_iso,
             previous_level,
             normalized_level,
+        )
+        return normalized_level, None
+
+    closed_topics = memory.list_closed_topics(learner_id=learner_id, language=language)
+    if any(item.topic_key == previous_progress.topic_key for item in closed_topics):
+        logger.info(
+            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=topic_closed topic=%s",
+            learner_id,
+            language,
+            previous_progress.day_iso,
+            previous_progress.topic_key,
         )
         return normalized_level, None
 
@@ -1672,6 +1845,7 @@ def _maybe_promote_level_from_previous_day(
         learner_id=learner_id,
         language=language,
         level_state=previous_level,
+        topic_key=previous_progress.topic_key,
         up_to_day_iso=previous_progress.day_iso,
     )
     if accumulated_score < points_target:
@@ -1685,7 +1859,7 @@ def _maybe_promote_level_from_previous_day(
         )
         return normalized_level, None
 
-    next_level = min(3, previous_level + 1)
+    next_level = previous_level + 1
     if next_level <= normalized_level:
         return normalized_level, None
 
@@ -1727,6 +1901,7 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
             return {
                 "options": item.choices,
                 "options_enriched": service.options_with_romaji(item.choices),
+                "literal_translation": item.literal_translation,
             }
 
     if game_type == GAME_TYPE_SENTENCE_ORDER:
@@ -2050,11 +2225,12 @@ def _select_extra_card_for_game_type(
         ]
         due_candidates.sort(key=lambda item: (item.due_day_iso, -int(item.lapses), int(item.last_score)))
         for item in due_candidates:
+            preferred_level = max(1, int(closed_topics[item.topic_key].closed_level))
             card = _build_card_for_activity_with_level_fallback(
                 game_type=game_type,
                 language=language,
                 activity_id=item.item_id,
-                preferred_level=today_level,
+                preferred_level=preferred_level,
                 secondary_translation_language=secondary_translation_language,
             )
             if card is None:
@@ -2182,7 +2358,7 @@ def _weekly_exam_questions(
         topic_def = _topic_definition_for_key(language=language, topic_key=item.topic_key)
         if topic_def is None:
             continue
-        preferred_level = max(1, min(current_level, int(closed.closed_level)))
+        preferred_level = max(1, int(closed.closed_level))
         card = _build_card_for_activity_with_level_fallback(
             game_type=item.game_type,
             language=language,
@@ -2210,7 +2386,7 @@ def _weekly_exam_questions(
         topic_def = _topic_definition_for_key(language=language, topic_key=closed.topic_key)
         if topic_def is None:
             continue
-        level = max(1, min(current_level, int(closed.closed_level)))
+        level = max(1, int(closed.closed_level))
         plans = topic_def.daily_plan_for_level(level) + topic_def.extra_plan_for_level(level)
         for game_type, activity_id in plans:
             card = _build_card_for_activity(
@@ -2274,6 +2450,38 @@ def _extra_game_cards_metadata(
     return cards
 
 
+def _close_topic_after_weekly_exam_pass(
+    *,
+    learner_id: str,
+    language: str,
+    topic: TopicDefinition,
+    current_level: int,
+    current_rank: str,
+    today_iso: str,
+) -> None:
+    memory.mark_topic_closed(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic.topic_key,
+        closed_day_iso=today_iso,
+        closed_level=max(1, int(current_level)),
+        reason="weekly_exam_pass",
+        closed_rank=current_rank,
+        covers=list(getattr(topic, "covers", ())),
+    )
+    # Topic level belongs to the active topic only. When the learner closes the topic through
+    # the weekly exam, the next topic starts again from level 1 inside the same rank.
+    memory.set_language_level(learner_id=learner_id, language=language, level=1)
+    logger.info(
+        "weekly_exam_topic_closed learner_id=%s language=%s topic=%s closed_level=%s rank=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        max(1, int(current_level)),
+        current_rank,
+    )
+
+
 @app.post("/api/games/daily")
 async def get_daily_games(req: DailyGamesRequest) -> dict:
     logger.info(
@@ -2297,27 +2505,9 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
     )
 
     difficulty = planner.difficulty_for(snapshot)
-    inferred_level = _service_level_from_difficulty(difficulty)
     stored_level = memory.level_for_language(req.learner_id, preferred_language, default_level=1)
-    current_level = max(stored_level, inferred_level)
-    auto_promoted_from_level: int | None = None
+    current_level = max(1, stored_level)
     level_up_notice: dict[str, Any] | None = None
-    if current_level != stored_level:
-        auto_promoted_from_level = stored_level
-        memory.set_language_level(req.learner_id, preferred_language, current_level)
-        logger.info(
-            "daily_level_promoted learner_id=%s language=%s from_level=%s to_level=%s difficulty=%s",
-            req.learner_id,
-            preferred_language,
-            stored_level,
-            current_level,
-            difficulty,
-        )
-        level_up_notice = {
-            "from_level": auto_promoted_from_level,
-            "to_level": current_level,
-            "message": f"Level up! You reached level {current_level}.",
-        }
 
     today_iso = date.today().isoformat()
     current_level, previous_day_notice = _maybe_promote_level_from_previous_day(
@@ -2701,6 +2891,24 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
         logger.warning("closed_topics_invalid_language learner_id=%s language=%s", learner_id, language)
         return {"error": f"Unsupported language: {language}"}
 
+    current_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
+    level_1_to_2_passed = memory.level_exam_passed(learner_id=learner_id, language=language, from_level=1, to_level=2)
+    level_2_to_3_passed = memory.level_exam_passed(learner_id=learner_id, language=language, from_level=2, to_level=3)
+    current_rank, next_rank = _rank_state(
+        level_1_to_2_passed=level_1_to_2_passed,
+        level_2_to_3_passed=level_2_to_3_passed,
+    )
+    competency_state = _rank_competency_state(
+        learner_id=learner_id,
+        language=language,
+        current_rank=current_rank,
+    )
+    totals = _level_totals_for_learner(
+        learner_id=learner_id,
+        language=language,
+        current_level=current_level,
+        current_rank=current_rank,
+    )
     closed = memory.list_closed_topics(learner_id=learner_id, language=language)
     topics = [
         {
@@ -2708,6 +2916,8 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
             "topic_title": _topic_title(language=language, topic_key=item.topic_key),
             "closed_day_iso": item.closed_day_iso,
             "closed_level": int(item.closed_level),
+            "closed_rank": _closed_topic_rank(getattr(item, "closed_rank", "")),
+            "covers": list(item.covers()),
             "reason": item.reason,
         }
         for item in closed
@@ -2721,6 +2931,14 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
     return {
         "learner_id": learner_id,
         "language": language,
+        "current_rank": current_rank,
+        "next_rank": next_rank,
+        "required_rank_competencies": competency_state["required"],
+        "covered_rank_competencies": competency_state["covered"],
+        "missing_rank_competencies": competency_state["missing"],
+        "current_topic_level": int(max(1, current_level)),
+        "topic_level_current": int(totals["topic_level_current"]),
+        "global_rank_level": int(totals["global_rank_level"]),
         "closed_topics": topics,
         "closed_topics_count": len(topics),
     }
@@ -2808,8 +3026,12 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
         )
         return {"error": f"Topic is not closed yet: {topic.topic_key}"}
 
-    current_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
-    plans = topic.daily_plan_for_level(current_level) + topic.extra_plan_for_level(current_level)
+    closed_topic = next(
+        (item for item in memory.list_closed_topics(learner_id=learner_id, language=language) if item.topic_key == topic.topic_key),
+        None,
+    )
+    review_level = max(1, int(closed_topic.closed_level)) if closed_topic is not None else memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
+    plans = topic.daily_plan_for_level(review_level) + topic.extra_plan_for_level(review_level)
     seen_game_types: set[str] = set()
     review_cards: list[dict[str, Any]] = []
     for game_type, activity_id in plans:
@@ -2818,7 +3040,7 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
         card = _build_card_for_activity(
             game_type=game_type,
             language=language,
-            level=current_level,
+            level=review_level,
             activity_id=activity_id,
             secondary_translation_language=secondary_translation_language,
         )
@@ -2828,11 +3050,11 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
         review_cards.append(card)
 
     # Keep review prompts aligned with current proficiency while using the same IA generator.
-    level_hint = 3 if current_level <= 1 else (6 if current_level == 2 else 9)
+    level_hint = 3 if review_level <= 1 else (6 if review_level == 2 else 9)
     await _attach_ai_prompts_to_cards(
         cards=review_cards,
         difficulty=level_hint,
-        learner_note=f"Topic={topic.title}; review_mode=true; level={current_level}",
+        learner_note=f"Topic={topic.title}; review_mode=true; level={review_level}",
         secondary_translation_language=secondary_translation_language,
         context="topic_review",
     )
@@ -2843,7 +3065,7 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
         learner_id,
         language,
         topic.topic_key,
-        current_level,
+        review_level,
         len(review_cards),
         ai_prompts_review,
     )
@@ -2861,7 +3083,7 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
         },
         "lesson": _topic_lesson_payload(
             topic=topic,
-            level=current_level,
+            level=review_level,
             secondary_translation_language=secondary_translation_language,
             lessons_by_level=lesson_ladder,
         ),
@@ -2922,6 +3144,23 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             payload={
             "error": "Weekly mini-exam is not due yet.",
             "daily_progress": insights,
+            },
+        )
+    if not bool(insights.get("weekly_exam_level_ready")):
+        logger.info(
+            "weekly_exam_level_locked learner_id=%s language=%s topic=%s current_level=%s required_level=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            current_level,
+            int(insights.get("weekly_exam_min_level", WEEKLY_EXAM_MIN_LEVEL)),
+        )
+        return _translate_response_for_learner(
+            learner_id=learner_id,
+            context="weekly_exam.level_locked",
+            payload={
+                "error": f"Weekly topic exam is locked. Reach level {int(insights.get('weekly_exam_min_level', WEEKLY_EXAM_MIN_LEVEL))} first.",
+                "daily_progress": insights,
             },
         )
     if not bool(insights.get("topic_mastery_ready_for_weekly_exam")):
@@ -2988,6 +3227,15 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
         min_pass_score = max(120, int(round(target_score * 0.85)))
         passed = bool(lesson_and_daily_done and exam_score >= min_pass_score and failure_total <= 16)
         memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
+        if passed:
+            _close_topic_after_weekly_exam_pass(
+                learner_id=learner_id,
+                language=language,
+                topic=topic,
+                current_level=current_level,
+                current_rank=str(insights.get("current_rank", "beginner")),
+                today_iso=today_iso,
+            )
         refreshed_daily = _enrich_daily_progress_payload(
             learner_id=learner_id,
             language=language,
@@ -3146,6 +3394,15 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
     passed = bool(lesson_and_daily_done and answered_enough and exam_score >= min_pass_score and failure_total <= 16)
 
     memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
+    if passed:
+        _close_topic_after_weekly_exam_pass(
+            learner_id=learner_id,
+            language=language,
+            topic=topic,
+            current_level=current_level,
+            current_rank=str(insights.get("current_rank", "beginner")),
+            today_iso=today_iso,
+        )
     refreshed_daily = _enrich_daily_progress_payload(
         learner_id=learner_id,
         language=language,
@@ -3215,6 +3472,11 @@ def take_level_exam(req: LevelExamRequest) -> dict:
     if already_passed:
         return {"error": "This level transition has already been passed."}
 
+    current_rank, next_rank = _rank_state(
+        level_1_to_2_passed=memory.level_exam_passed(learner_id=learner_id, language=language, from_level=1, to_level=2),
+        level_2_to_3_passed=memory.level_exam_passed(learner_id=learner_id, language=language, from_level=2, to_level=3),
+    )
+
     daily_game_types = [
         game
         for game, _activity_id in _daily_plan_for_topic_day(
@@ -3269,24 +3531,7 @@ def take_level_exam(req: LevelExamRequest) -> dict:
             from_level=from_level,
             to_level=target_level,
         )
-        desired_level = max(current_level, target_level)
-        memory.set_language_level(learner_id=learner_id, language=language, level=desired_level)
-        memory.mark_topic_closed(
-            learner_id=learner_id,
-            language=language,
-            topic_key=topic.topic_key,
-            closed_day_iso=today_iso,
-            closed_level=target_level,
-            reason=f"level_exam_{from_level}_to_{target_level}",
-        )
-        # Defer topic lesson refresh to next process restart: runtime cache remains stable now,
-        # but persisted flag forces regeneration the next time cache is cold.
-        memory.set_topic_lessons_refresh_required(
-            language=language,
-            topic_key=topic.topic_key,
-            required=True,
-        )
-        promoted = desired_level > current_level
+        promoted = True
 
     refreshed_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
     refreshed_progress = memory.load_or_create_daily_topic_progress(
@@ -3322,6 +3567,10 @@ def take_level_exam(req: LevelExamRequest) -> dict:
         today_iso=today_iso,
         daily_progress=refreshed_base_daily,
     )
+    refreshed_rank, refreshed_next_rank = _rank_state(
+        level_1_to_2_passed=memory.level_exam_passed(learner_id=learner_id, language=language, from_level=1, to_level=2),
+        level_2_to_3_passed=memory.level_exam_passed(learner_id=learner_id, language=language, from_level=2, to_level=3),
+    )
     logger.info(
         "level_exam_refresh learner_id=%s language=%s promoted=%s refreshed_level=%s refreshed_level_state=%s refreshed_daily_score=%s",
         learner_id,
@@ -3349,10 +3598,16 @@ def take_level_exam(req: LevelExamRequest) -> dict:
         "promoted": promoted,
         "current_level": refreshed_level,
         "target_level": target_level,
+        "current_rank": refreshed_rank,
+        "next_rank": refreshed_next_rank,
         "exam_score": exam_score,
         "pass_threshold": pass_threshold,
         "feedback": (
-            f"Level exam passed. Promoted to level {target_level}."
+            (
+                f"Rank exam passed. Promoted from {current_rank.title()} to {next_rank.title()}."
+                if next_rank
+                else "Rank exam passed."
+            )
             if passed
             else "Level exam failed. Keep training and retry when metrics improve."
         ),
@@ -3577,11 +3832,16 @@ def _mark_daily_game_progress(
     if language not in AVAILABLE_LANGUAGES:
         return None
 
-    topic, _progress, today_iso = _daily_topic_for(learner_id=learner_id, language=language)
+    topic, progress, today_iso = _daily_topic_for(learner_id=learner_id, language=language)
+    today_level = int(progress.level_state or memory.level_for_language(learner_id, language, default_level=1))
     daily_plan = dict(
         _daily_plan_for_topic_day(
             topic=topic,
-            level=level,
+            # Daily completion must follow the learner's stored level for the day, not the
+            # fallback display level of a card payload. Some services clamp activity content
+            # to their highest authored level while the workday still belongs to a higher
+            # numeric learner level.
+            level=today_level,
             learner_id=learner_id,
             day_iso=today_iso,
         )

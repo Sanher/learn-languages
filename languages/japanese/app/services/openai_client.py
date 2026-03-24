@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 import httpx
+from ..topic_flow import TOPIC_STAGES, normalize_topic_covers, normalize_topic_stage
 from .runtime_config import get_setting
 
 logger = logging.getLogger("learn_languages.japanese.openai")
@@ -180,23 +181,23 @@ class OpenAIPlanner:
         normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
         return normalized[:80] if normalized else ""
 
-    def _normalize_topic_sequence_entry(self, raw: Any, *, index: int) -> dict[str, str] | None:
+    def _normalize_topic_sequence_entry(self, raw: Any, *, index: int) -> dict[str, Any] | None:
         if not isinstance(raw, dict):
             return None
         title = str(raw.get("title") or "").strip()
         description = str(raw.get("description") or "").strip()
-        stage = str(raw.get("stage") or "").strip().lower()
-        if stage not in {"basic", "intermediate", "advanced"}:
-            stage = "basic"
+        stage = normalize_topic_stage(str(raw.get("stage") or "").strip().lower())
         candidate_key = str(raw.get("topic_key") or "").strip()
         topic_key = self._slugify_topic_key(candidate_key) or self._slugify_topic_key(title) or f"topic_{index + 1}"
-        if not title or not description:
+        covers = list(normalize_topic_covers(raw.get("covers"), stage=stage))
+        if not title or not description or not covers:
             return None
         return {
             "topic_key": topic_key,
             "title": title,
             "description": description,
             "stage": stage,
+            "covers": covers,
         }
 
     def _is_translation_circuit_open(self) -> bool:
@@ -601,9 +602,11 @@ class OpenAIPlanner:
         *,
         language: str,
         fallback_topics: list[dict[str, Any]],
+        competency_requirements: dict[str, list[str]] | None = None,
+        language_guidance: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        stage_order = {"basic": 0, "intermediate": 1, "advanced": 2}
-        normalized_fallback: list[dict[str, str]] = []
+        stage_order = {stage: idx for idx, stage in enumerate(TOPIC_STAGES)}
+        normalized_fallback: list[dict[str, Any]] = []
         for idx, row in enumerate(fallback_topics):
             normalized = self._normalize_topic_sequence_entry(row, index=idx)
             if normalized is not None:
@@ -615,8 +618,24 @@ class OpenAIPlanner:
                     "title": "Identity and Daily Plans",
                     "description": "Build sentences about who you are, what happens today, and plans for tomorrow.",
                     "stage": "basic",
+                    "covers": [
+                        "identity",
+                        "basic_sentence_roles",
+                        "time_and_routine",
+                        "basic_questions",
+                        "everyday_actions",
+                    ],
                 }
             ]
+        normalized_requirements = {
+            normalize_topic_stage(stage): list(normalize_topic_covers(values, stage=stage))
+            for stage, values in dict(competency_requirements or {}).items()
+        }
+        normalized_guidance = {
+            str(key): str(value).strip()
+            for key, value in dict(language_guidance or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
         if not self.api_key:
             return {
                 "source": "fallback",
@@ -627,8 +646,9 @@ class OpenAIPlanner:
             "You are a Japanese curriculum planner. "
             "Return strict JSON only, no markdown. "
             "Output key 'topics' with a list ordered from basic to advanced. "
-            "Each topic item must include: topic_key, title, description, stage. "
+            "Each topic item must include: topic_key, title, description, stage, covers. "
             "Allowed stage values: basic, intermediate, advanced. "
+            "The covers field must be a JSON array of competency tags. "
             "Keep title/description in English."
         )
         user_prompt = (
@@ -636,6 +656,10 @@ class OpenAIPlanner:
             "Create a practical progression of Japanese topics from basic to advanced.\n"
             "Return 6 to 15 topics.\n"
             "Use short stable topic_key values in snake_case.\n"
+            "Every required competency must appear in at least one topic of the matching stage.\n"
+            "Do not invent competency tags outside the provided list.\n"
+            f"Required competencies by stage={json.dumps(normalized_requirements, ensure_ascii=False)}\n"
+            f"Language-specific guidance={json.dumps(normalized_guidance, ensure_ascii=False)}\n"
             f"Fallback topic sample={json.dumps(normalized_fallback, ensure_ascii=False)}"
         )
 
@@ -693,7 +717,7 @@ class OpenAIPlanner:
                 "error": "Missing topics in topic sequence output.",
             }
 
-        normalized_topics: list[dict[str, str]] = []
+        normalized_topics: list[dict[str, Any]] = []
         for idx, row in enumerate(topics_raw):
             normalized = self._normalize_topic_sequence_entry(row, index=idx)
             if normalized is not None:

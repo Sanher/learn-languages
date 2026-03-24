@@ -1,5 +1,6 @@
 const currentLanguageEl = document.getElementById('current-language');
 const currentLevelEl = document.getElementById('current-level');
+const levelRankWarningEl = document.getElementById('level-rank-warning');
 const todayScoreEl = document.getElementById('today-score');
 const topbarLevelProgressEl = document.getElementById('topbar-level-progress');
 const gameZoneEl = document.getElementById('game-zone');
@@ -36,6 +37,7 @@ let translationPreferences = {
 let secondaryTranslationUnavailable = false;
 let closedTopics = [];
 let closedTopicsVisible = false;
+let closedTopicsSummary = null;
 let isReviewMode = false;
 const retryCounters = new Map();
 const extraGameCardsByType = new Map();
@@ -248,6 +250,12 @@ function renderTranslatedList(record, field) {
     .join('');
 }
 
+function titleCaseWord(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return '';
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 function levelProgressState() {
   const score = Number((dailyProgress && dailyProgress.daily_score) || 0);
   const fallbackTarget = Number((dailyProgress && dailyProgress.topic_day_target_score) || 150);
@@ -259,7 +267,7 @@ function levelProgressState() {
   const normalizedCurrentLevel = Number.isFinite(currentLevelValue) ? currentLevelValue : 1;
   const nextLevelRaw = raw.next_level;
   const nextLevelValue = (nextLevelRaw == null || nextLevelRaw === '')
-    ? (normalizedCurrentLevel >= 3 ? null : (normalizedCurrentLevel + 1))
+    ? (normalizedCurrentLevel + 1)
     : Number(nextLevelRaw);
   const pointsTargetValue = Math.max(1, Number(raw.points_target ?? fallbackTarget));
   const pointsCurrentValue = Math.max(0, Number(raw.points_current ?? score));
@@ -280,20 +288,31 @@ function levelProgressState() {
     progressPercent: Number.isFinite(progressPercentValue) ? progressPercentValue : 0,
     readyForExam: Boolean(raw.ready_for_level_exam),
     levelCapReached: Boolean(raw.level_cap_reached),
+    currentRank: String(raw.current_rank || (dailyProgress && dailyProgress.current_rank) || 'beginner'),
+    nextRank: raw.next_rank ? String(raw.next_rank) : null,
+    weeklyExamMinLevel: Number(raw.weekly_exam_min_level || (dailyProgress && dailyProgress.weekly_exam_min_level) || 5),
     statusMessage: String(raw.status_message || '').trim(),
   };
+}
+
+function levelRankWarningText() {
+  const progress = levelProgressState();
+  if (progress.currentLevel < 5) return '';
+  const currentRank = titleCaseWord(progress.currentRank);
+  const nextRank = progress.nextRank ? titleCaseWord(progress.nextRank) : '';
+  if (nextRank) {
+    return `Level 5+ reached in ${currentRank}. Weekly topic exams can unlock from here while you build toward the ${nextRank} rank exam.`;
+  }
+  return `${currentRank} rank active. Numeric levels continue beyond 5 while you keep closing topics.`;
 }
 
 function renderLevelProgressBlock(options = {}) {
   const compact = Boolean(options.compact);
   const includeNotice = Boolean(options.includeNotice);
   const progress = levelProgressState();
-  const heading = progress.levelCapReached
-    ? 'Level progress · max reached'
-    : `Level ${progress.currentLevel} -> ${progress.nextLevel}`;
-  const summary = progress.levelCapReached
-    ? 'Maximum level reached.'
-    : `${progress.pointsCurrent}/${progress.pointsTarget} accumulated points · ${progress.pointsRemaining} needed`;
+  const rankPrefix = progress.currentRank ? `${titleCaseWord(progress.currentRank)} · ` : '';
+  const heading = `${rankPrefix}Level ${progress.currentLevel} -> ${progress.nextLevel}`;
+  const summary = `${progress.pointsCurrent}/${progress.pointsTarget} accumulated points · ${progress.pointsRemaining} needed`;
   const status = progress.statusMessage || (progress.readyForExam
     ? 'Ready for level exam.'
     : summary);
@@ -315,6 +334,17 @@ function renderLevelProgressBlock(options = {}) {
   `;
 }
 
+function closedTopicsSummaryState() {
+  const summary = closedTopicsSummary && typeof closedTopicsSummary === 'object'
+    ? closedTopicsSummary
+    : {};
+  return {
+    currentRank: titleCaseWord(summary.current_rank || (dailyProgress && dailyProgress.current_rank) || 'beginner'),
+    topicLevelCurrent: Number(summary.topic_level_current || 0),
+    globalRankLevel: Number(summary.global_rank_level || 0),
+  };
+}
+
 function updateTopbar() {
   currentLanguageEl.textContent = languageLabel(currentLanguage);
   currentLevelEl.textContent = String(currentLevel);
@@ -327,6 +357,11 @@ function updateTopbar() {
   const scoreMax = dailyScoreMaxValue();
   if (todayScoreEl) {
     todayScoreEl.textContent = `Today's score: ${score}/${scoreMax}`;
+  }
+  if (levelRankWarningEl) {
+    const warningText = levelRankWarningText();
+    levelRankWarningEl.textContent = warningText;
+    levelRankWarningEl.classList.toggle('hidden', !warningText);
   }
   if (topbarLevelProgressEl) {
     topbarLevelProgressEl.innerHTML = renderLevelProgressBlock({ compact: true, includeNotice: false });
@@ -544,8 +579,17 @@ function renderLessonPanel() {
     ? Object.entries(failures).map(([game, count]) => `${game}: ${count}`).join(' | ')
     : 'No failures registered yet.';
   const weeklyDue = Boolean(dailyProgress && dailyProgress.weekly_exam_due);
-  const weeklyExamUnlocked = weeklyDue && lessonDone && completedCount >= totalCount;
-  const weeklyButtonLabel = weeklyExamUnlocked ? 'Take weekly mini-exam' : 'Weekly mini-exam locked';
+  const weeklyLevelReady = Boolean(dailyProgress && dailyProgress.weekly_exam_level_ready);
+  const weeklyMasteryReady = Boolean(dailyProgress && dailyProgress.topic_mastery_ready_for_weekly_exam);
+  const weeklyMinLevel = Number((dailyProgress && dailyProgress.weekly_exam_min_level) || 5);
+  const weeklyExamUnlocked = weeklyDue && lessonDone && completedCount >= totalCount && weeklyLevelReady && weeklyMasteryReady;
+  const weeklyButtonLabel = !weeklyDue
+    ? 'Weekly mini-exam not due'
+    : !weeklyLevelReady
+      ? `Weekly mini-exam locked (reach level ${weeklyMinLevel})`
+      : !weeklyMasteryReady
+        ? 'Weekly mini-exam locked (build topic mastery)'
+        : 'Take weekly mini-exam';
   const weeklyDisabled = weeklyExamUnlocked ? '' : 'disabled';
   const readyTo2 = Boolean(dailyProgress && dailyProgress.ready_to_level_2);
   const readyTo3 = Boolean(dailyProgress && dailyProgress.ready_to_level_3);
@@ -562,9 +606,15 @@ function renderLessonPanel() {
     className: 'muted',
     multiline: true,
   });
+  const closedSummary = closedTopicsSummaryState();
   const closedTopicsHtml = closedTopicsVisible
     ? `
       <div class="lesson-closed-topics">
+        <div class="lesson-closed-summary">
+          <p><strong>Current rank:</strong> ${escapeHtml(closedSummary.currentRank || 'Beginner')}</p>
+          <p><strong>Topic level in this rank:</strong> ${escapeHtml(closedSummary.topicLevelCurrent || 0)}</p>
+          <p><strong>Global Level:</strong> ${escapeHtml(closedSummary.globalRankLevel || 0)}</p>
+        </div>
         ${
           closedTopics.length === 0
             ? '<p class="muted">No learned topics yet.</p>'
@@ -572,7 +622,12 @@ function renderLessonPanel() {
               <ul class="lesson-closed-list">
                 ${closedTopics.map((topic) => `
                   <li class="lesson-closed-item">
-                    <span>${escapeHtml(topic.topic_title || topic.topic_key)} · ${escapeHtml(topic.closed_day_iso || '')} · level ${escapeHtml(topic.closed_level || '')}</span>
+                    <span>
+                      ${escapeHtml(topic.topic_title || topic.topic_key)}
+                      · ${escapeHtml(topic.closed_day_iso || '')}
+                      · ${escapeHtml(titleCaseWord(topic.closed_rank || 'beginner'))}
+                      · topic level ${escapeHtml(topic.closed_level || '')}
+                    </span>
                     <button
                       type="button"
                       class="ghost-btn closed-topic-review-btn"
@@ -775,10 +830,16 @@ function renderSingleGame(game) {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean)
-      .filter((line) => !/^Options:/i.test(line));
+      .filter((line) => !/^Options:/i.test(line))
+      .filter((line) => !/^Translation hint:/i.test(line));
+    const literalTranslationHtml = renderTranslatedField(payload, 'literal_translation', {
+      label: 'Literal',
+      className: 'game-meta-line',
+    });
     promptHtml = `
       <div class="prompt game-meta">
         ${promptLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
+        ${literalTranslationHtml}
       </div>
     `;
     promptIncludesTranslation = false;
@@ -1509,11 +1570,14 @@ function renderEvaluation(data) {
     className: 'result-line',
     multiline: true,
   });
-  const translationHtml = renderTranslatedField(data, 'literal_translation', {
+  const translationSource = String(data.literal_translation || '').trim()
+    ? data
+    : ((data.display && data.display.show_literal_translation) ? data.display : null);
+  const translationHtml = translationSource ? renderTranslatedField(translationSource, 'literal_translation', {
     label: 'Literal translation',
     className: 'result-line',
     multiline: true,
-  });
+  }) : '';
   const readingAccuracyHtml = data.reading_accuracy != null
     ? `<p class="result-line"><strong>Reading:</strong> ${escapeHtml(Math.round(Number(data.reading_accuracy) * 100))}%</p>`
     : '';
@@ -1643,25 +1707,16 @@ async function evaluateSelectedGame(isRetry) {
     }
 
     refreshSecondaryTranslationAvailability(data);
-    let collapseDailyPanelAfterEvaluation = false;
     if (!isReviewMode && data.daily_progress) {
       dailyProgress = data.daily_progress;
       if (areDailyGamesCompleted()) {
-        dailyGamesCollapsed = true;
-        if (selectedGame && isDailyGameType(selectedGame.game_type)) {
-          selectedGame = null;
-        }
-        collapseDailyPanelAfterEvaluation = true;
+        // Keep the last evaluated daily game open so the learner can still read the feedback.
+        dailyGamesCollapsed = false;
       }
       refreshAvailableGameCards();
       renderSidebar(availableGameCards);
     }
     updateTopbar();
-    if (collapseDailyPanelAfterEvaluation) {
-      renderSingleGame(selectedGame);
-      wireGameActions();
-      return;
-    }
     renderEvaluation(data);
   } finally {
     isEvaluatingGame = false;
@@ -1977,6 +2032,11 @@ async function loadClosedTopics() {
     return false;
   }
   closedTopics = Array.isArray(data.closed_topics) ? data.closed_topics : [];
+  closedTopicsSummary = {
+    current_rank: String(data.current_rank || 'beginner'),
+    topic_level_current: Number(data.topic_level_current || 0),
+    global_rank_level: Number(data.global_rank_level || 0),
+  };
   return true;
 }
 
@@ -2013,6 +2073,7 @@ async function startTopicReview(topicKey) {
 
   isReviewMode = true;
   closedTopicsVisible = false;
+  closedTopicsSummary = null;
   dailyTopic = data.topic || dailyTopic;
   dailyLesson = data.lesson || dailyLesson;
   dailyGameCards = Array.isArray(data.review_games) ? data.review_games : [];
@@ -2541,6 +2602,7 @@ async function loadDailyGame() {
   sentenceOrderPenaltyByAttempt.clear();
   closedTopicsVisible = false;
   closedTopics = [];
+  closedTopicsSummary = null;
   lessonCollapsed = isLessonCompleted();
   dailyGamesCollapsed = areDailyGamesCompleted();
   if (dailyGamesCollapsed && selectedGame && isDailyGameType(selectedGame.game_type)) {

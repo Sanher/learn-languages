@@ -131,6 +131,28 @@ class ClosedTopic:
     closed_day_iso: str
     closed_level: int
     reason: str
+    closed_rank: str = ""
+    covers_json: str = "[]"
+
+    def covers(self) -> tuple[str, ...]:
+        raw = (self.covers_json or "").strip()
+        if not raw:
+            return tuple()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return tuple()
+        if not isinstance(parsed, list):
+            return tuple()
+        covers: list[str] = []
+        seen: set[str] = set()
+        for item in parsed:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            covers.append(value)
+        return tuple(covers)
 
 
 @dataclass
@@ -224,6 +246,8 @@ class ProgressMemory:
                     closed_day_iso TEXT NOT NULL,
                     closed_level INTEGER NOT NULL DEFAULT 1,
                     reason TEXT NOT NULL DEFAULT '',
+                    closed_rank TEXT NOT NULL DEFAULT '',
+                    covers_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY (learner_id, language, topic_key)
                 )
                 """
@@ -302,6 +326,8 @@ class ProgressMemory:
             self._ensure_column(conn, "learner_preferences", "secondary_translation_lang", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "topic_lessons_cache", "refresh_required", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "topic_sequence_cache", "source", "TEXT NOT NULL DEFAULT 'fallback'")
+            self._ensure_column(conn, "closed_topics", "closed_rank", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "closed_topics", "covers_json", "TEXT NOT NULL DEFAULT '[]'")
         logger.info("memory_schema_ready db_path=%s", self.db_path)
 
     @staticmethod
@@ -1047,6 +1073,7 @@ class ProgressMemory:
         learner_id: str,
         language: str,
         level_state: int,
+        topic_key: str | None = None,
         up_to_day_iso: str | None = None,
     ) -> int:
         params: list[Any] = [learner_id, language, int(max(1, level_state))]
@@ -1057,6 +1084,9 @@ class ProgressMemory:
             WHERE learner_id = ? AND language = ? AND level_state = ?
             """
         ]
+        if topic_key:
+            query.append("AND topic_key = ?")
+            params.append(str(topic_key))
         if up_to_day_iso:
             query.append("AND day_iso <= ?")
             params.append(str(up_to_day_iso))
@@ -1064,10 +1094,11 @@ class ProgressMemory:
             row = conn.execute("\n".join(query), tuple(params)).fetchone()
         total = int(row[0] if row and row[0] is not None else 0)
         logger.debug(
-            "accumulated_level_score_loaded learner_id=%s language=%s level_state=%s up_to_day=%s total=%s",
+            "accumulated_level_score_loaded learner_id=%s language=%s level_state=%s topic=%s up_to_day=%s total=%s",
             learner_id,
             language,
             int(max(1, level_state)),
+            topic_key or "all_topics",
             up_to_day_iso or "latest",
             total,
         )
@@ -1262,11 +1293,20 @@ class ProgressMemory:
         closed_day_iso: str,
         closed_level: int,
         reason: str,
+        closed_rank: str = "",
+        covers: list[str] | tuple[str, ...] | None = None,
     ) -> None:
+        normalized_rank = str(closed_rank or "").strip().lower()
+        normalized_covers = [
+            str(item or "").strip()
+            for item in list(covers or [])
+            if str(item or "").strip()
+        ]
+        covers_json = json.dumps(list(dict.fromkeys(normalized_covers)), ensure_ascii=False)
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT closed_level
+                SELECT closed_level, COALESCE(closed_rank, ''), COALESCE(covers_json, '[]')
                 FROM closed_topics
                 WHERE learner_id = ? AND language = ? AND topic_key = ?
                 """,
@@ -1274,30 +1314,43 @@ class ProgressMemory:
             ).fetchone()
             if row:
                 next_level = max(int(row[0]), int(closed_level))
+                next_rank = normalized_rank or str(row[1] or "").strip().lower()
+                try:
+                    existing_covers = json.loads(str(row[2] or "[]"))
+                except json.JSONDecodeError:
+                    existing_covers = []
+                merged_covers = [
+                    str(item or "").strip()
+                    for item in list(existing_covers) + normalized_covers
+                    if str(item or "").strip()
+                ]
+                covers_json = json.dumps(list(dict.fromkeys(merged_covers)), ensure_ascii=False)
                 conn.execute(
                     """
                     UPDATE closed_topics
-                    SET closed_day_iso = ?, closed_level = ?, reason = ?
+                    SET closed_day_iso = ?, closed_level = ?, reason = ?, closed_rank = ?, covers_json = ?
                     WHERE learner_id = ? AND language = ? AND topic_key = ?
                     """,
-                    (closed_day_iso, next_level, reason, learner_id, language, topic_key),
+                    (closed_day_iso, next_level, reason, next_rank, covers_json, learner_id, language, topic_key),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO closed_topics (
-                        learner_id, language, topic_key, closed_day_iso, closed_level, reason
+                        learner_id, language, topic_key, closed_day_iso, closed_level, reason, closed_rank, covers_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (learner_id, language, topic_key, closed_day_iso, int(closed_level), reason),
+                    (learner_id, language, topic_key, closed_day_iso, int(closed_level), reason, normalized_rank, covers_json),
                 )
         logger.info(
-            "topic_closed_saved learner_id=%s language=%s topic=%s level=%s reason=%s",
+            "topic_closed_saved learner_id=%s language=%s topic=%s level=%s rank=%s covers=%s reason=%s",
             learner_id,
             language,
             topic_key,
             closed_level,
+            normalized_rank or "unknown",
+            len(normalized_covers),
             reason,
         )
 
@@ -1305,7 +1358,7 @@ class ProgressMemory:
         with self._conn() as conn:
             rows = conn.execute(
                 """
-                SELECT learner_id, language, topic_key, closed_day_iso, closed_level, reason
+                SELECT learner_id, language, topic_key, closed_day_iso, closed_level, reason, COALESCE(closed_rank, ''), COALESCE(covers_json, '[]')
                 FROM closed_topics
                 WHERE learner_id = ? AND language = ?
                 ORDER BY closed_day_iso DESC

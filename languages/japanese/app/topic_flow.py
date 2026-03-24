@@ -16,6 +16,53 @@ from language_games.services import (
 
 logger = logging.getLogger("learn_languages.japanese.topic_flow")
 TOPIC_DAILY_ROTATION_COUNT = 4
+TOPIC_STAGES = ("basic", "intermediate", "advanced")
+# These competency tags are language-agnostic gates for rank progression.
+# Each language can then explain how those competencies show up in its own grammar.
+RANK_COMPETENCIES: dict[str, tuple[str, ...]] = {
+    "basic": (
+        "identity",
+        "basic_sentence_roles",
+        "time_and_routine",
+        "basic_questions",
+        "everyday_actions",
+    ),
+    "intermediate": (
+        "past_negative",
+        "linking_actions",
+        "modality",
+        "register_control",
+        "reasons_experiences",
+    ),
+    "advanced": (
+        "conditionals",
+        "subordination",
+        "voice_and_valency",
+        "discourse_connectors",
+        "formal_register",
+    ),
+}
+# Guidance stays language-specific so OpenAI can generate topic sequences that still
+# respect the shared competency contract while sounding natural for the target language.
+LANGUAGE_COMPETENCY_GUIDANCE: dict[str, dict[str, str]] = {
+    "ja": {
+        "identity": "Self-introduction, identity statements, and simple copula patterns in Japanese.",
+        "basic_sentence_roles": "Core sentence roles in Japanese, especially topic/subject/object marking and SOV order.",
+        "time_and_routine": "Talking about today, tomorrow, dates, and routine actions in Japanese.",
+        "basic_questions": "Forming and answering simple Japanese questions.",
+        "everyday_actions": "Using common daily Japanese verbs in short statements.",
+        "past_negative": "Past, negative, and past-negative forms in Japanese.",
+        "linking_actions": "Connecting actions in Japanese, including te-form style chaining.",
+        "modality": "Ability, intention, permission, obligation, or related modality in Japanese.",
+        "register_control": "Handling plain versus polite Japanese register appropriately.",
+        "reasons_experiences": "Explaining reasons and basic experiences in Japanese.",
+        "conditionals": "Conditional and hypothetical patterns in Japanese.",
+        "subordination": "Relative clauses, embedded statements, and other subordinate structures in Japanese.",
+        "voice_and_valency": "Passive, causative, and transitive/intransitive patterns in Japanese.",
+        "discourse_connectors": "Connecting and contrasting ideas across longer Japanese discourse.",
+        "formal_register": "Formal or socially appropriate Japanese phrasing.",
+    }
+}
 
 
 @dataclass(frozen=True)
@@ -50,6 +97,8 @@ class TopicDefinition:
     lessons_by_level: dict[int, LessonDefinition]
     daily_games: tuple[TopicGamePlan, ...]
     extra_games: tuple[TopicGamePlan, ...]
+    stage: str = "basic"
+    covers: tuple[str, ...] = ()
 
     def lesson_for_level(self, level: int) -> LessonDefinition:
         keys = sorted(self.lessons_by_level.keys())
@@ -184,11 +233,66 @@ JA_TOPIC_IDENTITY_AND_PLANS = TopicDefinition(
             },
         ),
     ),
+    stage="basic",
+    covers=(
+        "identity",
+        "basic_sentence_roles",
+        "time_and_routine",
+        "basic_questions",
+        "everyday_actions",
+    ),
 )
 
 TOPICS_BY_LANGUAGE: dict[str, tuple[TopicDefinition, ...]] = {
     "ja": (JA_TOPIC_IDENTITY_AND_PLANS,),
 }
+
+
+def normalize_topic_stage(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in TOPIC_STAGES else "basic"
+
+
+def required_competencies_for_stage(stage: str) -> tuple[str, ...]:
+    return RANK_COMPETENCIES.get(normalize_topic_stage(stage), ())
+
+
+def all_competency_tags() -> tuple[str, ...]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for values in RANK_COMPETENCIES.values():
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            tags.append(value)
+    return tuple(tags)
+
+
+def language_competency_guidance(language: str) -> dict[str, str]:
+    normalized_language = str(language or "").strip().lower()
+    return dict(LANGUAGE_COMPETENCY_GUIDANCE.get(normalized_language, {}))
+
+
+def normalize_topic_covers(raw: object, *, stage: str) -> tuple[str, ...]:
+    if isinstance(raw, str):
+        candidates = [chunk.strip() for chunk in raw.split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        candidates = [str(item or "").strip() for item in raw]
+    else:
+        candidates = []
+
+    allowed = set(all_competency_tags())
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate not in allowed or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    if normalized:
+        return tuple(normalized)
+    return tuple()
 
 
 def topic_for_day(learner_id: str, language: str, target_day: date) -> TopicDefinition:

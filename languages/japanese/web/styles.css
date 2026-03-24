@@ -75,6 +75,12 @@ body {
   color: #fca5a5;
 }
 
+.level-rank-warning {
+  color: #facc15;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .level-progress {
   margin-top: 10px;
   padding: 10px;
@@ -286,6 +292,17 @@ button.is-loading {
   border-radius: 8px;
   padding: 10px;
   background: #020617;
+}
+
+.lesson-closed-summary {
+  margin-bottom: 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.lesson-closed-summary p {
+  margin: 0;
+  color: #cbd5e1;
 }
 
 .lesson-closed-list {
