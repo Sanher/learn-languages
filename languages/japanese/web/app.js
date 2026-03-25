@@ -11,6 +11,14 @@ const secondaryTranslationStatusEl = document.getElementById('secondary-translat
 const LANGUAGE_ALIASES = {
   ja: 'Japanese',
 };
+const PARTICLE_ROMAJI = {
+  は: 'wa',
+  を: 'o',
+  に: 'ni',
+  で: 'de',
+  と: 'to',
+  が: 'ga',
+};
 const TOPIC_HINT_STORAGE_KEY = 'learn_languages_last_topic_title';
 
 let availableLanguages = ['ja'];
@@ -44,8 +52,8 @@ const extraGameCardsByType = new Map();
 const extraLoadedCards = new Map();
 const sentenceOrderPenaltyByAttempt = new Map();
 const ttsAudioCache = new Map();
-const ttsPlayCounters = new Map();
-const ttsWarningShownByGame = new Set();
+const ttsRequestCounters = new Map();
+const ttsWarningShownByCacheKey = new Set();
 let activeAudio = null;
 let activeRecorder = null;
 let activeRecorderStream = null;
@@ -58,6 +66,7 @@ let kanaElapsedTicker = null;
 const PRONUNCIATION_DEFAULT_AUDIO_SECONDS = 2.0;
 let pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
 let isEvaluatingGame = false;
+let loadingExtraGameType = '';
 
 function apiUrl(path) {
   const cleanPath = String(path || '').replace(/^\/+/, '');
@@ -340,9 +349,142 @@ function closedTopicsSummaryState() {
     : {};
   return {
     currentRank: titleCaseWord(summary.current_rank || (dailyProgress && dailyProgress.current_rank) || 'beginner'),
-    topicLevelCurrent: Number(summary.topic_level_current || 0),
-    globalRankLevel: Number(summary.global_rank_level || 0),
+    topicLevelCurrent: Number(summary.topic_level_current || (dailyProgress && dailyProgress.topic_level_current) || 0),
+    globalRankLevel: Number(summary.global_rank_level || (dailyProgress && dailyProgress.global_rank_level) || 0),
   };
+}
+
+function currentTopicStage() {
+  return String((dailyTopic && dailyTopic.stage) || '').trim().toLowerCase();
+}
+
+function isBeginnerTopicSupport() {
+  return currentTopicStage() === 'basic' || String((dailyProgress && dailyProgress.current_rank) || '').trim().toLowerCase() === 'beginner';
+}
+
+function hasJapaneseScript(value) {
+  return /[\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff]/.test(String(value || ''));
+}
+
+function hiraganaToKatakana(value) {
+  return Array.from(String(value || ''))
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code >= 0x3041 && code <= 0x3096
+        ? String.fromCharCode(code + 0x60)
+        : char;
+    })
+    .join('');
+}
+
+function katakanaToHiragana(value) {
+  return Array.from(String(value || ''))
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code >= 0x30A1 && code <= 0x30F6
+        ? String.fromCharCode(code - 0x60)
+        : char;
+    })
+    .join('');
+}
+
+function fillSupportTemplate(template, selectedValue) {
+  const values = String(selectedValue || '')
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (values.length === 0) return String(template || '');
+  let result = String(template || '');
+  for (let index = 0; index < (result.match(/__/g) || []).length; index += 1) {
+    const replacement = values[index] || values[values.length - 1];
+    result = result.replace('__', replacement);
+  }
+  return result;
+}
+
+function particleOptionToRomaji(option) {
+  return String(option || '')
+    .split('/')
+    .map((part) => {
+      const normalized = part.trim();
+      return PARTICLE_ROMAJI[normalized] || normalized;
+    })
+    .join(' / ');
+}
+
+function evaluationGuideLine(data) {
+  const display = data && typeof data.display === 'object' ? data.display : {};
+  if (selectedGame && selectedGame.game_type === 'grammar_particle_fix') {
+    const correctParticle = String(data.correct_particle || '').trim();
+    if (display.kanji_line && correctParticle) {
+      return fillSupportTemplate(display.kanji_line, correctParticle);
+    }
+  }
+  const candidates = [
+    display.kanji_line,
+    data.expected_sentence,
+    data.resolved_sentence,
+    data.expected_text,
+    data.kanji_mora_line,
+    selectedGame && selectedGame.payload ? selectedGame.payload.japanese_text : '',
+    selectedGame && selectedGame.payload ? selectedGame.payload.expected_text : '',
+    selectedGame ? selectedGame.prompt : '',
+  ];
+  return candidates
+    .map((value) => String(value || '').trim())
+    .find((value) => value && hasJapaneseScript(value)) || '';
+}
+
+function evaluationGuideRomanizedLine(data) {
+  const display = data && typeof data.display === 'object' ? data.display : {};
+  if (selectedGame && selectedGame.game_type === 'grammar_particle_fix') {
+    const correctParticle = String(data.correct_particle || '').trim();
+    if (display.romanized_line && correctParticle) {
+      return fillSupportTemplate(display.romanized_line, particleOptionToRomaji(correctParticle));
+    }
+  }
+  const candidates = [
+    display.romanized_line,
+    data.expected_romaji,
+    selectedGame && selectedGame.payload ? selectedGame.payload.romanized_line : '',
+  ];
+  return candidates
+    .map((value) => String(value || '').trim())
+    .find(Boolean) || '';
+}
+
+function renderKanaGuideHtml(data, translationSource) {
+  if (currentLanguage !== 'ja') return '';
+  const japaneseLine = evaluationGuideLine(data);
+  if (!japaneseLine) return '';
+  const romanizedLine = evaluationGuideRomanizedLine(data);
+  const hiraganaLine = katakanaToHiragana(japaneseLine);
+  const katakanaLine = hiraganaToKatakana(japaneseLine);
+  const meaningHtml = translationSource
+    ? renderTranslatedField(translationSource, 'literal_translation', {
+      label: 'Meaning',
+      className: 'result-line',
+      multiline: true,
+    })
+    : '';
+  const block = `
+    <div class="result-block kana-guide-block">
+      <p class="result-line"><strong>Japanese:</strong> ${escapeHtml(japaneseLine)}</p>
+      ${romanizedLine ? `<p class="result-line"><strong>Romanized:</strong> ${escapeHtml(romanizedLine)}</p>` : ''}
+      <p class="result-line"><strong>Hiragana:</strong> ${escapeHtml(hiraganaLine)}</p>
+      <p class="result-line"><strong>Katakana:</strong> ${escapeHtml(katakanaLine)}</p>
+      ${meaningHtml}
+    </div>
+  `;
+  if (isBeginnerTopicSupport()) {
+    return block;
+  }
+  return `
+    <details class="kana-guide-details">
+      <summary>Show kana guide</summary>
+      ${block}
+    </details>
+  `;
 }
 
 function updateTopbar() {
@@ -419,6 +561,20 @@ function renderDailyLoadingState() {
       <p class="muted">Loading today&apos;s board...</p>
     `;
   }
+}
+
+function renderExtraGameLoadingState(game) {
+  const gameLabel = String((game && (game.display_name || game.game_type)) || 'extra game').trim();
+  gameZoneEl.classList.remove('hidden');
+  gameZoneEl.innerHTML = `
+    <section class="game-card game-card-loading">
+      <div class="loading-row">
+        <span class="btn-spinner" aria-hidden="true"></span>
+        <strong>Loading extra game...</strong>
+      </div>
+      <p class="muted loading-topic-hint">Preparing ${escapeHtml(gameLabel)}.</p>
+    </section>
+  `;
 }
 
 function renderDailyLoadErrorState(message) {
@@ -656,11 +812,16 @@ function renderLessonPanel() {
           ${lessonDone ? 'Lesson completed.' : 'Lesson pending.'}
           ${lessonDone ? ' You can review the theory at any time.' : ` Complete it to unlock today\'s ${totalCount} games.`}
         </p>
+        <p class="muted">Topic level in this rank: ${closedSummary.topicLevelCurrent}. Global level: ${closedSummary.globalRankLevel}.</p>
         ${lessonLevelProgressHtml}
         <div class="lesson-actions lesson-actions-inline">
           ${lessonDone ? '<button id="review-lesson-btn" type="button" class="ghost-btn">Review lesson</button>' : lessonButton}
           <button id="refresh-topic-sequence-btn" type="button" class="ghost-btn">Refresh topic list now</button>
+          <button id="closed-topics-btn" class="ghost-btn" type="button">
+            ${closedTopicsVisible ? 'Hide learned topics' : `Show learned topics (${closedTopicsCount})`}
+          </button>
         </div>
+        ${closedTopicsHtml}
       </section>
     `;
   }
@@ -1115,6 +1276,8 @@ function renderSingleGame(game) {
     `;
   } else if (gameType === 'pronunciation_match') {
     const expectedText = payload.expected_text || game.prompt || '';
+    const assistanceStage = String(payload.assistance_stage || '').trim().toLowerCase()
+      || (Number(game.level || 1) <= 1 ? 'beginner' : (Number(game.level || 1) === 2 ? 'intermediate' : 'advanced'));
     pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
     const promptLines = [`Target sentence: ${expectedText}`];
     if (payload.show_romanized_line && payload.romanized_line) {
@@ -1126,7 +1289,24 @@ function renderSingleGame(game) {
       </div>
     `;
     promptIncludesTranslation = false;
+    const pronunciationTtsButton = payload.tts_text
+      ? assistanceStage === 'advanced'
+        ? `
+          <details class="kana-guide-details">
+            <summary>Model audio</summary>
+            <div class="audio-actions">
+              <button id="pronunciation-play-audio-btn" type="button" class="ghost-btn">Play model audio (TTS)</button>
+            </div>
+          </details>
+        `
+        : `
+          <div class="audio-actions">
+            <button id="pronunciation-play-audio-btn" type="button" class="ghost-btn">Play model audio (TTS)</button>
+          </div>
+        `
+      : '';
     controls = `
+      ${pronunciationTtsButton}
       <div class="audio-actions">
         <button id="pronunciation-record-btn" type="button" class="ghost-btn">Record</button>
         <button id="pronunciation-stop-record-btn" type="button" class="ghost-btn" disabled>Stop</button>
@@ -1218,10 +1398,12 @@ function renderSidebar(games) {
   const extraList = (extraGameCards || [])
     .map((game) => {
       const active = selectedGame && selectedGame.game_type === game.game_type ? 'active-game' : '';
-      const disabled = extrasUnlocked ? '' : 'disabled';
+      const isLoading = loadingExtraGameType === game.game_type;
+      const disabled = extrasUnlocked && !isLoading ? '' : 'disabled';
+      const loadingTag = isLoading ? ' <span class="done-tag">Loading...</span>' : '';
       return `
         <button class="sidebar-game ${active}" data-action="pick-game" data-game="${escapeHtml(game.game_type)}" ${disabled}>
-          ${escapeHtml(game.display_name || game.game_type)}
+          ${escapeHtml(game.display_name || game.game_type)}${loadingTag}
         </button>
       `;
     })
@@ -1578,6 +1760,7 @@ function renderEvaluation(data) {
     className: 'result-line',
     multiline: true,
   }) : '';
+  const kanaGuideHtml = renderKanaGuideHtml(data, translationSource);
   const readingAccuracyHtml = data.reading_accuracy != null
     ? `<p class="result-line"><strong>Reading:</strong> ${escapeHtml(Math.round(Number(data.reading_accuracy) * 100))}%</p>`
     : '';
@@ -1623,7 +1806,7 @@ function renderEvaluation(data) {
     ${romanizationAccuracyHtml}
     ${segmentationAccuracyHtml}
     ${feedbackHtml}
-    ${translationHtml}
+    ${kanaGuideHtml || translationHtml}
     ${kanjiMoraHtml}
     ${kanaRomanizedHtml}
     ${mismatchHtml}
@@ -1737,27 +1920,25 @@ async function playTtsAudio(game) {
   if (!game) return;
   const text = resolveTtsText(game);
   if (!text) return;
-  const gameKey = gameAttemptKey(game);
-  const currentPlays = ttsPlayCounters.get(gameKey) || 0;
-  const playCount = currentPlays + 1;
-  ttsPlayCounters.set(gameKey, playCount);
-
   const cacheKey = `${game.language || currentLanguage}:${text}`;
   let audioDataUrl = ttsAudioCache.get(cacheKey);
   if (!audioDataUrl) {
+    const requestCount = (ttsRequestCounters.get(cacheKey) || 0) + 1;
+    ttsRequestCounters.set(cacheKey, requestCount);
     const res = await fetch(apiUrl('api/audio/tts'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text,
         language: game.language || currentLanguage,
-        play_count: playCount,
+        // Count only backend generations; once cached, the learner can replay without extra token cost.
+        play_count: requestCount,
       }),
     });
     const data = await res.json();
-    if (data.warning && gameKey && !ttsWarningShownByGame.has(gameKey)) {
+    if (data.warning && !ttsWarningShownByCacheKey.has(cacheKey)) {
       appendResultAlert(data.warning);
-      ttsWarningShownByGame.add(gameKey);
+      ttsWarningShownByCacheKey.add(cacheKey);
     }
     if (!res.ok || !data.audio_data_url) {
       const resultEl = document.getElementById('game-result');
@@ -1768,10 +1949,6 @@ async function playTtsAudio(game) {
     }
     audioDataUrl = data.audio_data_url;
     ttsAudioCache.set(cacheKey, audioDataUrl);
-  }
-  if (playCount > 3 && gameKey && !ttsWarningShownByGame.has(gameKey)) {
-    appendResultAlert('Warning: repeated TTS playback may increase token usage.');
-    ttsWarningShownByGame.add(gameKey);
   }
 
   if (activeAudio) {
@@ -2386,6 +2563,7 @@ function wireGameActions() {
   const listeningPlayBtn = document.getElementById('listening-play-audio-btn');
   const kanaRecordBtn = document.getElementById('kana-record-btn');
   const kanaStopRecordBtn = document.getElementById('kana-stop-record-btn');
+  const pronunciationPlayBtn = document.getElementById('pronunciation-play-audio-btn');
   const pronunciationRecordBtn = document.getElementById('pronunciation-record-btn');
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
   const weeklyExamBtn = document.getElementById('weekly-exam-btn');
@@ -2407,6 +2585,7 @@ function wireGameActions() {
   });
   kanaPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
   listeningPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
+  pronunciationPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
   kanaRecordBtn?.addEventListener('click', startKanaRecording);
   kanaStopRecordBtn?.addEventListener('click', stopKanaRecording);
   pronunciationRecordBtn?.addEventListener('click', startPronunciationRecording);
@@ -2672,17 +2851,34 @@ gamesSidebarEl?.addEventListener('click', (event) => {
   const target = event.target;
   if (!target || !target.dataset || target.dataset.action !== 'pick-game') return;
   if (!isLessonCompleted()) return;
+  if (loadingExtraGameType) return;
   const gameType = target.dataset.game;
   const openSelected = async () => {
     let found = availableGameCards.find((g) => g.game_type === gameType);
     if (!found) return;
+    const previousGame = selectedGame;
     if (found.deferred_load) {
-      const loadedCard = await loadExtraGameCard(gameType);
-      if (!loadedCard) return;
-      found = loadedCard;
-      availableGameCards = availableGameCards.map((card) => (
-        card.game_type === gameType ? loadedCard : card
-      ));
+      loadingExtraGameType = gameType;
+      selectedGame = found;
+      renderSidebar(availableGameCards);
+      renderExtraGameLoadingState(found);
+      try {
+        const loadedCard = await loadExtraGameCard(gameType);
+        if (!loadedCard) {
+          loadingExtraGameType = '';
+          selectedGame = previousGame;
+          renderSidebar(availableGameCards);
+          renderSingleGame(selectedGame);
+          wireGameActions();
+          return;
+        }
+        found = loadedCard;
+        availableGameCards = availableGameCards.map((card) => (
+          card.game_type === gameType ? loadedCard : card
+        ));
+      } finally {
+        loadingExtraGameType = '';
+      }
     }
     selectedGame = found;
     if (isDailyGameType(gameType)) {

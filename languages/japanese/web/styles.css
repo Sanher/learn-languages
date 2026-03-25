@@ -747,6 +747,25 @@ button.is-loading {
   margin: 4px 0;
 }
 
+.kana-guide-details {
+  margin-top: 10px;
+}
+
+.kana-guide-details summary {
+  cursor: pointer;
+  color: #93c5fd;
+  font-weight: 600;
+  list-style: none;
+}
+
+.kana-guide-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.kana-guide-details[open] summary {
+  margin-bottom: 8px;
+}
+
 .result-line {
   margin: 4px 0;
 }

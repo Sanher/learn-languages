@@ -1898,9 +1898,10 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
         items = service.get_items(language=language, level=level)
         item = next((it for it in items if it.item_id == activity_id), None)
         if item:
+            ordered_choices = service.ordered_choices_for_item(item)
             return {
-                "options": item.choices,
-                "options_enriched": service.options_with_romaji(item.choices),
+                "options": ordered_choices,
+                "options_enriched": service.options_with_romaji(ordered_choices),
                 "literal_translation": item.literal_translation,
             }
 
@@ -2006,6 +2007,8 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
             view = {}
         return {
             "expected_text": prompt,
+            "tts_text": prompt if language == "ja" else "",
+            "assistance_stage": view.get("assistance_stage"),
             "show_romanized_line": bool(view.get("show_romanized_line")),
             "romanized_line": view.get("romanized_line"),
         }
@@ -2633,6 +2636,7 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
         "topic_key": topic.topic_key,
         "title": topic.title,
         "description": topic.description,
+        "stage": topic.stage,
     }
     lesson_ladder = await _topic_lessons_by_level(topic)
     response["lesson"] = _topic_lesson_payload(

@@ -58,6 +58,13 @@ class GrammarParticleFixServiceTests(unittest.TestCase):
         self.assertTrue(view["show_romanized_line"])
         self.assertTrue(view["show_translation_hint"])
 
+    def test_ordered_choices_do_not_keep_correct_answer_first_when_possible(self) -> None:
+        service = GrammarParticleFixService()
+        item = service.get_items(language="ja", level=1)[0]
+        ordered = service.ordered_choices_for_item(item)
+        self.assertCountEqual(ordered, item.choices)
+        self.assertNotEqual(ordered[0], item.correct_particle)
+
     def test_advanced_view_hides_romanized_and_translation_hint(self) -> None:
         service = GrammarParticleFixService()
         item = service.get_items(language="ja", level=3)[0]

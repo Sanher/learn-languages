@@ -402,6 +402,19 @@ class ApiEnglishContractTests(unittest.TestCase):
         payload = listening_card.get("payload", {})
         self.assertTrue(payload.get("tts_text"))
 
+    def test_pronunciation_match_payload_contains_tts_text_and_stage(self) -> None:
+        response = self.client.post("/api/games/daily", json={"learner_id": "test-user-pronunciation-tts"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        pronunciation_card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "pronunciation_match"),
+            None,
+        )
+        self.assertIsNotNone(pronunciation_card)
+        payload = pronunciation_card.get("payload", {})
+        self.assertTrue(payload.get("tts_text"))
+        self.assertEqual(payload.get("assistance_stage"), "beginner")
+
     def test_listening_gap_fill_payload_keeps_drag_fragments_in_level_two(self) -> None:
         response = self.client.post(
             "/api/games/daily",

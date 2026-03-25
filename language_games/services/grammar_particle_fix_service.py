@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from random import Random
 
 from .game_service import GameActivity
 from .writing_support import is_eastern_script, writing_support_profile
@@ -158,6 +159,19 @@ class GrammarParticleFixService:
             for option in options
         ]
 
+    @staticmethod
+    def ordered_choices_for_item(item: GrammarParticleItem) -> list[str]:
+        ordered = list(item.choices)
+        rnd = Random(item.item_id)
+        rnd.shuffle(ordered)
+        if len(ordered) > 1 and ordered[0] == item.correct_particle:
+            swap_index = next(
+                (index for index, option in enumerate(ordered[1:], start=1) if option != item.correct_particle),
+                1,
+            )
+            ordered[0], ordered[swap_index] = ordered[swap_index], ordered[0]
+        return ordered
+
     def build_attempt_view(
         self,
         language: str,
@@ -239,7 +253,8 @@ class GrammarParticleFixService:
 
     @staticmethod
     def _prompt_for_item(item: GrammarParticleItem, support) -> str:
-        lines = [f"Fill in the particle: {item.sentence_template}", f"Options: {', '.join(item.choices)}"]
+        ordered_choices = GrammarParticleFixService.ordered_choices_for_item(item)
+        lines = [f"Fill in the particle: {item.sentence_template}", f"Options: {', '.join(ordered_choices)}"]
         if support.show_romanized_line:
             lines.append(f"Romanized: {item.romanized_line}")
         if support.show_translation_hint:

@@ -55,6 +55,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         data = response.json()
 
         self.assertIn("topic", data)
+        self.assertEqual(data["topic"]["stage"], "basic")
         self.assertIn("lesson", data)
         self.assertIn("daily_progress", data)
         self.assertEqual(len(data.get("daily_games", [])), EXPECTED_DAILY_COUNT)

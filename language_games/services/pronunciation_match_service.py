@@ -278,6 +278,7 @@ class PronunciationMatchService:
     def _view_payload(item: PronunciationItem, support, show_translation: bool) -> dict:
         show_romanized = bool(support.show_romanized_line and item.romanized_line)
         return {
+            "assistance_stage": support.stage,
             "show_romanized_line": show_romanized,
             "romanized_line": item.romanized_line if show_romanized else None,
             "show_translation_hint": False,
