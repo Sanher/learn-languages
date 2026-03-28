@@ -8,6 +8,8 @@ const gamesSidebarEl = document.getElementById('games-sidebar');
 const changeLanguageBtn = document.getElementById('change-language-btn');
 const secondaryTranslationSelectEl = document.getElementById('secondary-translation-select');
 const secondaryTranslationStatusEl = document.getElementById('secondary-translation-status');
+const rawDataModalEl = document.getElementById('raw-data-modal');
+const rawDataOutputEl = document.getElementById('raw-data-output');
 const LANGUAGE_ALIASES = {
   ja: 'Japanese',
 };
@@ -46,6 +48,8 @@ let secondaryTranslationUnavailable = false;
 let closedTopics = [];
 let closedTopicsVisible = false;
 let closedTopicsSummary = null;
+let closedTopicsRoadmap = [];
+let closedTopicsCurrent = null;
 let isReviewMode = false;
 const retryCounters = new Map();
 const extraGameCardsByType = new Map();
@@ -67,6 +71,13 @@ const PRONUNCIATION_DEFAULT_AUDIO_SECONDS = 2.0;
 let pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
 let isEvaluatingGame = false;
 let loadingExtraGameType = '';
+
+function renderRawDataOutput(payload) {
+  if (!rawDataOutputEl) return;
+  rawDataOutputEl.textContent = typeof payload === 'string'
+    ? payload
+    : JSON.stringify(payload, null, 2);
+}
 
 function apiUrl(path) {
   const cleanPath = String(path || '').replace(/^\/+/, '');
@@ -352,6 +363,13 @@ function closedTopicsSummaryState() {
     topicLevelCurrent: Number(summary.topic_level_current || (dailyProgress && dailyProgress.topic_level_current) || 0),
     globalRankLevel: Number(summary.global_rank_level || (dailyProgress && dailyProgress.global_rank_level) || 0),
   };
+}
+
+function roadmapStatusLabel(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'learned') return 'Learned';
+  if (normalized === 'current') return 'Current';
+  return 'Upcoming';
 }
 
 function currentTopicStage() {
@@ -763,6 +781,58 @@ function renderLessonPanel() {
     multiline: true,
   });
   const closedSummary = closedTopicsSummaryState();
+  const roadmapItems = Array.isArray(closedTopicsRoadmap) ? closedTopicsRoadmap : [];
+  const currentRoadmapTopic = closedTopicsCurrent || roadmapItems.find((item) => String(item.status || '').trim().toLowerCase() === 'current') || null;
+  const currentTopicRoadmapHtml = currentRoadmapTopic
+    ? `
+      <div class="lesson-roadmap-current">
+        <p class="lesson-roadmap-current-label">Current topic</p>
+        <p class="lesson-roadmap-current-title">${escapeHtml(currentRoadmapTopic.title || currentRoadmapTopic.topic_key || '')}</p>
+        ${currentRoadmapTopic.description ? `<p class="muted">${escapeHtml(currentRoadmapTopic.description)}</p>` : ''}
+        <p class="muted">Stage: ${escapeHtml(titleCaseWord(currentRoadmapTopic.stage || 'basic'))}.</p>
+      </div>
+    `
+    : '<p class="muted">All topics in the current roadmap are already learned.</p>';
+  const roadmapHtml = roadmapItems.length > 0
+    ? `
+      <ul class="lesson-roadmap-list">
+        ${roadmapItems.map((topic) => {
+          const status = String(topic.status || 'upcoming').trim().toLowerCase();
+          const metaParts = [];
+          if (topic.stage) metaParts.push(`Stage: ${titleCaseWord(topic.stage)}`);
+          if (status === 'learned') {
+            if (topic.closed_day_iso) metaParts.push(topic.closed_day_iso);
+            if (topic.closed_rank) metaParts.push(titleCaseWord(topic.closed_rank));
+            if (topic.closed_level) metaParts.push(`topic level ${topic.closed_level}`);
+            if (topic.archived) metaParts.push('archived');
+          }
+          const metaLine = metaParts.length > 0 ? `<p class="muted">${escapeHtml(metaParts.join(' · '))}</p>` : '';
+          return `
+            <li class="lesson-roadmap-item">
+              <div class="lesson-roadmap-main">
+                <span class="lesson-roadmap-badge is-${escapeHtml(status)}">${escapeHtml(roadmapStatusLabel(status))}</span>
+                <p class="lesson-roadmap-title">${escapeHtml(topic.title || topic.topic_key || '')}</p>
+                ${topic.description ? `<p class="muted">${escapeHtml(topic.description)}</p>` : ''}
+                ${metaLine}
+              </div>
+              ${status === 'learned'
+                ? `
+                  <button
+                    type="button"
+                    class="ghost-btn closed-topic-review-btn"
+                    data-topic-key="${escapeHtml(topic.topic_key || '')}"
+                  >
+                    Review topic
+                  </button>
+                `
+                : ''
+              }
+            </li>
+          `;
+        }).join('')}
+      </ul>
+    `
+    : '<p class="muted">No topic roadmap available yet.</p>';
   const closedTopicsHtml = closedTopicsVisible
     ? `
       <div class="lesson-closed-topics">
@@ -771,31 +841,10 @@ function renderLessonPanel() {
           <p><strong>Topic level in this rank:</strong> ${escapeHtml(closedSummary.topicLevelCurrent || 0)}</p>
           <p><strong>Global Level:</strong> ${escapeHtml(closedSummary.globalRankLevel || 0)}</p>
         </div>
-        ${
-          closedTopics.length === 0
-            ? '<p class="muted">No learned topics yet.</p>'
-            : `
-              <ul class="lesson-closed-list">
-                ${closedTopics.map((topic) => `
-                  <li class="lesson-closed-item">
-                    <span>
-                      ${escapeHtml(topic.topic_title || topic.topic_key)}
-                      · ${escapeHtml(topic.closed_day_iso || '')}
-                      · ${escapeHtml(titleCaseWord(topic.closed_rank || 'beginner'))}
-                      · topic level ${escapeHtml(topic.closed_level || '')}
-                    </span>
-                    <button
-                      type="button"
-                      class="ghost-btn closed-topic-review-btn"
-                      data-topic-key="${escapeHtml(topic.topic_key || '')}"
-                    >
-                      Review topic
-                    </button>
-                  </li>
-                `).join('')}
-              </ul>
-            `
-        }
+        <p class="muted">A topic becomes learned after you pass the weekly mini-exam. Reaching a higher topic level does not close it yet.</p>
+        ${closedTopics.length === 0 ? '<p class="muted">No learned topics yet. Pass the weekly mini-exam to close the current topic.</p>' : ''}
+        ${currentTopicRoadmapHtml}
+        ${roadmapHtml}
       </div>
     `
     : '';
@@ -816,9 +865,10 @@ function renderLessonPanel() {
         ${lessonLevelProgressHtml}
         <div class="lesson-actions lesson-actions-inline">
           ${lessonDone ? '<button id="review-lesson-btn" type="button" class="ghost-btn">Review lesson</button>' : lessonButton}
+          <button id="raw-data-btn" type="button" class="ghost-btn">View raw data</button>
           <button id="refresh-topic-sequence-btn" type="button" class="ghost-btn">Refresh topic list now</button>
           <button id="closed-topics-btn" class="ghost-btn" type="button">
-            ${closedTopicsVisible ? 'Hide learned topics' : `Show learned topics (${closedTopicsCount})`}
+            ${closedTopicsVisible ? 'Hide topic roadmap' : `Show topic roadmap (${closedTopicsCount} learned)`}
           </button>
         </div>
         ${closedTopicsHtml}
@@ -857,9 +907,10 @@ function renderLessonPanel() {
       <div class="lesson-progress-actions">
         <button id="weekly-exam-btn" class="ghost-btn" type="button" ${weeklyDisabled}>${weeklyButtonLabel}</button>
         <button id="level-exam-btn" class="ghost-btn" type="button" ${levelExamDisabled}>${levelExamLabel}</button>
+        <button id="raw-data-btn" class="ghost-btn" type="button">View raw data</button>
         <button id="refresh-topic-sequence-btn" class="ghost-btn" type="button">Refresh topic list now</button>
         <button id="closed-topics-btn" class="ghost-btn" type="button">
-          ${closedTopicsVisible ? 'Hide learned topics' : `Show learned topics (${closedTopicsCount})`}
+          ${closedTopicsVisible ? 'Hide topic roadmap' : `Show topic roadmap (${closedTopicsCount} learned)`}
         </button>
       </div>
       ${closedTopicsHtml}
@@ -2214,7 +2265,121 @@ async function loadClosedTopics() {
     topic_level_current: Number(data.topic_level_current || 0),
     global_rank_level: Number(data.global_rank_level || 0),
   };
+  closedTopicsCurrent = data.current_topic && typeof data.current_topic === 'object'
+    ? data.current_topic
+    : null;
+  closedTopicsRoadmap = Array.isArray(data.topic_roadmap) ? data.topic_roadmap : [];
   return true;
+}
+
+async function loadRawData() {
+  renderRawDataOutput('Loading raw learner data...');
+  let res;
+  let data;
+  try {
+    res = await fetch(apiUrl('api/debug/raw'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        learner_id: learnerId,
+        language: currentLanguage,
+      }),
+    });
+    data = await res.json();
+  } catch (_error) {
+    renderRawDataOutput('Could not reach the server while loading raw learner data.');
+    return false;
+  }
+
+  if (!res.ok || !data || typeof data !== 'object') {
+    renderRawDataOutput('Server returned an invalid raw data response.');
+    return false;
+  }
+  if (data.error) {
+    renderRawDataOutput(data.error);
+    return false;
+  }
+  renderRawDataOutput(data);
+  return true;
+}
+
+async function openRawDataModal() {
+  if (!rawDataModalEl) return;
+  renderRawDataOutput('Loading raw learner data...');
+  if (typeof rawDataModalEl.showModal === 'function' && !rawDataModalEl.open) {
+    rawDataModalEl.showModal();
+  } else {
+    rawDataModalEl.setAttribute('open', 'open');
+  }
+  await loadRawData();
+}
+
+function closeRawDataModal() {
+  if (!rawDataModalEl) return;
+  if (typeof rawDataModalEl.close === 'function' && rawDataModalEl.open) {
+    rawDataModalEl.close();
+    return;
+  }
+  rawDataModalEl.removeAttribute('open');
+}
+
+async function resetLearnerProgressFromModal() {
+  const resetBtn = document.getElementById('raw-data-reset-btn');
+  if (!window.confirm('Reset the current learner progress and regenerate the topic roadmap?')) {
+    return;
+  }
+
+  const previousText = resetBtn ? resetBtn.textContent : '';
+  if (resetBtn) {
+    resetBtn.disabled = true;
+    resetBtn.textContent = 'Resetting...';
+  }
+  renderRawDataOutput('Resetting learner progress and regenerating the topic roadmap...');
+  let res;
+  let data;
+  try {
+    res = await fetch(apiUrl('api/debug/reset-progress'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        learner_id: learnerId,
+        language: currentLanguage,
+        regenerate_topics: true,
+      }),
+    });
+    data = await res.json();
+  } catch (_error) {
+    renderRawDataOutput('Could not reach the server while resetting learner progress.');
+    if (resetBtn) {
+      resetBtn.disabled = false;
+      resetBtn.textContent = previousText || 'Reset learner progress';
+    }
+    return;
+  }
+
+  if (resetBtn) {
+    resetBtn.disabled = false;
+    resetBtn.textContent = previousText || 'Reset learner progress';
+  }
+  if (!res.ok || !data || typeof data !== 'object') {
+    renderRawDataOutput('Server returned an invalid reset response.');
+    return;
+  }
+  if (data.error) {
+    renderRawDataOutput(data.error);
+    return;
+  }
+
+  renderRawDataOutput(data.raw || data);
+  await loadDailyGame();
+  if (rawDataModalEl) {
+    if (typeof rawDataModalEl.showModal === 'function' && !rawDataModalEl.open) {
+      rawDataModalEl.showModal();
+    } else {
+      rawDataModalEl.setAttribute('open', 'open');
+    }
+  }
+  await loadRawData();
 }
 
 async function toggleClosedTopics() {
@@ -2251,6 +2416,8 @@ async function startTopicReview(topicKey) {
   isReviewMode = true;
   closedTopicsVisible = false;
   closedTopicsSummary = null;
+  closedTopicsRoadmap = [];
+  closedTopicsCurrent = null;
   dailyTopic = data.topic || dailyTopic;
   dailyLesson = data.lesson || dailyLesson;
   dailyGameCards = Array.isArray(data.review_games) ? data.review_games : [];
@@ -2568,6 +2735,10 @@ function wireGameActions() {
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
   const weeklyExamBtn = document.getElementById('weekly-exam-btn');
   const levelExamBtn = document.getElementById('level-exam-btn');
+  const rawDataBtn = document.getElementById('raw-data-btn');
+  const rawDataRefreshBtn = document.getElementById('raw-data-refresh-btn');
+  const rawDataResetBtn = document.getElementById('raw-data-reset-btn');
+  const rawDataCloseBtn = document.getElementById('raw-data-close-btn');
   const refreshTopicSequenceBtn = document.getElementById('refresh-topic-sequence-btn');
   const closedTopicsBtn = document.getElementById('closed-topics-btn');
   const exitReviewBtn = document.getElementById('exit-review-btn');
@@ -2592,6 +2763,10 @@ function wireGameActions() {
   pronunciationStopRecordBtn?.addEventListener('click', stopPronunciationRecording);
   weeklyExamBtn?.addEventListener('click', takeWeeklyExam);
   levelExamBtn?.addEventListener('click', takeLevelExam);
+  rawDataBtn?.addEventListener('click', openRawDataModal);
+  if (rawDataRefreshBtn) rawDataRefreshBtn.onclick = loadRawData;
+  if (rawDataResetBtn) rawDataResetBtn.onclick = resetLearnerProgressFromModal;
+  if (rawDataCloseBtn) rawDataCloseBtn.onclick = closeRawDataModal;
   refreshTopicSequenceBtn?.addEventListener('click', refreshTopicSequenceNow);
   closedTopicsBtn?.addEventListener('click', toggleClosedTopics);
   exitReviewBtn?.addEventListener('click', exitReviewMode);
@@ -2782,6 +2957,8 @@ async function loadDailyGame() {
   closedTopicsVisible = false;
   closedTopics = [];
   closedTopicsSummary = null;
+  closedTopicsRoadmap = [];
+  closedTopicsCurrent = null;
   lessonCollapsed = isLessonCompleted();
   dailyGamesCollapsed = areDailyGamesCompleted();
   if (dailyGamesCollapsed && selectedGame && isDailyGameType(selectedGame.game_type)) {

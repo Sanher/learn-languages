@@ -708,6 +708,15 @@ class ProgressMemory:
             normalized_source,
         )
 
+    def clear_language_generation_cache(self, *, language: str) -> None:
+        normalized_language = str(language or "").strip().lower()
+        if not normalized_language:
+            return
+        with self._conn() as conn:
+            conn.execute("DELETE FROM topic_sequence_cache WHERE language = ?", (normalized_language,))
+            conn.execute("DELETE FROM topic_lessons_cache WHERE language = ?", (normalized_language,))
+        logger.info("language_generation_cache_cleared language=%s", normalized_language)
+
     def level_for_language(self, learner_id: str, language: str, default_level: int = 1) -> int:
         prefs = self.load_or_create_preferences(learner_id)
         level = int(prefs.levels().get(language, default_level))
@@ -1538,7 +1547,88 @@ class ProgressMemory:
                     WHERE learner_id = ? AND language = ? AND due_day_iso <= ?
                     ORDER BY due_day_iso ASC, topic_key ASC, game_type ASC, item_id ASC
                     LIMIT ?
-                    """,
-                    (learner_id, language, current_day_iso, max_items),
-                ).fetchall()
+                """,
+                (learner_id, language, current_day_iso, max_items),
+            ).fetchall()
         return [ItemReviewState(*row) for row in rows]
+
+    def list_daily_topic_progress_rows(
+        self,
+        *,
+        learner_id: str,
+        language: str,
+        limit: int = 30,
+    ) -> list[DailyTopicProgress]:
+        max_items = max(1, int(limit))
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json,
+                       level_state, daily_score, daily_game_scores_json, daily_game_failures_json
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ?
+                ORDER BY day_iso DESC, topic_key ASC
+                LIMIT ?
+                """,
+                (learner_id, language, max_items),
+            ).fetchall()
+        return [DailyTopicProgress(*row) for row in rows]
+
+    def list_item_review_states(
+        self,
+        *,
+        learner_id: str,
+        language: str,
+        limit: int = 50,
+    ) -> list[ItemReviewState]:
+        max_items = max(1, int(limit))
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT learner_id, language, topic_key, game_type, item_id, due_day_iso,
+                       interval_days, ease, repetitions, lapses, last_score, last_seen_day_iso
+                FROM item_review_state
+                WHERE learner_id = ? AND language = ?
+                ORDER BY due_day_iso ASC, topic_key ASC, game_type ASC, item_id ASC
+                LIMIT ?
+                """,
+                (learner_id, language, max_items),
+            ).fetchall()
+        return [ItemReviewState(*row) for row in rows]
+
+    def reset_learner_progress(
+        self,
+        *,
+        learner_id: str,
+        language: str,
+        preferred_language: str = "ja",
+        secondary_translation_language: str | None = None,
+    ) -> None:
+        normalized_language = str(language or "").strip().lower() or "ja"
+        normalized_preferred_language = str(preferred_language or normalized_language).strip().lower() or normalized_language
+        normalized_secondary_language = str(secondary_translation_language or "").strip().lower()
+        levels_json = json.dumps({normalized_language: 1}, ensure_ascii=False)
+        with self._conn() as conn:
+            conn.execute("DELETE FROM learner_progress WHERE learner_id = ?", (learner_id,))
+            conn.execute("DELETE FROM learner_assessment_state WHERE learner_id = ?", (learner_id,))
+            conn.execute("DELETE FROM daily_topic_progress WHERE learner_id = ? AND language = ?", (learner_id, normalized_language))
+            conn.execute("DELETE FROM closed_topics WHERE learner_id = ? AND language = ?", (learner_id, normalized_language))
+            conn.execute("DELETE FROM item_review_state WHERE learner_id = ? AND language = ?", (learner_id, normalized_language))
+            conn.execute(
+                """
+                INSERT INTO learner_preferences (learner_id, preferred_language, levels_json, secondary_translation_lang)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (learner_id) DO UPDATE SET
+                    preferred_language = excluded.preferred_language,
+                    levels_json = excluded.levels_json,
+                    secondary_translation_lang = excluded.secondary_translation_lang
+                """,
+                (learner_id, normalized_preferred_language, levels_json, normalized_secondary_language),
+            )
+        logger.info(
+            "learner_progress_reset learner_id=%s language=%s preferred_language=%s secondary_translation=%s",
+            learner_id,
+            normalized_language,
+            normalized_preferred_language,
+            normalized_secondary_language or "off",
+        )

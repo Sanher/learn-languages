@@ -305,6 +305,93 @@ button.is-loading {
   color: #cbd5e1;
 }
 
+.lesson-roadmap-current {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #0b1220;
+}
+
+.lesson-roadmap-current-label,
+.lesson-roadmap-title {
+  margin: 0;
+}
+
+.lesson-roadmap-current-label {
+  color: #93c5fd;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.lesson-roadmap-current-title {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.lesson-roadmap-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lesson-roadmap-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #0b1220;
+}
+
+.lesson-roadmap-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.lesson-roadmap-badge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.lesson-roadmap-badge.is-current {
+  background: #1d4ed8;
+  color: #eff6ff;
+}
+
+.lesson-roadmap-badge.is-learned {
+  background: #14532d;
+  color: #dcfce7;
+}
+
+.lesson-roadmap-badge.is-upcoming {
+  background: #334155;
+  color: #e2e8f0;
+}
+
+.lesson-roadmap-title {
+  color: #e2e8f0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
 .lesson-closed-list {
   margin: 0;
   padding-left: 18px;
@@ -365,6 +452,50 @@ button.is-loading {
 
 .game-summary-card h2 {
   margin-top: 0;
+}
+
+.raw-data-modal {
+  width: min(960px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 1px solid #334155;
+  border-radius: 14px;
+  background: #0b1324;
+  color: #e2e8f0;
+}
+
+.raw-data-modal::backdrop {
+  background: rgba(2, 6, 23, 0.76);
+}
+
+.raw-data-modal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.raw-data-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.raw-data-modal-head h2 {
+  margin: 0;
+}
+
+.raw-data-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#raw-data-output {
+  margin: 0;
+  max-height: min(60vh, 720px);
+  overflow: auto;
 }
 
 #games-sidebar h4 {

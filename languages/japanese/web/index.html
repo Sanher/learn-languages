@@ -39,6 +39,21 @@
       </section>
     </main>
 
+    <dialog id="raw-data-modal" class="raw-data-modal">
+      <form method="dialog" class="raw-data-modal-card">
+        <div class="raw-data-modal-head">
+          <h2>Raw learner data</h2>
+          <button id="raw-data-close-btn" type="button" class="ghost-btn">Close</button>
+        </div>
+        <p class="muted">This panel shows the current learner state, roadmap, stored progress, and review items.</p>
+        <div class="raw-data-modal-actions">
+          <button id="raw-data-refresh-btn" type="button" class="ghost-btn">Refresh raw data</button>
+          <button id="raw-data-reset-btn" type="button" class="ghost-btn">Reset learner progress</button>
+        </div>
+        <pre id="raw-data-output">Loading...</pre>
+      </form>
+    </dialog>
+
     <script src="app.js" defer></script>
   </body>
 </html>

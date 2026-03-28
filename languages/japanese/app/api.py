@@ -219,6 +219,17 @@ class TopicSequenceRefreshRequest(BaseModel):
     language: str = "ja"
 
 
+class DebugRawDataRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
+
+
+class ResetLearnerProgressRequest(BaseModel):
+    learner_id: str = DEFAULT_LEARNER_ID
+    language: str = "ja"
+    regenerate_topics: bool = True
+
+
 class LanguageUpdateRequest(BaseModel):
     learner_id: str = DEFAULT_LEARNER_ID
     language: str
@@ -1358,6 +1369,169 @@ def _topic_definition_for_key(language: str, topic_key: str) -> TopicDefinition 
         if topic.topic_key == normalized:
             return topic
     return None
+
+
+def _topic_roadmap_payload(*, learner_id: str, language: str) -> dict[str, Any]:
+    topics = _topics_for_language(language)
+    closed_items = memory.list_closed_topics(learner_id=learner_id, language=language)
+    closed_by_key = {item.topic_key: item for item in closed_items}
+    current_topic_key = next((topic.topic_key for topic in topics if topic.topic_key not in closed_by_key), None)
+
+    roadmap: list[dict[str, Any]] = []
+    seen_topic_keys: set[str] = set()
+    for topic in topics:
+        seen_topic_keys.add(topic.topic_key)
+        closed_item = closed_by_key.get(topic.topic_key)
+        status = "learned" if closed_item is not None else "current" if topic.topic_key == current_topic_key else "upcoming"
+        roadmap.append(
+            {
+                "topic_key": topic.topic_key,
+                "title": topic.title,
+                "description": topic.description,
+                "stage": getattr(topic, "stage", "basic"),
+                "status": status,
+                "can_review": bool(closed_item is not None),
+                "closed_day_iso": getattr(closed_item, "closed_day_iso", ""),
+                "closed_level": int(getattr(closed_item, "closed_level", 0) or 0),
+                "closed_rank": _closed_topic_rank(getattr(closed_item, "closed_rank", "")) if closed_item is not None else "",
+                "covers": list(closed_item.covers()) if closed_item is not None else list(getattr(topic, "covers", ())),
+                "archived": False,
+            }
+        )
+
+    for item in closed_items:
+        if item.topic_key in seen_topic_keys:
+            continue
+        roadmap.append(
+            {
+                "topic_key": item.topic_key,
+                "title": _topic_title(language=language, topic_key=item.topic_key),
+                "description": "",
+                "stage": _competency_stage_for_rank(getattr(item, "closed_rank", "")),
+                "status": "learned",
+                "can_review": True,
+                "closed_day_iso": item.closed_day_iso,
+                "closed_level": int(item.closed_level),
+                "closed_rank": _closed_topic_rank(getattr(item, "closed_rank", "")),
+                "covers": list(item.covers()),
+                "archived": True,
+            }
+        )
+
+    current_topic = next((item for item in roadmap if item["status"] == "current"), None)
+    return {
+        "current_topic": current_topic,
+        "topic_roadmap": roadmap,
+    }
+
+
+def _raw_debug_payload(*, learner_id: str, language: str) -> dict[str, Any]:
+    learner_state = memory.load_or_create(learner_id)
+    preferences = memory.load_or_create_preferences(learner_id)
+    assessment = memory.load_or_create_assessment_state(learner_id)
+    current_level = memory.level_for_language(learner_id=learner_id, language=language, default_level=1)
+    level_1_to_2_passed = memory.level_exam_passed(learner_id=learner_id, language=language, from_level=1, to_level=2)
+    level_2_to_3_passed = memory.level_exam_passed(learner_id=learner_id, language=language, from_level=2, to_level=3)
+    current_rank, next_rank = _rank_state(
+        level_1_to_2_passed=level_1_to_2_passed,
+        level_2_to_3_passed=level_2_to_3_passed,
+    )
+    totals = _level_totals_for_learner(
+        learner_id=learner_id,
+        language=language,
+        current_level=current_level,
+        current_rank=current_rank,
+    )
+    roadmap_payload = _topic_roadmap_payload(learner_id=learner_id, language=language)
+    competency_state = _rank_competency_state(
+        learner_id=learner_id,
+        language=language,
+        current_rank=current_rank,
+    )
+    sequence_rows, sequence_source = memory.load_topic_sequence_cache(language=language)
+    if not sequence_rows:
+        sequence_rows = _topic_seeds_from_definitions(_topics_for_language(language))
+        sequence_source = sequence_source or "runtime"
+    daily_rows = memory.list_daily_topic_progress_rows(learner_id=learner_id, language=language, limit=25)
+    item_rows = memory.list_item_review_states(learner_id=learner_id, language=language, limit=50)
+    closed_rows = memory.list_closed_topics(learner_id=learner_id, language=language)
+
+    return {
+        "learner_id": learner_id,
+        "language": language,
+        "today_iso": date.today().isoformat(),
+        "learner_session": {
+            "streak_days": int(learner_state.streak_days),
+            "recent_accuracy": float(learner_state.recent_accuracy),
+            "recent_games": [item for item in learner_state.recent_games_csv.split(",") if item],
+        },
+        "preferences": {
+            "preferred_language": preferences.preferred_language,
+            "secondary_translation_language": preferences.secondary_translation_language(),
+            "levels": preferences.levels(),
+        },
+        "assessment": {
+            "weekly_exam_last_day_iso": assessment.weekly_exam_last_day_iso,
+            "weekly_exam_passed_count": int(assessment.weekly_exam_passed_count),
+            "level_exams_passed": assessment.level_exams_passed(),
+        },
+        "progress_summary": {
+            "current_level": int(max(1, current_level)),
+            "current_rank": current_rank,
+            "next_rank": next_rank,
+            "topic_level_current": int(totals["topic_level_current"]),
+            "global_rank_level": int(totals["global_rank_level"]),
+            "required_rank_competencies": competency_state["required"],
+            "covered_rank_competencies": competency_state["covered"],
+            "missing_rank_competencies": competency_state["missing"],
+        },
+        "sequence_cache": {
+            "source": str(sequence_source or "fallback"),
+            "topic_count": len(sequence_rows or []),
+            "topics": sequence_rows or [],
+        },
+        "current_topic": roadmap_payload["current_topic"],
+        "topic_roadmap": roadmap_payload["topic_roadmap"],
+        "closed_topics": [
+            {
+                "topic_key": item.topic_key,
+                "closed_day_iso": item.closed_day_iso,
+                "closed_level": int(item.closed_level),
+                "closed_rank": _closed_topic_rank(getattr(item, "closed_rank", "")),
+                "covers": list(item.covers()),
+                "reason": item.reason,
+            }
+            for item in closed_rows
+        ],
+        "daily_topic_progress_rows": [
+            {
+                "day_iso": item.day_iso,
+                "topic_key": item.topic_key,
+                "lesson_completed": bool(item.lesson_completed),
+                "completed_daily_games": item.completed_daily_games(),
+                "level_state": int(item.level_state),
+                "daily_score": int(item.daily_score),
+                "daily_game_scores": item.daily_game_scores(),
+                "daily_game_failures": item.daily_game_failures(),
+            }
+            for item in daily_rows
+        ],
+        "item_review_state_rows": [
+            {
+                "topic_key": item.topic_key,
+                "game_type": item.game_type,
+                "item_id": item.item_id,
+                "due_day_iso": item.due_day_iso,
+                "interval_days": int(item.interval_days),
+                "ease": float(item.ease),
+                "repetitions": int(item.repetitions),
+                "lapses": int(item.lapses),
+                "last_score": int(item.last_score),
+                "last_seen_day_iso": item.last_seen_day_iso,
+            }
+            for item in item_rows
+        ],
+    }
 
 
 def _is_success_result(result: dict[str, Any]) -> bool | None:
@@ -2914,6 +3088,7 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
         current_rank=current_rank,
     )
     closed = memory.list_closed_topics(learner_id=learner_id, language=language)
+    roadmap_payload = _topic_roadmap_payload(learner_id=learner_id, language=language)
     topics = [
         {
             "topic_key": item.topic_key,
@@ -2927,10 +3102,12 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
         for item in closed
     ]
     logger.info(
-        "closed_topics_listed learner_id=%s language=%s count=%s",
+        "closed_topics_listed learner_id=%s language=%s count=%s roadmap=%s current_topic=%s",
         learner_id,
         language,
         len(topics),
+        len(roadmap_payload["topic_roadmap"]),
+        (roadmap_payload["current_topic"] or {}).get("topic_key", ""),
     )
     return {
         "learner_id": learner_id,
@@ -2943,8 +3120,98 @@ def list_closed_topics(req: ClosedTopicsRequest) -> dict:
         "current_topic_level": int(max(1, current_level)),
         "topic_level_current": int(totals["topic_level_current"]),
         "global_rank_level": int(totals["global_rank_level"]),
+        "current_topic": roadmap_payload["current_topic"],
+        "topic_roadmap": roadmap_payload["topic_roadmap"],
         "closed_topics": topics,
         "closed_topics_count": len(topics),
+    }
+
+
+@app.post("/api/debug/raw")
+def debug_raw_data(req: DebugRawDataRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("debug_raw_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+    logger.info("debug_raw_requested learner_id=%s language=%s", learner_id, language)
+    payload = _raw_debug_payload(learner_id=learner_id, language=language)
+    logger.info(
+        "debug_raw_ready learner_id=%s language=%s roadmap=%s daily_rows=%s review_rows=%s",
+        learner_id,
+        language,
+        len(payload["topic_roadmap"]),
+        len(payload["daily_topic_progress_rows"]),
+        len(payload["item_review_state_rows"]),
+    )
+    return payload
+
+
+@app.post("/api/debug/reset-progress")
+async def reset_learner_progress(req: ResetLearnerProgressRequest) -> dict:
+    learner_id = req.learner_id or DEFAULT_LEARNER_ID
+    language = (req.language or "ja").strip().lower()
+    if language not in AVAILABLE_LANGUAGES:
+        logger.warning("reset_progress_invalid_language learner_id=%s language=%s", learner_id, language)
+        return {"error": f"Unsupported language: {language}"}
+
+    preferences = memory.load_or_create_preferences(learner_id)
+    preferred_language = preferences.preferred_language or language
+    secondary_translation_language = preferences.secondary_translation_language()
+    logger.info(
+        "reset_progress_requested learner_id=%s language=%s regenerate_topics=%s",
+        learner_id,
+        language,
+        bool(req.regenerate_topics),
+    )
+    memory.reset_learner_progress(
+        learner_id=learner_id,
+        language=language,
+        preferred_language=preferred_language,
+        secondary_translation_language=secondary_translation_language,
+    )
+    memory.clear_language_generation_cache(language=language)
+    _TOPIC_SEQUENCE_CACHE.pop(language, None)
+    for cache_key in [key for key in _TOPIC_LESSONS_AI_CACHE if key[0] == language]:
+        _TOPIC_LESSONS_AI_CACHE.pop(cache_key, None)
+
+    refresh_result: dict[str, Any] = {
+        "refreshed": False,
+        "source": "fallback",
+        "error": "",
+        "topics": [],
+    }
+    if bool(req.regenerate_topics):
+        refresh_result = await _force_topic_sequence_refresh(language)
+    topics = tuple(refresh_result.get("topics") or ())
+    if topics:
+        _TOPIC_SEQUENCE_CACHE[language] = topics
+        memory.save_topic_sequence_cache(
+            language=language,
+            topics=_topic_seeds_from_definitions(topics),
+            updated_at_iso=datetime.now(UTC).isoformat(),
+            source=str(refresh_result.get("source", "fallback") or "fallback"),
+        )
+    if not topics:
+        topics = await _ensure_topic_sequence_bootstrap(language)
+    payload = _raw_debug_payload(learner_id=learner_id, language=language)
+    logger.info(
+        "reset_progress_done learner_id=%s language=%s source=%s refreshed=%s topics=%s",
+        learner_id,
+        language,
+        str(refresh_result.get("source", "fallback") or "fallback"),
+        bool(refresh_result.get("refreshed")),
+        len(payload["topic_roadmap"]),
+    )
+    return {
+        "learner_id": learner_id,
+        "language": language,
+        "reset": True,
+        "message": "Learner progress reset. Topic roadmap regenerated.",
+        "sequence_refreshed": bool(refresh_result.get("refreshed")),
+        "sequence_source": str(refresh_result.get("source", "fallback") or "fallback"),
+        "topic_count": len(payload["topic_roadmap"]),
+        "raw": payload,
     }
 
 

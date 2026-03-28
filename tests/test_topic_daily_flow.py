@@ -1631,6 +1631,253 @@ class TopicDailyFlowTests(unittest.TestCase):
         beginner_topic = next(item for item in data["closed_topics"] if item["topic_key"] == "identity_and_plans")
         self.assertEqual(beginner_topic["covers"], ["identity", "basic_sentence_roles"])
 
+    def test_closed_topics_endpoint_exposes_current_and_upcoming_topic_roadmap(self) -> None:
+        api._TOPIC_SEQUENCE_CACHE["ja"] = api._topic_definitions_from_seed_list(
+            "ja",
+            [
+                {
+                    "topic_key": "identity_and_plans",
+                    "title": "Identity and Plans",
+                    "description": "Talk about identity and plans.",
+                    "stage": "basic",
+                    "covers": list(required_competencies_for_stage("basic")),
+                },
+                {
+                    "topic_key": "daily_routines",
+                    "title": "Daily Routines",
+                    "description": "Describe daily routines.",
+                    "stage": "basic",
+                    "covers": ["time_and_routine", "everyday_actions"],
+                },
+            ],
+        )
+
+        response = self.client.post(
+            "/api/topics/closed",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["closed_topics_count"], 0)
+        self.assertEqual(data["current_topic"]["topic_key"], "identity_and_plans")
+        roadmap = data["topic_roadmap"]
+        self.assertEqual([item["status"] for item in roadmap], ["current", "upcoming"])
+        self.assertEqual([item["topic_key"] for item in roadmap], ["identity_and_plans", "daily_routines"])
+
+    def test_closed_topics_endpoint_marks_first_unclosed_topic_as_current(self) -> None:
+        api._TOPIC_SEQUENCE_CACHE["ja"] = api._topic_definitions_from_seed_list(
+            "ja",
+            [
+                {
+                    "topic_key": "identity_and_plans",
+                    "title": "Identity and Plans",
+                    "description": "Talk about identity and plans.",
+                    "stage": "basic",
+                    "covers": list(required_competencies_for_stage("basic")),
+                },
+                {
+                    "topic_key": "daily_routines",
+                    "title": "Daily Routines",
+                    "description": "Describe daily routines.",
+                    "stage": "basic",
+                    "covers": ["time_and_routine", "everyday_actions"],
+                },
+            ],
+        )
+        api.memory.mark_topic_closed(
+            learner_id=self.learner_id,
+            language="ja",
+            topic_key="identity_and_plans",
+            closed_day_iso=date.today().isoformat(),
+            closed_level=5,
+            reason="test_closed_first_topic",
+            closed_rank="beginner",
+            covers=list(required_competencies_for_stage("basic")),
+        )
+
+        response = self.client.post(
+            "/api/topics/closed",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["current_topic"]["topic_key"], "daily_routines")
+        roadmap = data["topic_roadmap"]
+        self.assertEqual([item["status"] for item in roadmap], ["learned", "current"])
+        learned_item = roadmap[0]
+        self.assertEqual(learned_item["closed_level"], 5)
+        self.assertEqual(learned_item["closed_rank"], "beginner")
+
+    def test_debug_raw_endpoint_returns_learner_snapshot_and_roadmap(self) -> None:
+        api.memory.set_language_level(self.learner_id, "ja", 4)
+        response = self.client.post(
+            "/api/debug/raw",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["learner_id"], self.learner_id)
+        self.assertEqual(data["language"], "ja")
+        self.assertEqual(data["progress_summary"]["current_level"], 4)
+        self.assertIn("topic_roadmap", data)
+        self.assertIn("sequence_cache", data)
+        self.assertIn("daily_topic_progress_rows", data)
+        self.assertIn("item_review_state_rows", data)
+
+    def test_reset_progress_endpoint_clears_progress_and_rebuilds_roadmap(self) -> None:
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        api.memory.mark_topic_closed(
+            learner_id=self.learner_id,
+            language="ja",
+            topic_key="identity_and_plans",
+            closed_day_iso=date.today().isoformat(),
+            closed_level=5,
+            reason="test_reset_progress",
+            closed_rank="beginner",
+            covers=list(required_competencies_for_stage("basic")),
+        )
+        api.memory.mark_level_exam_passed(
+            learner_id=self.learner_id,
+            language="ja",
+            from_level=1,
+            to_level=2,
+        )
+        api.memory.save_weekly_exam_result(
+            learner_id=self.learner_id,
+            day_iso=date.today().isoformat(),
+            passed=True,
+        )
+        api.memory.load_or_create_daily_topic_progress(
+            learner_id=self.learner_id,
+            day_iso=date.today().isoformat(),
+            language="ja",
+            topic_key="identity_and_plans",
+        )
+        api.memory.upsert_item_review_state(
+            learner_id=self.learner_id,
+            language="ja",
+            topic_key="identity_and_plans",
+            game_type="sentence_order",
+            item_id="ja-sentence-order-1-1",
+            due_day_iso=date.today().isoformat(),
+            interval_days=2,
+            ease=2.5,
+            repetitions=1,
+            lapses=0,
+            last_score=100,
+            last_seen_day_iso=date.today().isoformat(),
+        )
+
+        async def _fake_sequence_refresh(*_args, **_kwargs):
+            return {
+                "refreshed": True,
+                "source": "openai",
+                "error": "",
+                "topics": api._topic_definitions_from_seed_list(
+                    "ja",
+                    [
+                        {
+                            "topic_key": "identity_and_plans",
+                            "title": "Identity and Plans",
+                            "description": "Talk about identity and plans.",
+                            "stage": "basic",
+                            "covers": list(required_competencies_for_stage("basic")),
+                        },
+                        {
+                            "topic_key": "daily_routines",
+                            "title": "Daily Routines",
+                            "description": "Describe daily routines.",
+                            "stage": "basic",
+                            "covers": ["time_and_routine", "everyday_actions"],
+                        },
+                    ],
+                ),
+            }
+
+        with unittest.mock.patch.object(api, "_force_topic_sequence_refresh", side_effect=_fake_sequence_refresh):
+            response = self.client.post(
+                "/api/debug/reset-progress",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "regenerate_topics": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["reset"])
+        self.assertTrue(data["sequence_refreshed"])
+        raw = data["raw"]
+        self.assertEqual(raw["progress_summary"]["current_level"], 1)
+        self.assertEqual(raw["progress_summary"]["current_rank"], "beginner")
+        self.assertEqual(raw["closed_topics"], [])
+        self.assertEqual(raw["assessment"]["weekly_exam_passed_count"], 0)
+        self.assertEqual(raw["assessment"]["level_exams_passed"], {})
+        self.assertEqual(raw["item_review_state_rows"], [])
+        self.assertEqual(raw["current_topic"]["topic_key"], "identity_and_plans")
+        self.assertEqual([item["status"] for item in raw["topic_roadmap"]], ["current", "upcoming"])
+
+    def test_reset_progress_persists_regenerated_topic_sequence_for_followup_requests(self) -> None:
+        async def _fake_sequence_refresh(*_args, **_kwargs):
+            return {
+                "refreshed": True,
+                "source": "openai",
+                "error": "",
+                "topics": api._topic_definitions_from_seed_list(
+                    "ja",
+                    [
+                        {
+                            "topic_key": "identity_and_plans",
+                            "title": "Identity and Plans",
+                            "description": "Talk about identity and plans.",
+                            "stage": "basic",
+                            "covers": list(required_competencies_for_stage("basic")),
+                        },
+                        {
+                            "topic_key": "daily_routines",
+                            "title": "Daily Routines",
+                            "description": "Describe daily routines.",
+                            "stage": "basic",
+                            "covers": ["time_and_routine", "everyday_actions"],
+                        },
+                    ],
+                ),
+            }
+
+        with unittest.mock.patch.object(api, "_force_topic_sequence_refresh", side_effect=_fake_sequence_refresh):
+            response = self.client.post(
+                "/api/debug/reset-progress",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "regenerate_topics": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+
+        closed = self.client.post(
+            "/api/topics/closed",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+            },
+        )
+        self.assertEqual(closed.status_code, 200)
+        payload = closed.json()
+        self.assertEqual(payload["current_topic"]["topic_key"], "identity_and_plans")
+        self.assertEqual([item["status"] for item in payload["topic_roadmap"]], ["current", "upcoming"])
+
     def test_topic_review_endpoint_requires_closed_topic(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)

@@ -56,6 +56,28 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["error"], "Unsupported language: es")
 
+    def test_debug_raw_rejects_unsupported_language(self) -> None:
+        response = self.client.post(
+            "/api/debug/raw",
+            json={
+                "learner_id": "test-user",
+                "language": "es",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["error"], "Unsupported language: es")
+
+    def test_reset_progress_rejects_unsupported_language(self) -> None:
+        response = self.client.post(
+            "/api/debug/reset-progress",
+            json={
+                "learner_id": "test-user",
+                "language": "es",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["error"], "Unsupported language: es")
+
     def test_secondary_translation_rejects_unsupported_language(self) -> None:
         response = self.client.post(
             "/api/ui/secondary-translation",
