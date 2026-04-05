@@ -1,3 +1,4 @@
+import json
 import unittest
 import unittest.mock
 from datetime import date, timedelta
@@ -133,6 +134,41 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(level_progress["current_rank"], "beginner")
         self.assertEqual(data["daily_progress"]["weekly_exam_min_level"], 5)
         self.assertTrue(data["daily_progress"]["weekly_exam_level_ready"])
+
+    def test_exhausted_topic_rotates_lesson_from_lowest_scoring_prior_level(self) -> None:
+        topic_key = "identity_and_plans"
+        api.memory.set_language_level(self.learner_id, "ja", 4)
+        self._insert_daily_topic_progress_row(day_iso="2026-03-01", topic_key=topic_key, level_state=1, daily_score=380)
+        self._insert_daily_topic_progress_row(day_iso="2026-03-02", topic_key=topic_key, level_state=2, daily_score=240)
+        self._insert_daily_topic_progress_row(day_iso="2026-03-03", topic_key=topic_key, level_state=3, daily_score=330)
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = date(2026, 3, 4)
+            daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(daily.status_code, 200)
+        lesson = daily.json()["lesson"]
+        self.assertTrue(lesson["reinforcement_mode"])
+        self.assertEqual(lesson["lesson_level"], 2)
+        self.assertEqual(lesson["title"], "Today and routine context")
+
+    def test_exhausted_topic_reinforcement_rotates_after_each_overflow_day(self) -> None:
+        topic_key = "identity_and_plans"
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        self._insert_daily_topic_progress_row(day_iso="2026-03-01", topic_key=topic_key, level_state=1, daily_score=380)
+        self._insert_daily_topic_progress_row(day_iso="2026-03-02", topic_key=topic_key, level_state=2, daily_score=240)
+        self._insert_daily_topic_progress_row(day_iso="2026-03-03", topic_key=topic_key, level_state=3, daily_score=330)
+        self._insert_daily_topic_progress_row(day_iso="2026-03-04", topic_key=topic_key, level_state=4, daily_score=310)
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = date(2026, 3, 5)
+            daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(daily.status_code, 200)
+        lesson = daily.json()["lesson"]
+        self.assertTrue(lesson["reinforcement_mode"])
+        self.assertEqual(lesson["lesson_level"], 3)
+        self.assertEqual(lesson["title"], "Multi-part plan statements")
 
     def test_daily_completion_uses_today_level_not_fallback_card_level(self) -> None:
         api.memory.set_language_level(self.learner_id, "ja", 5)
@@ -1365,6 +1401,119 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertFalse(data["daily_progress"]["weekly_exam_level_ready"])
         self.assertEqual(data["daily_progress"]["weekly_exam_min_level"], 5)
 
+    def test_failed_weekly_exam_is_due_next_day_when_no_weak_game_types(self) -> None:
+        topic_key = "identity_and_plans"
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        api.memory.save_weekly_exam_result(
+            learner_id=self.learner_id,
+            day_iso="2026-03-10",
+            passed=False,
+        )
+        self._insert_daily_topic_progress_row(
+            day_iso="2026-03-10",
+            topic_key=topic_key,
+            level_state=5,
+            daily_score=320,
+            daily_game_scores={
+                "grammar_particle_fix": 80,
+                "listening_gap_fill": 90,
+                "context_quiz": 75,
+            },
+        )
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = date(2026, 3, 11)
+            daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(daily.status_code, 200)
+        progress = daily.json()["daily_progress"]
+        self.assertTrue(progress["weekly_exam_due"])
+        self.assertFalse(progress["weekly_exam_last_passed"])
+        self.assertEqual(progress["weekly_exam_cooldown_days"], 1)
+        self.assertEqual(progress["weekly_exam_days_until_due"], 0)
+        self.assertEqual(progress["weekly_exam_retry_weak_game_types"], [])
+
+    def test_failed_weekly_exam_waits_by_number_of_weak_game_types(self) -> None:
+        topic_key = "identity_and_plans"
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        api.memory.save_weekly_exam_result(
+            learner_id=self.learner_id,
+            day_iso="2026-03-10",
+            passed=False,
+        )
+        self._insert_daily_topic_progress_row(
+            day_iso="2026-03-09",
+            topic_key=topic_key,
+            level_state=5,
+            daily_score=240,
+            daily_game_scores={
+                "grammar_particle_fix": 40,
+                "pronunciation_match": 30,
+                "sentence_order": 80,
+            },
+        )
+        self._insert_daily_topic_progress_row(
+            day_iso="2026-03-10",
+            topic_key=topic_key,
+            level_state=5,
+            daily_score=260,
+            daily_game_scores={
+                "grammar_particle_fix": 45,
+                "pronunciation_match": 35,
+                "sentence_order": 70,
+            },
+        )
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = date(2026, 3, 11)
+            first_daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(first_daily.status_code, 200)
+        first_progress = first_daily.json()["daily_progress"]
+        self.assertFalse(first_progress["weekly_exam_due"])
+        self.assertEqual(first_progress["weekly_exam_cooldown_days"], 2)
+        self.assertEqual(first_progress["weekly_exam_days_until_due"], 1)
+        self.assertEqual(
+            first_progress["weekly_exam_retry_weak_game_types"],
+            ["grammar_particle_fix", "pronunciation_match"],
+        )
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = date(2026, 3, 12)
+            second_daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(second_daily.status_code, 200)
+        second_progress = second_daily.json()["daily_progress"]
+        self.assertTrue(second_progress["weekly_exam_due"])
+        self.assertEqual(second_progress["weekly_exam_days_until_due"], 0)
+
+    def test_passed_weekly_exam_keeps_seven_day_cooldown(self) -> None:
+        topic_key = "identity_and_plans"
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        api.memory.save_weekly_exam_result(
+            learner_id=self.learner_id,
+            day_iso="2026-03-10",
+            passed=True,
+        )
+        self._insert_daily_topic_progress_row(
+            day_iso="2026-03-10",
+            topic_key=topic_key,
+            level_state=5,
+            daily_score=380,
+            daily_game_scores={"context_quiz": 100},
+        )
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = date(2026, 3, 16)
+            daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(daily.status_code, 200)
+        progress = daily.json()["daily_progress"]
+        self.assertFalse(progress["weekly_exam_due"])
+        self.assertTrue(progress["weekly_exam_last_passed"])
+        self.assertEqual(progress["weekly_exam_cooldown_days"], 7)
+        self.assertEqual(progress["weekly_exam_days_until_due"], 1)
+
     def test_daily_score_stays_capped_at_400_after_duplicate_daily_evaluations(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
@@ -2296,6 +2445,36 @@ class TopicDailyFlowTests(unittest.TestCase):
             return payload
 
         raise AssertionError(f"Unsupported daily game in topic flow test: {game_type}")
+
+    def _insert_daily_topic_progress_row(
+        self,
+        *,
+        day_iso: str,
+        topic_key: str,
+        level_state: int,
+        daily_score: int,
+        daily_game_scores: dict[str, int] | None = None,
+        daily_game_failures: dict[str, int] | None = None,
+    ) -> None:
+        with api.memory._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO daily_topic_progress (
+                    learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json,
+                    level_state, daily_score, daily_game_scores_json, daily_game_failures_json
+                )
+                VALUES (?, ?, 'ja', ?, 1, '[]', ?, ?, ?, ?)
+                """,
+                (
+                    self.learner_id,
+                    day_iso,
+                    topic_key,
+                    int(level_state),
+                    int(daily_score),
+                    json.dumps(daily_game_scores or {}),
+                    json.dumps(daily_game_failures or {}),
+                ),
+            )
 
     def _bad_payload_for_card(self, card: dict) -> dict:
         payload = {"item_id": card["activity_id"]}

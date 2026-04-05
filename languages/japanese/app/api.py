@@ -1047,13 +1047,121 @@ async def _topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str,
     return fallback_lessons
 
 
+def _available_lesson_levels(
+    topic: TopicDefinition,
+    *,
+    lessons_by_level: dict[int, dict[str, Any]] | None = None,
+) -> tuple[int, ...]:
+    if lessons_by_level:
+        normalized = sorted({int(level) for level in lessons_by_level.keys()})
+        if normalized:
+            return tuple(normalized)
+    return tuple(sorted(int(level) for level in topic.lessons_by_level.keys()))
+
+
+def _nearest_available_lesson_level(requested_level: int, available_levels: tuple[int, ...]) -> int:
+    if not available_levels:
+        return max(1, int(requested_level))
+    normalized_level = max(available_levels[0], min(int(requested_level), available_levels[-1]))
+    for candidate in reversed(available_levels):
+        if candidate <= normalized_level:
+            return int(candidate)
+    return int(available_levels[0])
+
+
+def _topic_lesson_selection(
+    *,
+    learner_id: str | None,
+    language: str,
+    topic: TopicDefinition,
+    requested_level: int,
+    day_iso: str | None,
+    lessons_by_level: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    available_levels = _available_lesson_levels(topic, lessons_by_level=lessons_by_level)
+    if not available_levels:
+        selected_level = max(1, int(requested_level))
+        return {
+            "selected_level": selected_level,
+            "reinforcement_mode": False,
+            "available_levels": [selected_level],
+            "requested_level": max(1, int(requested_level)),
+        }
+
+    normalized_requested_level = max(1, int(requested_level))
+    max_available_level = int(available_levels[-1])
+    if normalized_requested_level <= max_available_level or not learner_id or not day_iso:
+        return {
+            "selected_level": _nearest_available_lesson_level(normalized_requested_level, available_levels),
+            "reinforcement_mode": False,
+            "available_levels": list(available_levels),
+            "requested_level": normalized_requested_level,
+        }
+
+    topic_rows = [
+        row
+        for row in memory.list_daily_topic_progress_rows(learner_id=learner_id, language=language, limit=120)
+        if row.topic_key == topic.topic_key and str(row.day_iso) < str(day_iso) and int(row.daily_score or 0) > 0
+    ]
+    reinforcement_days = sum(1 for row in topic_rows if int(row.level_state or 1) > max_available_level)
+    score_samples: dict[int, list[int]] = {int(level): [] for level in available_levels}
+    for row in topic_rows:
+        mapped_level = _nearest_available_lesson_level(min(int(row.level_state or 1), max_available_level), available_levels)
+        score_samples[mapped_level].append(int(row.daily_score or 0))
+
+    ranked_levels = list(available_levels)
+    Random(f"{learner_id}:{language}:{topic.topic_key}:lesson-reinforcement").shuffle(ranked_levels)
+    ranked_levels.sort(
+        key=lambda level: (
+            not score_samples[int(level)],
+            (sum(score_samples[int(level)]) / len(score_samples[int(level)])) if score_samples[int(level)] else 999.0,
+        )
+    )
+    selected_level = int(ranked_levels[reinforcement_days % len(ranked_levels)])
+    averages = {
+        str(level): round(sum(samples) / len(samples), 1)
+        for level, samples in score_samples.items()
+        if samples
+    }
+    logger.info(
+        "topic_lesson_reinforcement learner_id=%s language=%s topic=%s requested_level=%s selected_level=%s max_available=%s overflow_days=%s ranked_levels=%s score_averages=%s",
+        learner_id,
+        language,
+        topic.topic_key,
+        normalized_requested_level,
+        selected_level,
+        max_available_level,
+        reinforcement_days,
+        ranked_levels,
+        averages,
+    )
+    return {
+        "selected_level": selected_level,
+        "reinforcement_mode": True,
+        "available_levels": list(available_levels),
+        "requested_level": normalized_requested_level,
+        "ranked_levels": [int(level) for level in ranked_levels],
+    }
+
+
 def _topic_lesson_payload(
     topic: TopicDefinition,
     level: int,
+    learner_id: str | None = None,
+    language: str | None = None,
+    day_iso: str | None = None,
     secondary_translation_language: str | None = None,
     lessons_by_level: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    selected_level = int(level)
+    selection = _topic_lesson_selection(
+        learner_id=learner_id,
+        language=language or topic.language,
+        topic=topic,
+        requested_level=level,
+        day_iso=day_iso,
+        lessons_by_level=lessons_by_level,
+    )
+    selected_level = int(selection["selected_level"])
     if lessons_by_level and selected_level in lessons_by_level:
         lesson_payload = dict(lessons_by_level[selected_level])
     else:
@@ -1074,6 +1182,8 @@ def _topic_lesson_payload(
         "topic_title": topic.title,
         "topic_description": topic.description,
         "level": level,
+        "lesson_level": selected_level,
+        "reinforcement_mode": bool(selection.get("reinforcement_mode")),
         "title": str(lesson_payload.get("title", "")).strip(),
         "objective": str(lesson_payload.get("objective", "")).strip(),
         "theory_points": theory_points,
@@ -1081,6 +1191,8 @@ def _topic_lesson_payload(
         "example_romanized": str(lesson_payload.get("example_romanized", "")).strip(),
         "example_literal_translation": str(lesson_payload.get("example_literal_translation", "")).strip(),
     }
+    if selection.get("reinforcement_mode"):
+        payload["reinforcement_ranked_levels"] = list(selection.get("ranked_levels", []))
     return _augment_with_secondary_translations(
         payload,
         secondary_language=secondary_translation_language,
@@ -1177,6 +1289,9 @@ def _prewarm_lesson_daily_translation_cache(
                 "lesson": _topic_lesson_payload(
                     topic=topic,
                     level=level,
+                    learner_id=learner_id,
+                    language=language,
+                    day_iso=date.today().isoformat(),
                     secondary_translation_language=None,
                     lessons_by_level=_TOPIC_LESSONS_AI_CACHE.get((topic.language, topic.topic_key)),
                 ),
@@ -1213,7 +1328,55 @@ def _target_score_for_topic_day(topic_day_index: int, *, daily_score_cap: int) -
     return int(min(cap, round(target)))
 
 
-def _weekly_exam_due(last_exam_day_iso: str | None, today_iso: str) -> bool:
+def _weekly_exam_retry_weak_game_types(
+    *,
+    learner_id: str,
+    language: str,
+    topic_key: str,
+    score_threshold: int = 50,
+) -> list[str]:
+    score_totals: dict[str, int] = {}
+    score_counts: dict[str, int] = {}
+    for row in memory.list_daily_topic_progress_rows(learner_id=learner_id, language=language, limit=120):
+        if row.topic_key != topic_key:
+            continue
+        for game_type, score in row.daily_game_scores().items():
+            normalized_game_type = str(game_type).strip()
+            if not normalized_game_type:
+                continue
+            score_totals[normalized_game_type] = int(score_totals.get(normalized_game_type, 0)) + int(score)
+            score_counts[normalized_game_type] = int(score_counts.get(normalized_game_type, 0)) + 1
+
+    weak_game_types: list[str] = []
+    normalized_threshold = max(1, int(score_threshold))
+    for game_type in sorted(score_totals):
+        samples = max(1, int(score_counts.get(game_type, 1)))
+        average_score = score_totals[game_type] / samples
+        if average_score < normalized_threshold:
+            weak_game_types.append(game_type)
+    return weak_game_types
+
+
+def _weekly_exam_cooldown_days(
+    *,
+    learner_id: str,
+    language: str,
+    topic_key: str,
+    assessment: LearnerAssessmentState,
+) -> tuple[int, list[str]]:
+    if not assessment.weekly_exam_last_day_iso:
+        return 0, []
+    if assessment.last_weekly_exam_passed():
+        return 7, []
+    weak_game_types = _weekly_exam_retry_weak_game_types(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+    )
+    return max(1, len(weak_game_types)), weak_game_types
+
+
+def _weekly_exam_due(*, last_exam_day_iso: str | None, today_iso: str, cooldown_days: int) -> bool:
     if not last_exam_day_iso:
         return True
     try:
@@ -1221,7 +1384,21 @@ def _weekly_exam_due(last_exam_day_iso: str | None, today_iso: str) -> bool:
         today = date.fromisoformat(today_iso)
     except ValueError:
         return True
-    return (today - last_day) >= timedelta(days=7)
+    normalized_cooldown = max(1, int(cooldown_days))
+    return (today - last_day) >= timedelta(days=normalized_cooldown)
+
+
+def _weekly_exam_days_until_due(*, last_exam_day_iso: str | None, today_iso: str, cooldown_days: int) -> int:
+    if not last_exam_day_iso:
+        return 0
+    try:
+        last_day = date.fromisoformat(last_exam_day_iso)
+        today = date.fromisoformat(today_iso)
+    except ValueError:
+        return 0
+    normalized_cooldown = max(1, int(cooldown_days))
+    elapsed_days = max(0, int((today - last_day).days))
+    return max(0, normalized_cooldown - elapsed_days)
 
 
 def _topic_mastery_level(*, recent_scores: list[int], window_days: int = TOPIC_MASTERY_WINDOW_DAYS) -> tuple[int, float]:
@@ -1473,6 +1650,7 @@ def _raw_debug_payload(*, learner_id: str, language: str) -> dict[str, Any]:
         "assessment": {
             "weekly_exam_last_day_iso": assessment.weekly_exam_last_day_iso,
             "weekly_exam_passed_count": int(assessment.weekly_exam_passed_count),
+            "weekly_exam_last_passed": bool(assessment.last_weekly_exam_passed()),
             "level_exams_passed": assessment.level_exams_passed(),
         },
         "progress_summary": {
@@ -1738,7 +1916,22 @@ def _progress_insights(
         level_1_to_2_passed=level_1_to_2_passed,
         level_2_to_3_passed=level_2_to_3_passed,
     )
-    weekly_exam_due = _weekly_exam_due(assessment.weekly_exam_last_day_iso, today_iso=today_iso)
+    weekly_exam_cooldown_days, weekly_exam_retry_weak_game_types = _weekly_exam_cooldown_days(
+        learner_id=learner_id,
+        language=language,
+        topic_key=topic_key,
+        assessment=assessment,
+    )
+    weekly_exam_due = _weekly_exam_due(
+        last_exam_day_iso=assessment.weekly_exam_last_day_iso,
+        today_iso=today_iso,
+        cooldown_days=weekly_exam_cooldown_days,
+    )
+    weekly_exam_days_until_due = _weekly_exam_days_until_due(
+        last_exam_day_iso=assessment.weekly_exam_last_day_iso,
+        today_iso=today_iso,
+        cooldown_days=weekly_exam_cooldown_days,
+    )
     closed_topics_count = memory.count_closed_topics(learner_id=learner_id, language=language)
     recent_topic_scores = memory.recent_topic_scores(
         learner_id=learner_id,
@@ -1763,7 +1956,11 @@ def _progress_insights(
         "topic_failure_totals": topic_failure_totals,
         "weekly_exam_due": bool(weekly_exam_due),
         "weekly_exam_last_day_iso": assessment.weekly_exam_last_day_iso,
+        "weekly_exam_last_passed": bool(assessment.last_weekly_exam_passed()),
         "weekly_exam_passed_count": int(assessment.weekly_exam_passed_count),
+        "weekly_exam_cooldown_days": int(weekly_exam_cooldown_days),
+        "weekly_exam_days_until_due": int(weekly_exam_days_until_due),
+        "weekly_exam_retry_weak_game_types": list(weekly_exam_retry_weak_game_types),
         "level_exam_passed_1_to_2": bool(level_1_to_2_passed),
         "level_exam_passed_2_to_3": bool(level_2_to_3_passed),
         "ready_to_level_2": bool(level_exam_ready_flags["ready_to_level_2"]),
@@ -2816,6 +3013,9 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
     response["lesson"] = _topic_lesson_payload(
         topic=topic,
         level=today_level,
+        learner_id=req.learner_id,
+        language=preferred_language,
+        day_iso=today_iso,
         secondary_translation_language=secondary_translation_language,
         lessons_by_level=lesson_ladder,
     )
@@ -3355,6 +3555,9 @@ async def load_topic_review(req: TopicReviewRequest) -> dict:
         "lesson": _topic_lesson_payload(
             topic=topic,
             level=review_level,
+            learner_id=learner_id,
+            language=language,
+            day_iso=date.today().isoformat(),
             secondary_translation_language=secondary_translation_language,
             lessons_by_level=lesson_ladder,
         ),
@@ -3408,12 +3611,31 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
         daily_progress=base_daily,
     )
     if not insights.get("weekly_exam_due"):
-        logger.info("weekly_exam_not_due learner_id=%s language=%s topic=%s", learner_id, language, topic.topic_key)
+        retry_days = int(insights.get("weekly_exam_days_until_due", 0))
+        retry_reason = (
+            f"Try again in {retry_days} day(s)."
+            if retry_days > 0
+            else "Try again tomorrow."
+        )
+        if bool(insights.get("weekly_exam_last_passed")):
+            error_message = f"Weekly mini-exam is not due yet. {retry_reason}"
+        else:
+            error_message = f"Weekly mini-exam is cooling down after the last failed attempt. {retry_reason}"
+        logger.info(
+            "weekly_exam_not_due learner_id=%s language=%s topic=%s cooldown_days=%s retry_days=%s last_passed=%s weak_game_types=%s",
+            learner_id,
+            language,
+            topic.topic_key,
+            int(insights.get("weekly_exam_cooldown_days", 0)),
+            retry_days,
+            bool(insights.get("weekly_exam_last_passed")),
+            list(insights.get("weekly_exam_retry_weak_game_types", [])),
+        )
         return _translate_response_for_learner(
             learner_id=learner_id,
             context="weekly_exam.not_due",
             payload={
-            "error": "Weekly mini-exam is not due yet.",
+            "error": error_message,
             "daily_progress": insights,
             },
         )

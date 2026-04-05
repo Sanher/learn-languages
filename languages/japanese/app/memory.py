@@ -104,6 +104,7 @@ class LearnerAssessmentState:
     learner_id: str
     weekly_exam_last_day_iso: str
     weekly_exam_passed_count: int
+    weekly_exam_last_passed: int
     level_exams_passed_json: str
 
     def level_exams_passed(self) -> dict[str, int]:
@@ -121,6 +122,9 @@ class LearnerAssessmentState:
             except (TypeError, ValueError):
                 continue
         return result
+
+    def last_weekly_exam_passed(self) -> bool:
+        return bool(int(self.weekly_exam_last_passed or 0))
 
 
 @dataclass
@@ -233,6 +237,7 @@ class ProgressMemory:
                     learner_id TEXT PRIMARY KEY,
                     weekly_exam_last_day_iso TEXT NOT NULL DEFAULT '',
                     weekly_exam_passed_count INTEGER NOT NULL DEFAULT 0,
+                    weekly_exam_last_passed INTEGER NOT NULL DEFAULT 0,
                     level_exams_passed_json TEXT NOT NULL DEFAULT '{}'
                 )
                 """
@@ -328,6 +333,7 @@ class ProgressMemory:
             self._ensure_column(conn, "topic_sequence_cache", "source", "TEXT NOT NULL DEFAULT 'fallback'")
             self._ensure_column(conn, "closed_topics", "closed_rank", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "closed_topics", "covers_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "learner_assessment_state", "weekly_exam_last_passed", "INTEGER NOT NULL DEFAULT 0")
         logger.info("memory_schema_ready db_path=%s", self.db_path)
 
     @staticmethod
@@ -1210,7 +1216,8 @@ class ProgressMemory:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT learner_id, weekly_exam_last_day_iso, weekly_exam_passed_count, level_exams_passed_json
+                SELECT learner_id, weekly_exam_last_day_iso, weekly_exam_passed_count,
+                       COALESCE(weekly_exam_last_passed, 0), level_exams_passed_json
                 FROM learner_assessment_state
                 WHERE learner_id = ?
                 """,
@@ -1221,9 +1228,10 @@ class ProgressMemory:
             conn.execute(
                 """
                 INSERT INTO learner_assessment_state (
-                    learner_id, weekly_exam_last_day_iso, weekly_exam_passed_count, level_exams_passed_json
+                    learner_id, weekly_exam_last_day_iso, weekly_exam_passed_count,
+                    weekly_exam_last_passed, level_exams_passed_json
                 )
-                VALUES (?, '', 0, '{}')
+                VALUES (?, '', 0, 0, '{}')
                 """,
                 (learner_id,),
             )
@@ -1232,6 +1240,7 @@ class ProgressMemory:
             learner_id=learner_id,
             weekly_exam_last_day_iso="",
             weekly_exam_passed_count=0,
+            weekly_exam_last_passed=0,
             level_exams_passed_json="{}",
         )
 
@@ -1243,10 +1252,11 @@ class ProgressMemory:
                 """
                 UPDATE learner_assessment_state
                 SET weekly_exam_last_day_iso = ?,
-                    weekly_exam_passed_count = ?
+                    weekly_exam_passed_count = ?,
+                    weekly_exam_last_passed = ?
                 WHERE learner_id = ?
                 """,
-                (day_iso, passed_count, learner_id),
+                (day_iso, passed_count, 1 if passed else 0, learner_id),
             )
         logger.info(
             "weekly_exam_saved learner_id=%s day=%s passed=%s passed_count=%s",
@@ -1259,6 +1269,7 @@ class ProgressMemory:
             learner_id=learner_id,
             weekly_exam_last_day_iso=day_iso,
             weekly_exam_passed_count=passed_count,
+            weekly_exam_last_passed=1 if passed else 0,
             level_exams_passed_json=state.level_exams_passed_json,
         )
 
@@ -1286,6 +1297,7 @@ class ProgressMemory:
             learner_id=state.learner_id,
             weekly_exam_last_day_iso=state.weekly_exam_last_day_iso,
             weekly_exam_passed_count=state.weekly_exam_passed_count,
+            weekly_exam_last_passed=state.weekly_exam_last_passed,
             level_exams_passed_json=passed_json,
         )
 
