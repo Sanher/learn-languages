@@ -71,6 +71,8 @@ const PRONUNCIATION_DEFAULT_AUDIO_SECONDS = 2.0;
 let pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
 let isEvaluatingGame = false;
 let loadingExtraGameType = '';
+let weeklyExamSession = null;
+let isSubmittingWeeklyExam = false;
 
 function renderRawDataOutput(payload) {
   if (!rawDataOutputEl) return;
@@ -974,7 +976,11 @@ function updateSentenceOrderStatusLine() {
 function renderSingleGame(game) {
   const lessonHtml = renderLessonPanel();
   const summaryHtml = renderTodaySummaryPanel();
-  if (!isLessonCompleted()) {
+  const weeklyExamActive = Boolean(game && game.weekly_exam && isWeeklyExamActive());
+  const weeklyQuestion = weeklyExamActive ? currentWeeklyExamQuestion() : null;
+  const weeklyIndex = weeklyExamActive ? Number(weeklyExamSession.currentIndex || 0) : -1;
+  const weeklyTotal = weeklyExamActive ? Number(weeklyExamSession.questions.length || 0) : 0;
+  if (!weeklyExamActive && !isLessonCompleted()) {
     const { totalCount } = dailyProgressCounts();
     gameZoneEl.classList.remove('hidden');
     gameZoneEl.innerHTML = `
@@ -986,7 +992,7 @@ function renderSingleGame(game) {
     return;
   }
 
-  if (areDailyGamesCompleted() && dailyGamesCollapsed && !isSelectedGameExtra()) {
+  if (!weeklyExamActive && areDailyGamesCompleted() && dailyGamesCollapsed && !isSelectedGameExtra()) {
     gameZoneEl.classList.remove('hidden');
     gameZoneEl.innerHTML = `
       ${lessonHtml}
@@ -1019,6 +1025,15 @@ function renderSingleGame(game) {
   const displayName = game.display_name || gameType;
   let promptHtml = renderTranslatedField(game, 'prompt', { className: 'prompt', multiline: true });
   let promptIncludesTranslation = true;
+  const weeklyExamHeaderHtml = weeklyExamActive
+    ? `
+      <div class="prompt game-meta">
+        <p class="game-meta-line"><strong>Weekly mini-exam</strong> · Question ${weeklyIndex + 1}/${weeklyTotal}</p>
+        <p class="game-meta-line">Topic: ${escapeHtml(game.weekly_topic_title || (dailyTopic && dailyTopic.title) || 'Current topic')}</p>
+        <p class="game-meta-line muted">Answer each question and submit at the end.</p>
+      </div>
+    `
+    : '';
   if (game.ai_generated_prompt) {
     promptHtml = `
       <div class="prompt game-meta">
@@ -1376,7 +1391,10 @@ function renderSingleGame(game) {
   const evaluateLabel = (gameType === 'pronunciation_match' || gameType === 'kana_speed_round')
     ? 'Evaluate audio'
     : 'Evaluate';
-  const showEvaluateButton = gameType !== 'sentence_order';
+  const primaryActionLabel = weeklyExamActive
+    ? (weeklyIndex + 1 >= weeklyTotal ? 'Submit weekly mini-exam' : 'Save answer and continue')
+    : evaluateLabel;
+  const showEvaluateButton = weeklyExamActive || gameType !== 'sentence_order';
   const promptSecondaryHtml = promptIncludesTranslation
     ? ''
     : renderTranslatedField(game, 'prompt', {
@@ -1390,12 +1408,14 @@ function renderSingleGame(game) {
     ${lessonHtml}
     <section class="game-card">
       <h2>${escapeHtml(displayName)}</h2>
+      ${weeklyExamHeaderHtml}
       ${promptHtml}
       ${promptSecondaryHtml}
       ${controls}
       <div class="actions">
-        ${showEvaluateButton ? `<button id="evaluate-btn">${evaluateLabel}</button>` : ''}
-        <button id="retry-btn" class="ghost-btn">Retry</button>
+        ${showEvaluateButton ? `<button id="evaluate-btn">${primaryActionLabel}</button>` : ''}
+        <button id="retry-btn" class="ghost-btn">${weeklyExamActive ? 'Reset question' : 'Retry'}</button>
+        ${weeklyExamActive ? '<button id="cancel-weekly-exam-btn" class="ghost-btn" type="button">Cancel weekly mini-exam</button>' : ''}
       </div>
       <div id="game-result" class="result"></div>
     </section>
@@ -1411,6 +1431,29 @@ function renderSidebar(games) {
     className: 'muted',
     multiline: true,
   });
+  if (isWeeklyExamActive()) {
+    const currentIndex = Number(weeklyExamSession.currentIndex || 0);
+    const total = Number(weeklyExamSession.questions.length || 0);
+    const questionList = weeklyExamSession.questions
+      .map((question, index) => {
+        const active = index === currentIndex ? 'active-game' : '';
+        const answered = weeklyExamSession.answers[index] ? ' <span class="done-tag">Saved</span>' : '';
+        return `
+          <div class="sidebar-game ${active}">
+            ${index + 1}. ${escapeHtml(question.display_name || question.game_type || `Question ${index + 1}`)}${answered}
+          </div>
+        `;
+      })
+      .join('');
+    gamesSidebarEl.innerHTML = `
+      <h3>Weekly mini-exam</h3>
+      ${sidebarTopicLine}
+      ${sidebarTopicDescriptionLine || ''}
+      <p class="muted">Question ${currentIndex + 1}/${total}</p>
+      <div class="sidebar-list">${questionList}</div>
+    `;
+    return;
+  }
   if (isReviewMode) {
     const reviewList = (dailyGameCards || [])
       .map((game) => {
@@ -1694,7 +1737,9 @@ function syncSentenceOrderLocks() {
   if (allFilled && allCorrect && !state.autoEvaluated) {
     state.autoEvaluated = true;
     sentenceOrderPenaltyByAttempt.set(gameAttemptKey(selectedGame), state);
-    evaluateSelectedGame(false);
+    if (!isWeeklyExamActive()) {
+      evaluateSelectedGame(false);
+    }
   }
 }
 
@@ -2496,98 +2541,159 @@ function parseMoraRomajiFromPrompt(prompt) {
   return raw.split(/\s+/).map((token) => token.trim()).filter(Boolean);
 }
 
-function buildWeeklyExamAnswerPayload(question) {
-  const payload = {};
-  const source = (question && question.payload) || {};
-  const gameType = String((question && question.game_type) || '');
-  const itemId = String((question && question.item_id) || source.item_id || '').trim();
+function isWeeklyExamActive() {
+  return Boolean(
+    weeklyExamSession
+    && Array.isArray(weeklyExamSession.questions)
+    && weeklyExamSession.questions.length > 0
+  );
+}
+
+function currentWeeklyExamQuestion() {
+  if (!isWeeklyExamActive()) return null;
+  const maxIndex = weeklyExamSession.questions.length - 1;
+  const safeIndex = Math.max(0, Math.min(Number(weeklyExamSession.currentIndex || 0), maxIndex));
+  return weeklyExamSession.questions[safeIndex] || null;
+}
+
+function weeklyExamQuestionToGame(question) {
+  if (!question || typeof question !== 'object') return null;
+  const payload = question.payload && typeof question.payload === 'object'
+    ? { ...question.payload }
+    : {};
+  const itemId = String(question.item_id || payload.item_id || '').trim();
   if (itemId) {
     payload.item_id = itemId;
   }
+  return {
+    activity_id: itemId,
+    game_type: String(question.game_type || ''),
+    display_name: String(question.display_name || question.game_type || ''),
+    language: String(question.language || currentLanguage || 'ja'),
+    level: Number(question.level || currentLevel || 1),
+    prompt: String(question.prompt || ''),
+    payload,
+    weekly_exam: true,
+    weekly_question_id: String(question.question_id || ''),
+    weekly_topic_key: String(question.topic_key || ''),
+    weekly_topic_title: String(question.topic_title || ''),
+    weekly_source: String(question.source || ''),
+  };
+}
 
-  if (gameType === 'sentence_order') {
-    payload.ordered_tokens_by_user = Array.isArray(source.ordered_tokens) ? source.ordered_tokens : [];
-    return payload;
+function loadWeeklyExamQuestionAt(index) {
+  if (!isWeeklyExamActive()) return;
+  const maxIndex = weeklyExamSession.questions.length - 1;
+  const safeIndex = Math.max(0, Math.min(Number(index || 0), maxIndex));
+  weeklyExamSession.currentIndex = safeIndex;
+  selectedGame = weeklyExamQuestionToGame(weeklyExamSession.questions[safeIndex]);
+  retryCounters.clear();
+  sentenceOrderPenaltyByAttempt.clear();
+  renderSidebar(availableGameCards);
+  renderSingleGame(selectedGame);
+  wireGameActions();
+}
+
+// Weekly exams reuse the normal game UI, but answers stay client-side until the
+// final cumulative submission instead of calling /api/games/evaluate per question.
+function openWeeklyExamSession(data) {
+  const questions = Array.isArray(data && data.questions) ? data.questions : [];
+  if (questions.length === 0) return false;
+  weeklyExamSession = {
+    topicKey: (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '',
+    questions,
+    answers: new Array(questions.length).fill(null),
+    currentIndex: 0,
+  };
+  dailyGamesCollapsed = false;
+  loadWeeklyExamQuestionAt(0);
+  return true;
+}
+
+async function closeWeeklyExamSession({ reloadDaily = false } = {}) {
+  weeklyExamSession = null;
+  isSubmittingWeeklyExam = false;
+  retryCounters.clear();
+  sentenceOrderPenaltyByAttempt.clear();
+  if (reloadDaily) {
+    await loadDailyGame();
+    return;
   }
+  refreshAvailableGameCards();
+  selectedGame = isLessonCompleted() ? (nextPendingDailyGame() || availableGameCards[0] || null) : null;
+  renderSidebar(availableGameCards);
+  renderSingleGame(selectedGame);
+  wireGameActions();
+}
 
-  if (gameType === 'listening_gap_fill') {
-    const tokens = Array.isArray(source.tokens) ? source.tokens : [];
-    const positions = Array.isArray(source.gap_positions) ? source.gap_positions : [];
-    payload.user_gap_tokens = positions
-      .map((position) => Number(position))
-      .filter((position) => Number.isInteger(position) && position >= 0 && position < tokens.length)
-      .map((position) => String(tokens[position] || '').trim())
-      .filter(Boolean);
-    return payload;
-  }
+function saveCurrentWeeklyExamAnswer() {
+  const question = currentWeeklyExamQuestion();
+  if (!question || !selectedGame) return null;
+  const answer = {
+    question_id: String(question.question_id || ''),
+    topic_key: String(question.topic_key || ''),
+    game_type: String(question.game_type || ''),
+    item_id: String(question.item_id || ''),
+    payload: collectPayload(selectedGame),
+  };
+  weeklyExamSession.answers[weeklyExamSession.currentIndex] = answer;
+  return answer;
+}
 
-  if (gameType === 'mora_romanization') {
-    const moraTokens = Array.isArray(source.mora_romaji_tokens) ? source.mora_romaji_tokens : parseMoraRomajiFromPrompt(question?.prompt);
-    payload.user_romanized_text = moraTokens.join(' ');
-    return payload;
-  }
-
-  if (gameType === 'context_quiz') {
-    const options = Array.isArray(source.options) ? source.options : [];
-    const firstOption = options.find((opt) => opt && typeof opt.id === 'string');
-    payload.selected_option_id = firstOption ? firstOption.id : '';
-    return payload;
-  }
-
-  if (gameType === 'grammar_particle_fix') {
-    const options = Array.isArray(source.options) ? source.options : [];
-    payload.selected_particle = options.length > 0 ? String(options[0]) : '';
-    return payload;
-  }
-
-  if (gameType === 'kanji_match') {
-    const pairs = Array.isArray(source.pairs) ? source.pairs : [];
-    const learnerReadings = {};
-    const learnerMeanings = {};
-    pairs.forEach((pair) => {
-      const symbol = String((pair && pair.symbol) || '').trim();
-      if (!symbol) return;
-      learnerReadings[symbol] = String((pair && pair.reading_romaji) || '').trim();
-      learnerMeanings[symbol] = String((pair && pair.meaning) || '').trim();
+async function submitWeeklyExamAnswers() {
+  if (!isWeeklyExamActive() || isSubmittingWeeklyExam) return;
+  isSubmittingWeeklyExam = true;
+  setEvaluateLoadingState(true);
+  try {
+    const topicKey = weeklyExamSession.topicKey || (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '';
+    const answers = weeklyExamSession.answers.filter(Boolean);
+    const res = await fetch(apiUrl('api/exams/weekly'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        learner_id: learnerId,
+        language: currentLanguage,
+        topic_key: topicKey,
+        mode: 'cumulative',
+        answers,
+      }),
     });
-    payload.learner_readings = learnerReadings;
-    payload.learner_meanings = learnerMeanings;
-    payload.learner_matches = learnerMeanings;
-    return payload;
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      if (data.daily_progress) {
+        dailyProgress = data.daily_progress;
+      }
+      window.alert(data.error || 'Weekly mini-exam submission failed.');
+      return;
+    }
+    if (data.daily_progress) {
+      dailyProgress = data.daily_progress;
+    }
+    window.alert(data.feedback || 'Weekly mini-exam completed.');
+    await closeWeeklyExamSession({ reloadDaily: true });
+  } finally {
+    isSubmittingWeeklyExam = false;
+    setEvaluateLoadingState(false);
   }
+}
 
-  if (gameType === 'pronunciation_match') {
-    const expectedText = String(source.expected_text || question?.prompt || '').trim();
-    payload.expected_text = expectedText;
-    payload.recognized_text = expectedText;
-    payload.audio_duration_seconds = 2.0;
-    payload.speech_seconds = 2.0;
-    payload.pause_seconds = 0.2;
-    payload.pitch_track_hz = [150.0, 151.0, 149.0];
-    return payload;
+async function advanceWeeklyExamQuestion() {
+  if (!isWeeklyExamActive()) return;
+  saveCurrentWeeklyExamAnswer();
+  const nextIndex = Number(weeklyExamSession.currentIndex || 0) + 1;
+  if (nextIndex >= weeklyExamSession.questions.length) {
+    await submitWeeklyExamAnswers();
+    return;
   }
-
-  if (gameType === 'kana_speed_round') {
-    const expectedText = String(source.expected_text || '').trim();
-    payload.expected_text = expectedText;
-    payload.recognized_text = expectedText;
-    payload.sequence_expected = parseTokenList(expectedText, ' ');
-    payload.sequence_read = parseTokenList(expectedText, ' ');
-    payload.elapsed_seconds = KANA_DEFAULT_ELAPSED_SECONDS;
-    payload.audio_duration_seconds = KANA_DEFAULT_ELAPSED_SECONDS;
-    payload.speech_seconds = KANA_DEFAULT_ELAPSED_SECONDS;
-    payload.pause_seconds = 0.2;
-    payload.pitch_track_hz = [150.0, 149.0, 151.0];
-    return payload;
-  }
-
-  return payload;
+  loadWeeklyExamQuestionAt(nextIndex);
 }
 
 async function takeWeeklyExam() {
   const weeklyExamBtn = document.getElementById('weekly-exam-btn');
+  const previousText = weeklyExamBtn ? weeklyExamBtn.textContent : '';
   if (weeklyExamBtn) {
     weeklyExamBtn.disabled = true;
+    weeklyExamBtn.textContent = 'Loading...';
   }
   try {
     const topicKey = (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '';
@@ -2624,36 +2730,12 @@ async function takeWeeklyExam() {
       window.alert('Weekly mini-exam could not start: no questions generated.');
       return;
     }
-
-    // Cumulative mode: build answer payloads from generated question cards and submit in a second call.
-    const answers = questions.map((question) => ({
-      question_id: question.question_id,
-      payload: buildWeeklyExamAnswerPayload(question),
-    }));
-    const secondRes = await fetch(apiUrl('api/exams/weekly'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        learner_id: learnerId,
-        language: currentLanguage,
-        topic_key: topicKey,
-        mode: 'cumulative',
-        answers,
-      }),
-    });
-    const secondData = await secondRes.json();
-    if (!secondRes.ok || secondData.error) {
-      window.alert(secondData.error || 'Weekly mini-exam submission failed.');
-      if (secondData.daily_progress) {
-        dailyProgress = secondData.daily_progress;
-      }
-      return;
-    }
-    if (secondData.daily_progress) {
-      dailyProgress = secondData.daily_progress;
-    }
-    window.alert(secondData.feedback || 'Weekly mini-exam completed.');
+    openWeeklyExamSession(firstData);
   } finally {
+    if (weeklyExamBtn) {
+      weeklyExamBtn.disabled = false;
+      weeklyExamBtn.textContent = previousText || 'Take weekly mini-exam';
+    }
     updateTopbar();
     renderSingleGame(selectedGame);
     wireGameActions();
@@ -2720,8 +2802,10 @@ async function loadExtraGameCard(gameType) {
 }
 
 function wireGameActions() {
+  const weeklyExamActive = isWeeklyExamActive();
   const evaluateBtn = document.getElementById('evaluate-btn');
   const retryBtn = document.getElementById('retry-btn');
+  const cancelWeeklyExamBtn = document.getElementById('cancel-weekly-exam-btn');
   const completeLessonBtn = document.getElementById('complete-lesson-btn');
   const toggleLessonBtn = document.getElementById('toggle-lesson-btn');
   const reviewLessonBtn = document.getElementById('review-lesson-btn');
@@ -2744,8 +2828,18 @@ function wireGameActions() {
   const exitReviewBtn = document.getElementById('exit-review-btn');
   const reviewTopicBtns = Array.from(document.querySelectorAll('.closed-topic-review-btn'));
   completeLessonBtn?.addEventListener('click', completeDailyLesson);
-  evaluateBtn?.addEventListener('click', () => evaluateSelectedGame(false));
+  evaluateBtn?.addEventListener('click', () => {
+    if (weeklyExamActive) {
+      void advanceWeeklyExamQuestion();
+      return;
+    }
+    evaluateSelectedGame(false);
+  });
   retryBtn?.addEventListener('click', () => {
+    if (weeklyExamActive) {
+      loadWeeklyExamQuestionAt(Number(weeklyExamSession.currentIndex || 0));
+      return;
+    }
     if (selectedGame && selectedGame.game_type === 'sentence_order') {
       sentenceOrderPenaltyByAttempt.delete(gameAttemptKey(selectedGame));
       renderSingleGame(selectedGame);
@@ -2753,6 +2847,9 @@ function wireGameActions() {
       return;
     }
     evaluateSelectedGame(true);
+  });
+  cancelWeeklyExamBtn?.addEventListener('click', () => {
+    void closeWeeklyExamSession();
   });
   kanaPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
   listeningPlayBtn?.addEventListener('click', () => playTtsAudio(selectedGame));
@@ -2895,6 +2992,8 @@ function getDragAfterElement(container, y) {
 
 async function loadDailyGame() {
   renderDailyLoadingState();
+  weeklyExamSession = null;
+  isSubmittingWeeklyExam = false;
 
   let res;
   let data;
@@ -3027,6 +3126,7 @@ secondaryTranslationSelectEl?.addEventListener('change', changeSecondaryTranslat
 gamesSidebarEl?.addEventListener('click', (event) => {
   const target = event.target;
   if (!target || !target.dataset || target.dataset.action !== 'pick-game') return;
+  if (isWeeklyExamActive()) return;
   if (!isLessonCompleted()) return;
   if (loadingExtraGameType) return;
   const gameType = target.dataset.game;
