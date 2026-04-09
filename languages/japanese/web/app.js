@@ -73,6 +73,7 @@ let isEvaluatingGame = false;
 let loadingExtraGameType = '';
 let weeklyExamSession = null;
 let weeklyExamResult = null;
+let levelExamResult = null;
 let isSubmittingWeeklyExam = false;
 
 function renderRawDataOutput(payload) {
@@ -337,7 +338,7 @@ function renderLevelProgressBlock(options = {}) {
   const heading = `${rankPrefix}Level ${progress.currentLevel} -> ${progress.nextLevel}`;
   const summary = `${progress.pointsCurrent}/${progress.pointsTarget} accumulated points · ${progress.pointsRemaining} needed`;
   const status = progress.statusMessage || (progress.readyForExam
-    ? 'Ready for level exam.'
+    ? 'Ready for rank exam.'
     : summary);
   const noticeText = includeNotice && levelUpNotice && levelUpNotice.message
     ? String(levelUpNotice.message)
@@ -771,7 +772,7 @@ function renderLessonPanel() {
   const readyTo2 = Boolean(dailyProgress && dailyProgress.ready_to_level_2);
   const readyTo3 = Boolean(dailyProgress && dailyProgress.ready_to_level_3);
   const levelExamReady = readyTo2 || readyTo3;
-  const levelExamLabel = readyTo2 ? 'Take level exam (1 -> 2)' : (readyTo3 ? 'Take level exam (2 -> 3)' : 'Level exam locked');
+  const levelExamLabel = readyTo2 ? 'Take rank exam (1 -> 2)' : (readyTo3 ? 'Take rank exam (2 -> 3)' : 'Rank exam locked');
   const levelExamDisabled = (levelExamReady && lessonDone && completedCount >= totalCount) ? '' : 'disabled';
   const closedTopicsCount = Number((dailyProgress && dailyProgress.closed_topics_count) || 0);
   const lessonTitleHtml = renderTranslatedField(dailyLesson, 'title', { tag: 'h2' }) || '<h2>Daily lesson</h2>';
@@ -950,6 +951,10 @@ function isWeeklyExamResultVisible() {
   return Boolean(weeklyExamResult && !isWeeklyExamActive());
 }
 
+function isLevelExamResultVisible() {
+  return Boolean(levelExamResult && !isWeeklyExamActive());
+}
+
 function renderWeeklyExamResultCard() {
   if (!weeklyExamResult) return '';
   const results = Array.isArray(weeklyExamResult.answer_results) ? weeklyExamResult.answer_results : [];
@@ -1049,6 +1054,73 @@ function renderWeeklyExamResultCard() {
   `;
 }
 
+function renderLevelExamResultCard() {
+  if (!levelExamResult) return '';
+  const criteria = Array.isArray(levelExamResult.rank_exam_criteria) ? levelExamResult.rank_exam_criteria : [];
+  const feedbackHtml = renderTranslatedField(levelExamResult, 'feedback', {
+    label: 'Summary',
+    className: 'result-line',
+    multiline: true,
+  });
+  const fromRank = titleCaseWord(levelExamResult.from_rank || levelExamResult.current_rank || 'beginner');
+  const toRank = titleCaseWord(levelExamResult.to_rank || levelExamResult.next_rank || levelExamResult.current_rank || '');
+  const transitionLabel = toRank && toRank !== fromRank ? `${fromRank} -> ${toRank}` : fromRank;
+  const criteriaHtml = criteria
+    .map((criterion, index) => {
+      const isPassed = Boolean(criterion && criterion.passed);
+      const statusClass = isPassed ? 'is-correct' : 'is-review';
+      const statusLabel = isPassed ? 'Passed' : 'Needs work';
+      const labels = {
+        score: 'Score threshold',
+        failures: 'Failure pressure',
+        retention: 'Retention',
+        competencies: 'Rank competencies',
+      };
+      const title = labels[String((criterion && criterion.key) || '').trim()] || `Criterion ${index + 1}`;
+      const actual = String((criterion && criterion.actual) || '').trim();
+      const expected = String((criterion && criterion.expected) || '').trim();
+      const explanationHtml = renderTranslatedField(criterion, 'explanation', {
+        label: 'Explanation',
+        className: 'result-line',
+        multiline: true,
+      });
+      return `
+        <article class="result-block level-exam-review-item ${statusClass}">
+          <div class="weekly-exam-review-head">
+            <div>
+              <p class="weekly-exam-review-kicker">Criterion ${index + 1}</p>
+              <h3>${escapeHtml(title)}</h3>
+            </div>
+            <div class="weekly-exam-review-meta">
+              <span class="weekly-exam-status ${statusClass}">${statusLabel}</span>
+            </div>
+          </div>
+          ${actual ? `<p class="result-line"><strong>Current:</strong> ${escapeHtml(actual)}</p>` : ''}
+          ${expected ? `<p class="result-line"><strong>Expected:</strong> ${escapeHtml(expected)}</p>` : ''}
+          ${explanationHtml}
+        </article>
+      `;
+    })
+    .join('');
+
+  return `
+    <section class="game-summary-card level-exam-summary-card">
+      <h2>Rank exam results</h2>
+      <p><strong>Status:</strong> ${levelExamResult.passed ? 'Passed' : 'Not passed yet'}</p>
+      <p><strong>Rank path:</strong> ${escapeHtml(transitionLabel)}</p>
+      <p><strong>Score:</strong> ${escapeHtml(Number(levelExamResult.exam_score || 0))}/${escapeHtml(Number(levelExamResult.pass_threshold || 0))}</p>
+      <p class="muted">Failures: ${escapeHtml(Number(levelExamResult.failure_total || 0))}/${escapeHtml(Number(levelExamResult.failure_limit || 0))}.</p>
+      ${feedbackHtml}
+      <div class="actions weekly-exam-result-actions">
+        <button id="level-exam-continue-btn" type="button">Return to topic flow</button>
+      </div>
+      <div class="level-exam-review-list">
+        ${criteriaHtml || '<p class="muted">No rank exam review criteria available.</p>'}
+      </div>
+    </section>
+  `;
+}
+
 function sentenceOrderState(game) {
   if (!game) return null;
   const key = gameAttemptKey(game);
@@ -1088,6 +1160,15 @@ function renderSingleGame(game) {
     gameZoneEl.innerHTML = `
       ${lessonHtml}
       ${renderWeeklyExamResultCard()}
+      ${summaryHtml}
+    `;
+    return;
+  }
+  if (!weeklyExamActive && isLevelExamResultVisible()) {
+    gameZoneEl.classList.remove('hidden');
+    gameZoneEl.innerHTML = `
+      ${lessonHtml}
+      ${renderLevelExamResultCard()}
       ${summaryHtml}
     `;
     return;
@@ -1537,6 +1618,36 @@ function renderSidebar(games) {
     className: 'muted',
     multiline: true,
   });
+  if (isLevelExamResultVisible()) {
+    const criteria = Array.isArray(levelExamResult.rank_exam_criteria) ? levelExamResult.rank_exam_criteria : [];
+    const criteriaRows = criteria
+      .map((item, index) => {
+        const labels = {
+          score: 'Score',
+          failures: 'Failures',
+          retention: 'Retention',
+          competencies: 'Competencies',
+        };
+        const key = String((item && item.key) || '').trim();
+        const label = labels[key] || `Criterion ${index + 1}`;
+        const status = item && item.passed ? 'Passed' : 'Review';
+        return `
+          <div class="sidebar-game">
+            ${escapeHtml(label)}
+            <span class="done-tag">${escapeHtml(status)}</span>
+          </div>
+        `;
+      })
+      .join('');
+    gamesSidebarEl.innerHTML = `
+      <h3>Rank exam results</h3>
+      ${sidebarTopicLine}
+      ${sidebarTopicDescriptionLine || ''}
+      <p class="muted">Score: ${escapeHtml(Number(levelExamResult.exam_score || 0))}/${escapeHtml(Number(levelExamResult.pass_threshold || 0))}</p>
+      <div class="sidebar-list">${criteriaRows || '<p class="muted">No rank exam review criteria available.</p>'}</div>
+    `;
+    return;
+  }
   if (isWeeklyExamResultVisible()) {
     const results = Array.isArray(weeklyExamResult.answer_results) ? weeklyExamResult.answer_results : [];
     const reviewRows = results
@@ -2728,6 +2839,7 @@ function openWeeklyExamSession(data) {
   const questions = Array.isArray(data && data.questions) ? data.questions : [];
   if (questions.length === 0) return false;
   weeklyExamResult = null;
+  levelExamResult = null;
   weeklyExamSession = {
     topicKey: (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '',
     questions,
@@ -2742,6 +2854,7 @@ function openWeeklyExamSession(data) {
 async function closeWeeklyExamSession({ reloadDaily = false } = {}) {
   weeklyExamSession = null;
   weeklyExamResult = null;
+  levelExamResult = null;
   isSubmittingWeeklyExam = false;
   retryCounters.clear();
   sentenceOrderPenaltyByAttempt.clear();
@@ -2878,6 +2991,7 @@ async function takeWeeklyExam() {
 }
 
 async function takeLevelExam() {
+  levelExamResult = null;
   const res = await fetch(apiUrl('api/exams/level'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2888,18 +3002,16 @@ async function takeLevelExam() {
   });
   const data = await res.json();
   if (!res.ok || data.error) {
-    window.alert(data.error || 'Level exam request failed.');
+    window.alert(data.error || 'Rank exam request failed.');
   } else {
-    window.alert(data.feedback || 'Level exam completed.');
+    weeklyExamResult = null;
+    levelExamResult = data;
   }
   if (data.daily_progress) {
     dailyProgress = data.daily_progress;
   }
-  if (data.promoted) {
-    await loadDailyGame();
-    return;
-  }
   updateTopbar();
+  renderSidebar(availableGameCards);
   renderSingleGame(selectedGame);
   wireGameActions();
 }
@@ -2954,6 +3066,7 @@ function wireGameActions() {
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
   const weeklyExamBtn = document.getElementById('weekly-exam-btn');
   const weeklyExamContinueBtn = document.getElementById('weekly-exam-continue-btn');
+  const levelExamContinueBtn = document.getElementById('level-exam-continue-btn');
   const levelExamBtn = document.getElementById('level-exam-btn');
   const rawDataBtn = document.getElementById('raw-data-btn');
   const rawDataRefreshBtn = document.getElementById('raw-data-refresh-btn');
@@ -2996,6 +3109,9 @@ function wireGameActions() {
   pronunciationStopRecordBtn?.addEventListener('click', stopPronunciationRecording);
   weeklyExamBtn?.addEventListener('click', takeWeeklyExam);
   weeklyExamContinueBtn?.addEventListener('click', () => {
+    void loadDailyGame();
+  });
+  levelExamContinueBtn?.addEventListener('click', () => {
     void loadDailyGame();
   });
   levelExamBtn?.addEventListener('click', takeLevelExam);
@@ -3133,6 +3249,7 @@ async function loadDailyGame() {
   renderDailyLoadingState();
   weeklyExamSession = null;
   weeklyExamResult = null;
+  levelExamResult = null;
   isSubmittingWeeklyExam = false;
 
   let res;

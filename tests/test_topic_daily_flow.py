@@ -1753,6 +1753,13 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertTrue(level_data["promoted"])
         self.assertEqual(level_data["current_level"], 1)
         self.assertEqual(level_data["current_rank"], "medium")
+        self.assertEqual(level_data["from_rank"], "beginner")
+        self.assertEqual(level_data["to_rank"], "medium")
+        self.assertEqual(
+            [criterion["key"] for criterion in level_data["rank_exam_criteria"]],
+            ["score", "failures", "retention", "competencies"],
+        )
+        self.assertTrue(all(criterion["passed"] for criterion in level_data["rank_exam_criteria"]))
         self.assertEqual(level_data["daily_progress"]["level_state"], level_data["current_level"])
 
         closed_topics = self.client.post(
@@ -1824,10 +1831,73 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(level_exam.status_code, 200)
         data = level_exam.json()
         self.assertIn("error", data)
-        self.assertEqual(data["error"], "Level exam is not unlocked yet.")
+        self.assertEqual(data["error"], "Rank exam is not unlocked yet.")
         self.assertFalse(data["daily_progress"]["ready_to_level_2"])
         self.assertEqual(data["daily_progress"]["covered_rank_competencies"], basic_required[:-1])
         self.assertEqual(data["daily_progress"]["missing_rank_competencies"], [basic_required[-1]])
+
+    def test_level_exam_failure_returns_review_criteria(self) -> None:
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(daily.status_code, 200)
+        daily_data = daily.json()
+        topic_key = daily_data["lesson"]["topic_key"]
+
+        self.client.post(
+            "/api/games/lesson/complete",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": topic_key,
+            },
+        )
+        for card in daily_data["daily_games"]:
+            payload = self._payload_for_daily_card(card)
+            self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": card["game_type"],
+                    "language": "ja",
+                    "level": card["level"],
+                    "retry_count": 0,
+                    "payload": payload,
+                },
+            )
+        self._seed_topic_mastery_level_three(topic_key)
+
+        weekly_exam = self.client.post(
+            "/api/exams/weekly",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": topic_key,
+            },
+        )
+        self.assertEqual(weekly_exam.status_code, 200)
+        self.assertTrue(weekly_exam.json()["passed"])
+
+        level_exam = self.client.post(
+            "/api/exams/level",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "target_level": 2,
+                "exam_score": 0,
+            },
+        )
+        self.assertEqual(level_exam.status_code, 200)
+        data = level_exam.json()
+        self.assertFalse(data["passed"])
+        self.assertFalse(data["promoted"])
+        self.assertEqual(data["from_rank"], "beginner")
+        self.assertEqual(data["to_rank"], "medium")
+        self.assertEqual(len(data["rank_exam_criteria"]), 4)
+        by_key = {criterion["key"]: criterion for criterion in data["rank_exam_criteria"]}
+        self.assertFalse(by_key["score"]["passed"])
+        self.assertTrue(by_key["failures"]["passed"])
+        self.assertTrue(by_key["retention"]["passed"])
+        self.assertTrue(by_key["competencies"]["passed"])
 
     def test_closed_topics_endpoint_includes_rank_and_global_levels(self) -> None:
         api.memory.set_language_level(self.learner_id, "ja", 2)

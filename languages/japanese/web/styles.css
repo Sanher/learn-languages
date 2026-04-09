@@ -878,7 +878,8 @@ button.is-loading {
   margin: 4px 0;
 }
 
-.weekly-exam-summary-card {
+.weekly-exam-summary-card,
+.level-exam-summary-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -888,25 +889,30 @@ button.is-loading {
   margin-top: 0;
 }
 
-.weekly-exam-review-list {
+.weekly-exam-review-list,
+.level-exam-review-list {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.weekly-exam-review-item {
+.weekly-exam-review-item,
+.level-exam-review-item {
   margin-top: 0;
 }
 
-.weekly-exam-review-item.is-correct {
+.weekly-exam-review-item.is-correct,
+.level-exam-review-item.is-correct {
   border-color: #10b981;
 }
 
-.weekly-exam-review-item.is-review {
+.weekly-exam-review-item.is-review,
+.level-exam-review-item.is-review {
   border-color: #f59e0b;
 }
 
-.weekly-exam-review-item.is-error {
+.weekly-exam-review-item.is-error,
+.level-exam-review-item.is-error {
   border-color: #ef4444;
 }
 

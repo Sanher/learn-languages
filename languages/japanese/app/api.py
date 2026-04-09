@@ -4123,7 +4123,7 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
         "answers_evaluated": len(answer_results),
         "answer_results": answer_results,
         "feedback": (
-            "Weekly mini-exam passed. You can keep building toward the level exam."
+            "Weekly mini-exam passed. You can keep building toward the rank exam."
             if passed
             else "Weekly mini-exam failed. Complete daily games and improve consistency before retrying next week."
         ),
@@ -4150,7 +4150,7 @@ def take_level_exam(req: LevelExamRequest) -> dict:
 
     from_level = 1 if target_level == 2 else 2
     if target_level == 3 and not memory.level_exam_passed(learner_id=learner_id, language=language, from_level=1, to_level=2):
-        return {"error": "Pass level exam 1 -> 2 before attempting 2 -> 3."}
+        return {"error": "Pass rank exam 1 -> 2 before attempting 2 -> 3."}
 
     already_passed = memory.level_exam_passed(
         learner_id=learner_id,
@@ -4159,7 +4159,7 @@ def take_level_exam(req: LevelExamRequest) -> dict:
         to_level=target_level,
     )
     if already_passed:
-        return {"error": "This level transition has already been passed."}
+        return {"error": "This rank transition has already been passed."}
 
     current_rank, next_rank = _rank_state(
         level_1_to_2_passed=memory.level_exam_passed(learner_id=learner_id, language=language, from_level=1, to_level=2),
@@ -4194,7 +4194,7 @@ def take_level_exam(req: LevelExamRequest) -> dict:
             target_level,
         )
         return {
-            "error": "Level exam is not unlocked yet.",
+            "error": "Rank exam is not unlocked yet.",
             "target_level": target_level,
             "daily_progress": insights,
         }
@@ -4203,6 +4203,7 @@ def take_level_exam(req: LevelExamRequest) -> dict:
     target_score = int(insights["topic_day_target_score"])
     pass_threshold = min(300, max(170 if target_level == 2 else 210, int(round(target_score * 0.95))))
     failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
+    failure_limit = 12 if target_level == 2 else 8
     retention = insights.get("retention_ratio_percent")
     retention_ok = retention is None if target_level == 2 else retention is not None
     if target_level == 2 and retention is not None:
@@ -4210,8 +4211,52 @@ def take_level_exam(req: LevelExamRequest) -> dict:
     if target_level == 3 and retention is not None:
         retention_ok = retention >= 80.0
 
-    failure_limit = 12 if target_level == 2 else 8
-    passed = bool(exam_score >= pass_threshold and failure_total <= failure_limit and retention_ok)
+    retention_required_percent = 70 if target_level == 2 else 80
+    score_ok = exam_score >= pass_threshold
+    failures_ok = failure_total <= failure_limit
+    competencies_required = [str(value) for value in list(insights.get("required_rank_competencies") or [])]
+    competencies_covered = [str(value) for value in list(insights.get("covered_rank_competencies") or [])]
+    competencies_missing = [str(value) for value in list(insights.get("missing_rank_competencies") or [])]
+    competencies_ok = len(competencies_missing) == 0
+    rank_exam_criteria = [
+        {
+            "key": "score",
+            "passed": score_ok,
+            "actual": f"{exam_score}/{pass_threshold}",
+            "expected": f"Reach at least {pass_threshold} points.",
+            "explanation": "Your rank exam score must reach the required threshold for promotion.",
+        },
+        {
+            "key": "failures",
+            "passed": failures_ok,
+            "actual": f"{failure_total} failure point(s)",
+            "expected": f"Stay at {failure_limit} failure point(s) or fewer.",
+            "explanation": "Too many accumulated failures mean the current rank still needs more stable practice.",
+        },
+        {
+            "key": "retention",
+            "passed": retention_ok,
+            "actual": (
+                f"{float(retention):.1f}% retained"
+                if retention is not None
+                else "Not enough historical retention data yet."
+            ),
+            "expected": (
+                f"Keep retention at {retention_required_percent}% or higher when historical review data exists."
+                if target_level == 2
+                else f"Keep retention at {retention_required_percent}% or higher."
+            ),
+            "explanation": "Retention checks whether earlier material is still available after several days, not only immediately after practice.",
+        },
+        {
+            "key": "competencies",
+            "passed": competencies_ok,
+            "actual": f"{len(competencies_covered)}/{len(competencies_required)} rank competencies covered",
+            "expected": "Cover every required competency for the current rank before promotion.",
+            "explanation": "Rank promotion only unlocks after the roadmap shows complete coverage of the core skills for this rank.",
+        },
+    ]
+    passed = bool(score_ok and failures_ok and retention_ok and competencies_ok)
     promoted = False
     if passed:
         memory.mark_level_exam_passed(
@@ -4279,18 +4324,37 @@ def take_level_exam(req: LevelExamRequest) -> dict:
         exam_score,
         pass_threshold,
     )
+    logger.info(
+        "level_exam_criteria learner_id=%s language=%s score_ok=%s failures_ok=%s retention_ok=%s competencies_ok=%s failure_total=%s failure_limit=%s retention=%s",
+        learner_id,
+        language,
+        score_ok,
+        failures_ok,
+        retention_ok,
+        competencies_ok,
+        failure_total,
+        failure_limit,
+        retention,
+    )
     return _translate_response_for_learner(
         learner_id=learner_id,
         context="level_exam",
         payload={
         "passed": passed,
         "promoted": promoted,
+        "from_rank": current_rank,
+        "to_rank": next_rank,
         "current_level": refreshed_level,
         "target_level": target_level,
         "current_rank": refreshed_rank,
         "next_rank": refreshed_next_rank,
         "exam_score": exam_score,
         "pass_threshold": pass_threshold,
+        "failure_total": failure_total,
+        "failure_limit": failure_limit,
+        "retention_ratio_percent": retention,
+        "retention_required_percent": retention_required_percent,
+        "rank_exam_criteria": rank_exam_criteria,
         "feedback": (
             (
                 f"Rank exam passed. Promoted from {current_rank.title()} to {next_rank.title()}."
@@ -4298,7 +4362,7 @@ def take_level_exam(req: LevelExamRequest) -> dict:
                 else "Rank exam passed."
             )
             if passed
-            else "Level exam failed. Keep training and retry when metrics improve."
+            else "Rank exam not passed yet. Review the criteria below and retry when the weak points improve."
         ),
         "daily_progress": refreshed_daily,
         },
