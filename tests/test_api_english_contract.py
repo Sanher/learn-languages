@@ -436,6 +436,7 @@ class ApiEnglishContractTests(unittest.TestCase):
         payload = pronunciation_card.get("payload", {})
         self.assertTrue(payload.get("tts_text"))
         self.assertEqual(payload.get("assistance_stage"), "beginner")
+        self.assertTrue(payload.get("romanized_line_full"))
 
     def test_listening_gap_fill_payload_keeps_drag_fragments_in_level_two(self) -> None:
         response = self.client.post(

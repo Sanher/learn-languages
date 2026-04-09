@@ -1342,12 +1342,15 @@ function renderSingleGame(game) {
     `;
   } else if (gameType === 'pronunciation_match') {
     const expectedText = payload.expected_text || game.prompt || '';
-    const assistanceStage = String(payload.assistance_stage || '').trim().toLowerCase()
-      || (Number(game.level || 1) <= 1 ? 'beginner' : (Number(game.level || 1) === 2 ? 'intermediate' : 'advanced'));
     pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
     const promptLines = [`Target sentence: ${expectedText}`];
-    if (payload.show_romanized_line && payload.romanized_line) {
-      promptLines.push(`Romanized: ${payload.romanized_line}`);
+    const romanizedLine = String(payload.romanized_line || '').trim();
+    const fallbackRomanizedLine = String(payload.romanized_line_full || romanizedLine).trim();
+    const shouldShowRomanized = Boolean(
+      romanizedLine || (isBeginnerTopicSupport() && fallbackRomanizedLine)
+    );
+    if (shouldShowRomanized) {
+      promptLines.push(`Romanized: ${romanizedLine || fallbackRomanizedLine}`);
     }
     promptHtml = `
       <div class="prompt game-meta">
@@ -1356,20 +1359,11 @@ function renderSingleGame(game) {
     `;
     promptIncludesTranslation = false;
     const pronunciationTtsButton = payload.tts_text
-      ? assistanceStage === 'advanced'
-        ? `
-          <details class="kana-guide-details">
-            <summary>Model audio</summary>
-            <div class="audio-actions">
-              <button id="pronunciation-play-audio-btn" type="button" class="ghost-btn">Play model audio (TTS)</button>
-            </div>
-          </details>
-        `
-        : `
-          <div class="audio-actions">
-            <button id="pronunciation-play-audio-btn" type="button" class="ghost-btn">Play model audio (TTS)</button>
-          </div>
-        `
+      ? `
+        <div class="audio-actions">
+          <button id="pronunciation-play-audio-btn" type="button" class="ghost-btn">Play model audio (TTS)</button>
+        </div>
+      `
       : '';
     controls = `
       ${pronunciationTtsButton}

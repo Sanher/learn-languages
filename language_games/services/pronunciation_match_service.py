@@ -281,6 +281,7 @@ class PronunciationMatchService:
             "assistance_stage": support.stage,
             "show_romanized_line": show_romanized,
             "romanized_line": item.romanized_line if show_romanized else None,
+            "romanized_line_full": item.romanized_line,
             "show_translation_hint": False,
             "translation_hint": None,
             "show_literal_translation": show_translation,

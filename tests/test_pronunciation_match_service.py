@@ -50,6 +50,7 @@ class PronunciationMatchServiceTests(unittest.TestCase):
         )
         self.assertFalse(view["show_romanized_line"])
         self.assertIsNone(view["romanized_line"])
+        self.assertTrue(view["romanized_line_full"])
 
     def test_evaluate_attempt_returns_match_fields(self) -> None:
         service = PronunciationMatchService()

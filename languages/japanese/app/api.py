@@ -2382,6 +2382,7 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
             "assistance_stage": view.get("assistance_stage"),
             "show_romanized_line": bool(view.get("show_romanized_line")),
             "romanized_line": view.get("romanized_line"),
+            "romanized_line_full": view.get("romanized_line_full"),
         }
 
     if game_type == ALIAS_GAME_TYPE_KANA_SPEED_ROUND:
