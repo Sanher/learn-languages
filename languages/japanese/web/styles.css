@@ -878,6 +878,98 @@ button.is-loading {
   margin: 4px 0;
 }
 
+.weekly-exam-summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.weekly-exam-result-actions {
+  margin-top: 0;
+}
+
+.weekly-exam-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.weekly-exam-review-item {
+  margin-top: 0;
+}
+
+.weekly-exam-review-item.is-correct {
+  border-color: #10b981;
+}
+
+.weekly-exam-review-item.is-review {
+  border-color: #f59e0b;
+}
+
+.weekly-exam-review-item.is-error {
+  border-color: #ef4444;
+}
+
+.weekly-exam-review-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.weekly-exam-review-head h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.weekly-exam-review-kicker {
+  margin: 0 0 4px 0;
+  color: #93c5fd;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.weekly-exam-review-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.weekly-exam-status,
+.weekly-exam-score {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.weekly-exam-status.is-correct {
+  background: #14532d;
+  color: #dcfce7;
+}
+
+.weekly-exam-status.is-review {
+  background: #78350f;
+  color: #fde68a;
+}
+
+.weekly-exam-status.is-error {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.weekly-exam-score {
+  background: #1e293b;
+  color: #dbeafe;
+}
+
 .kana-guide-details {
   margin-top: 10px;
 }

@@ -72,6 +72,7 @@ let pronunciationElapsedSeconds = PRONUNCIATION_DEFAULT_AUDIO_SECONDS;
 let isEvaluatingGame = false;
 let loadingExtraGameType = '';
 let weeklyExamSession = null;
+let weeklyExamResult = null;
 let isSubmittingWeeklyExam = false;
 
 function renderRawDataOutput(payload) {
@@ -945,6 +946,109 @@ function renderTodaySummaryPanel() {
   `;
 }
 
+function isWeeklyExamResultVisible() {
+  return Boolean(weeklyExamResult && !isWeeklyExamActive());
+}
+
+function renderWeeklyExamResultCard() {
+  if (!weeklyExamResult) return '';
+  const results = Array.isArray(weeklyExamResult.answer_results) ? weeklyExamResult.answer_results : [];
+  const correctCount = results.filter((item) => Boolean(item && item.is_correct)).length;
+  const weakGames = Array.from(
+    new Set(
+      results
+        .filter((item) => item && !item.error && !item.is_correct)
+        .map((item) => String(item.display_name || item.game_type || '').trim())
+        .filter(Boolean),
+    ),
+  );
+  const overallFeedbackHtml = renderTranslatedField(weeklyExamResult, 'feedback', {
+    label: 'Summary',
+    className: 'result-line',
+    multiline: true,
+  });
+  const itemsHtml = results
+    .map((item, index) => {
+      const isCorrect = Boolean(item && item.is_correct);
+      const hasError = Boolean(item && item.error);
+      const statusClass = hasError ? 'is-error' : (isCorrect ? 'is-correct' : 'is-review');
+      const statusLabel = hasError ? 'Error' : (isCorrect ? 'Correct' : 'Review');
+      const promptHtml = renderTranslatedField(item, 'prompt', {
+        label: 'Question',
+        className: 'result-line',
+        multiline: true,
+      });
+      const explanationHtml = renderTranslatedField(item, 'feedback', {
+        label: 'Explanation',
+        className: 'result-line',
+        multiline: true,
+      });
+      const literalTranslationHtml = renderTranslatedField(item, 'literal_translation', {
+        label: 'Literal translation',
+        className: 'result-line',
+        multiline: true,
+      });
+      const yourAnswer = String((item && item.your_answer) || '').trim();
+      const correctAnswer = String((item && item.correct_answer) || '').trim();
+      const romanizedLine = String((item && item.romanized_line) || '').trim();
+      const errorHtml = hasError
+        ? `<p class="alert">${escapeHtml(String(item.error || 'Review data unavailable.'))}</p>`
+        : '';
+      const yourAnswerHtml = yourAnswer
+        ? `<p class="result-line"><strong>Your answer:</strong> ${escapeHtml(yourAnswer)}</p>`
+        : '';
+      const correctAnswerHtml = correctAnswer
+        ? `<p class="result-line"><strong>Correct answer:</strong> ${escapeHtml(correctAnswer)}</p>`
+        : '';
+      const romanizedHtml = romanizedLine
+        ? `<p class="result-line"><strong>Romanized:</strong> ${escapeHtml(romanizedLine)}</p>`
+        : '';
+      return `
+        <article class="result-block weekly-exam-review-item ${statusClass}">
+          <div class="weekly-exam-review-head">
+            <div>
+              <p class="weekly-exam-review-kicker">Question ${index + 1}</p>
+              <h3>${escapeHtml(String(item.display_name || item.game_type || `Question ${index + 1}`))}</h3>
+            </div>
+            <div class="weekly-exam-review-meta">
+              <span class="weekly-exam-status ${statusClass}">${statusLabel}</span>
+              <span class="weekly-exam-score">${escapeHtml(Number(item.score || 0))}/100</span>
+            </div>
+          </div>
+          ${errorHtml}
+          ${promptHtml}
+          ${yourAnswerHtml}
+          ${correctAnswerHtml}
+          ${romanizedHtml}
+          ${literalTranslationHtml}
+          ${explanationHtml}
+        </article>
+      `;
+    })
+    .join('');
+
+  const weakGamesHtml = weakGames.length > 0
+    ? `<p class="muted">Games to revisit: ${escapeHtml(weakGames.join(', '))}.</p>`
+    : '';
+
+  return `
+    <section class="game-summary-card weekly-exam-summary-card">
+      <h2>Weekly mini-exam results</h2>
+      <p><strong>Status:</strong> ${weeklyExamResult.passed ? 'Passed' : 'Not passed yet'}</p>
+      <p><strong>Score:</strong> ${escapeHtml(Number(weeklyExamResult.exam_score || 0))}/${escapeHtml(Number(weeklyExamResult.min_pass_score || 0))}</p>
+      <p class="muted">Correct answers: ${correctCount}/${results.length}.</p>
+      ${overallFeedbackHtml}
+      ${weakGamesHtml}
+      <div class="actions weekly-exam-result-actions">
+        <button id="weekly-exam-continue-btn" type="button">Return to topic flow</button>
+      </div>
+      <div class="weekly-exam-review-list">
+        ${itemsHtml || '<p class="muted">No reviewed answers available.</p>'}
+      </div>
+    </section>
+  `;
+}
+
 function sentenceOrderState(game) {
   if (!game) return null;
   const key = gameAttemptKey(game);
@@ -977,9 +1081,17 @@ function renderSingleGame(game) {
   const lessonHtml = renderLessonPanel();
   const summaryHtml = renderTodaySummaryPanel();
   const weeklyExamActive = Boolean(game && game.weekly_exam && isWeeklyExamActive());
-  const weeklyQuestion = weeklyExamActive ? currentWeeklyExamQuestion() : null;
   const weeklyIndex = weeklyExamActive ? Number(weeklyExamSession.currentIndex || 0) : -1;
   const weeklyTotal = weeklyExamActive ? Number(weeklyExamSession.questions.length || 0) : 0;
+  if (!weeklyExamActive && isWeeklyExamResultVisible()) {
+    gameZoneEl.classList.remove('hidden');
+    gameZoneEl.innerHTML = `
+      ${lessonHtml}
+      ${renderWeeklyExamResultCard()}
+      ${summaryHtml}
+    `;
+    return;
+  }
   if (!weeklyExamActive && !isLessonCompleted()) {
     const { totalCount } = dailyProgressCounts();
     gameZoneEl.classList.remove('hidden');
@@ -1425,6 +1537,28 @@ function renderSidebar(games) {
     className: 'muted',
     multiline: true,
   });
+  if (isWeeklyExamResultVisible()) {
+    const results = Array.isArray(weeklyExamResult.answer_results) ? weeklyExamResult.answer_results : [];
+    const reviewRows = results
+      .map((item, index) => {
+        const label = item && item.error ? 'Error' : (item && item.is_correct ? 'Correct' : 'Review');
+        return `
+          <div class="sidebar-game">
+            ${index + 1}. ${escapeHtml(String((item && (item.display_name || item.game_type)) || `Question ${index + 1}`))}
+            <span class="done-tag">${escapeHtml(label)}</span>
+          </div>
+        `;
+      })
+      .join('');
+    gamesSidebarEl.innerHTML = `
+      <h3>Weekly results</h3>
+      ${sidebarTopicLine}
+      ${sidebarTopicDescriptionLine || ''}
+      <p class="muted">Score: ${escapeHtml(Number(weeklyExamResult.exam_score || 0))}/${escapeHtml(Number(weeklyExamResult.min_pass_score || 0))}</p>
+      <div class="sidebar-list">${reviewRows || '<p class="muted">No reviewed answers available.</p>'}</div>
+    `;
+    return;
+  }
   if (isWeeklyExamActive()) {
     const currentIndex = Number(weeklyExamSession.currentIndex || 0);
     const total = Number(weeklyExamSession.questions.length || 0);
@@ -2593,6 +2727,7 @@ function loadWeeklyExamQuestionAt(index) {
 function openWeeklyExamSession(data) {
   const questions = Array.isArray(data && data.questions) ? data.questions : [];
   if (questions.length === 0) return false;
+  weeklyExamResult = null;
   weeklyExamSession = {
     topicKey: (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '',
     questions,
@@ -2606,6 +2741,7 @@ function openWeeklyExamSession(data) {
 
 async function closeWeeklyExamSession({ reloadDaily = false } = {}) {
   weeklyExamSession = null;
+  weeklyExamResult = null;
   isSubmittingWeeklyExam = false;
   retryCounters.clear();
   sentenceOrderPenaltyByAttempt.clear();
@@ -2663,8 +2799,13 @@ async function submitWeeklyExamAnswers() {
     if (data.daily_progress) {
       dailyProgress = data.daily_progress;
     }
-    window.alert(data.feedback || 'Weekly mini-exam completed.');
-    await closeWeeklyExamSession({ reloadDaily: true });
+    weeklyExamSession = null;
+    weeklyExamResult = data;
+    retryCounters.clear();
+    sentenceOrderPenaltyByAttempt.clear();
+    renderSidebar(availableGameCards);
+    renderSingleGame(selectedGame);
+    wireGameActions();
   } finally {
     isSubmittingWeeklyExam = false;
     setEvaluateLoadingState(false);
@@ -2812,6 +2953,7 @@ function wireGameActions() {
   const pronunciationRecordBtn = document.getElementById('pronunciation-record-btn');
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
   const weeklyExamBtn = document.getElementById('weekly-exam-btn');
+  const weeklyExamContinueBtn = document.getElementById('weekly-exam-continue-btn');
   const levelExamBtn = document.getElementById('level-exam-btn');
   const rawDataBtn = document.getElementById('raw-data-btn');
   const rawDataRefreshBtn = document.getElementById('raw-data-refresh-btn');
@@ -2853,6 +2995,9 @@ function wireGameActions() {
   pronunciationRecordBtn?.addEventListener('click', startPronunciationRecording);
   pronunciationStopRecordBtn?.addEventListener('click', stopPronunciationRecording);
   weeklyExamBtn?.addEventListener('click', takeWeeklyExam);
+  weeklyExamContinueBtn?.addEventListener('click', () => {
+    void loadDailyGame();
+  });
   levelExamBtn?.addEventListener('click', takeLevelExam);
   rawDataBtn?.addEventListener('click', openRawDataModal);
   if (rawDataRefreshBtn) rawDataRefreshBtn.onclick = loadRawData;
@@ -2987,6 +3132,7 @@ function getDragAfterElement(container, y) {
 async function loadDailyGame() {
   renderDailyLoadingState();
   weeklyExamSession = null;
+  weeklyExamResult = null;
   isSubmittingWeeklyExam = false;
 
   let res;

@@ -1332,6 +1332,102 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertGreaterEqual(weekly_data["question_count"], 3)
         self.assertGreaterEqual(len(weekly_data.get("questions", [])), 3)
 
+    def test_weekly_exam_cumulative_phase_two_returns_review_details(self) -> None:
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(daily.status_code, 200)
+        daily_data = daily.json()
+        topic_key = daily_data["topic"]["topic_key"]
+
+        self.client.post(
+            "/api/games/lesson/complete",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": topic_key,
+            },
+        )
+        for card in daily_data["daily_games"]:
+            payload = self._payload_for_daily_card(card)
+            self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": card["game_type"],
+                    "language": "ja",
+                    "level": card["level"],
+                    "retry_count": 0,
+                    "payload": payload,
+                },
+            )
+        self._seed_topic_mastery_level_three(topic_key)
+
+        with unittest.mock.patch.object(api, "WEEKLY_EXAM_FORCE_LEGACY", False):
+            phase_one = self.client.post(
+                "/api/exams/weekly",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "question_count": 4,
+                    "mode": "cumulative",
+                },
+            )
+
+            self.assertEqual(phase_one.status_code, 200)
+            phase_one_data = phase_one.json()
+            questions = phase_one_data["questions"]
+            self.assertEqual(len(questions), 4)
+
+            submitted_answers = []
+            for index, question in enumerate(questions):
+                card = {
+                    "activity_id": question["item_id"],
+                    "game_type": question["game_type"],
+                    "payload": question.get("payload", {}),
+                    "language": question["language"],
+                    "level": question["level"],
+                    "prompt": question.get("prompt", ""),
+                }
+                payload = self._bad_payload_for_card(card) if index == 0 else self._payload_for_daily_card(card)
+                submitted_answers.append(
+                    {
+                        "question_id": question["question_id"],
+                        "topic_key": question["topic_key"],
+                        "game_type": question["game_type"],
+                        "item_id": question["item_id"],
+                        "payload": payload,
+                    }
+                )
+
+            phase_two = self.client.post(
+                "/api/exams/weekly",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "question_count": 4,
+                    "mode": "cumulative",
+                    "answers": submitted_answers,
+                },
+            )
+
+        self.assertEqual(phase_two.status_code, 200)
+        phase_two_data = phase_two.json()
+        self.assertFalse(phase_two_data["requires_answers"])
+        review_rows = phase_two_data["answer_results"]
+        self.assertEqual(len(review_rows), 4)
+
+        first_review = review_rows[0]
+        self.assertFalse(first_review.get("is_correct", True))
+        self.assertEqual(first_review["display_name"], questions[0]["display_name"])
+        self.assertTrue(str(first_review.get("prompt", "")).strip())
+        self.assertTrue(str(first_review.get("feedback", "")).strip())
+        self.assertTrue(str(first_review.get("your_answer", "")).strip())
+        self.assertTrue(str(first_review.get("correct_answer", "")).strip())
+        self.assertNotEqual(first_review.get("your_answer"), first_review.get("correct_answer"))
+        self.assertIn("result", first_review)
+
     def test_weekly_exam_locked_when_topic_mastery_below_minimum(self) -> None:
         api.memory.set_language_level(self.learner_id, "ja", 5)
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})

@@ -82,6 +82,7 @@ TRANSLATABLE_STRING_FIELDS = {
     "ai_generated_prompt",
     "expected_translation",
     "recognized_translation",
+    "explanation",
     "meaning",
 }
 TRANSLATABLE_LIST_FIELDS = {
@@ -2688,6 +2689,182 @@ def _exam_question_from_card(
     }
 
 
+def _weekly_exam_is_correct(result: dict[str, Any], score: int) -> bool:
+    if "is_correct" in result:
+        return bool(result.get("is_correct"))
+    if "is_match" in result:
+        return bool(result.get("is_match"))
+    return int(score) >= 100
+
+
+def _stringify_weekly_exam_value(value: Any, *, delimiter: str = " ") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return delimiter.join(parts)
+    return str(value).strip()
+
+
+# Weekly cumulative exams need normalized review rows so the UI can explain
+# what went wrong without re-implementing game-specific answer logic.
+def _weekly_exam_review_payload(
+    *,
+    question: dict[str, Any],
+    answer_payload: dict[str, Any],
+    result: dict[str, Any],
+    score: int,
+) -> dict[str, Any]:
+    game_type = str(question.get("game_type") or "")
+    language = str(question.get("language") or "")
+    item_id = str(question.get("item_id") or answer_payload.get("item_id") or "")
+    level = int(question.get("level", 1) or 1)
+    question_payload = dict(question.get("payload") or {})
+
+    review = {
+        "display_name": str(question.get("display_name") or GAME_NAME_ALIASES.get(game_type, game_type)),
+        "topic_title": str(question.get("topic_title") or ""),
+        "source": str(question.get("source") or ""),
+        "prompt": str(question.get("prompt") or ""),
+        "is_correct": _weekly_exam_is_correct(result, score),
+        "your_answer": "",
+        "correct_answer": "",
+        "feedback": str(result.get("feedback") or result.get("error") or "").strip(),
+        "literal_translation": "",
+        "romanized_line": "",
+    }
+
+    service = game_services.get(game_type)
+
+    if game_type == GAME_TYPE_CONTEXT_QUIZ and isinstance(service, ContextQuizService):
+        item = service._find_item(language=language, item_id=item_id, level=level)
+        selected_option_id = str(answer_payload.get("selected_option_id") or result.get("selected_option_id") or "").strip()
+        selected_option = next((option for option in item.options if option.option_id == selected_option_id), None)
+        correct_option = next((option for option in item.options if option.is_correct), None)
+        review["your_answer"] = selected_option.text if selected_option else selected_option_id
+        review["correct_answer"] = correct_option.text if correct_option else ""
+        review["literal_translation"] = item.literal_translation
+        review["romanized_line"] = item.romanized_line or ""
+        return review
+
+    if game_type == GAME_TYPE_GRAMMAR_PARTICLE_FIX and isinstance(service, GrammarParticleFixService):
+        item = service._find_item(language=language, item_id=item_id, level=level)
+        review["your_answer"] = str(answer_payload.get("selected_particle") or result.get("selected_particle") or "").strip()
+        review["correct_answer"] = str(result.get("correct_particle") or item.correct_particle).strip()
+        review["literal_translation"] = item.literal_translation
+        review["romanized_line"] = item.romanized_line
+        return review
+
+    if game_type == GAME_TYPE_SENTENCE_ORDER and isinstance(service, SentenceOrderService):
+        item = service._find_item(language=language, item_id=item_id, level=level)
+        review["your_answer"] = _stringify_weekly_exam_value(
+            result.get("user_sentence") or answer_payload.get("ordered_tokens_by_user"),
+        )
+        review["correct_answer"] = _stringify_weekly_exam_value(
+            result.get("expected_sentence") or item.ordered_tokens,
+        )
+        review["literal_translation"] = item.literal_translation
+        review["romanized_line"] = item.romanized_line or ""
+        return review
+
+    if game_type == GAME_TYPE_LISTENING_GAP_FILL and isinstance(service, ListeningGapFillService):
+        item = service._find_item(language=language, item_id=item_id, level=level)
+        review["your_answer"] = _stringify_weekly_exam_value(
+            result.get("user_gap_tokens") or answer_payload.get("user_gap_tokens"),
+            delimiter=", ",
+        )
+        review["correct_answer"] = _stringify_weekly_exam_value(
+            result.get("expected_gap_tokens") or [item.tokens[position] for position in item.gap_positions],
+            delimiter=", ",
+        )
+        review["literal_translation"] = item.literal_translation
+        review["romanized_line"] = item.romanized_line or ""
+        return review
+
+    if game_type == GAME_TYPE_MORA_ROMANIZATION and isinstance(service, MoraRomanizationService):
+        item = service._find_item(language=language, item_id=item_id, level=level)
+        review["your_answer"] = str(answer_payload.get("user_romanized_text") or "").strip()
+        review["correct_answer"] = _stringify_weekly_exam_value(
+            result.get("expected_words") or item.expected_words,
+        )
+        review["literal_translation"] = item.literal_translation
+        review["romanized_line"] = _stringify_weekly_exam_value(item.expected_words)
+        return review
+
+    if game_type == GAME_TYPE_PRONUNCIATION_MATCH and isinstance(service, PronunciationMatchService):
+        item = service._resolve_item(
+            language=language,
+            item_id=item_id,
+            expected_text=str(answer_payload.get("expected_text") or question_payload.get("expected_text") or ""),
+            level=level,
+        )
+        review["your_answer"] = str(answer_payload.get("recognized_text") or "").strip()
+        review["correct_answer"] = str(
+            result.get("expected_text")
+            or question_payload.get("expected_text")
+            or (item.text if item is not None else "")
+        ).strip()
+        if item is not None:
+            review["literal_translation"] = item.literal_translation
+            review["romanized_line"] = item.romanized_line
+        elif isinstance(result.get("display"), dict):
+            review["literal_translation"] = str(result["display"].get("literal_translation") or "").strip()
+            review["romanized_line"] = str(result["display"].get("romanized_line_full") or "").strip()
+        return review
+
+    if game_type == GAME_TYPE_KANJI_MATCH:
+        pairs = list(question_payload.get("pairs") or [])
+        learner_readings = dict(answer_payload.get("learner_readings") or {})
+        review["your_answer"] = ", ".join(
+            f"{str(pair.get('symbol') or '').strip()} -> {str(learner_readings.get(str(pair.get('symbol') or ''), '')).strip() or '∅'}"
+            for pair in pairs
+            if str(pair.get("symbol") or "").strip()
+        )
+        review["correct_answer"] = ", ".join(
+            f"{str(pair.get('symbol') or '').strip()} -> {str(pair.get('reading_romaji') or '').strip()}"
+            for pair in pairs
+            if str(pair.get("symbol") or "").strip()
+        )
+        review["literal_translation"] = "; ".join(
+            f"{str(pair.get('symbol') or '').strip()}: {str(pair.get('meaning') or '').strip()}"
+            for pair in pairs
+            if str(pair.get("symbol") or "").strip() and str(pair.get("meaning") or "").strip()
+        )
+        return review
+
+    if game_type == ALIAS_GAME_TYPE_KANA_SPEED_ROUND:
+        review["your_answer"] = str(answer_payload.get("recognized_text") or "").strip()
+        review["correct_answer"] = str(answer_payload.get("expected_text") or question_payload.get("expected_text") or "").strip()
+        review["literal_translation"] = str(result.get("expected_translation") or "").strip()
+        review["romanized_line"] = str(result.get("expected_romaji") or "").strip()
+        return review
+
+    review["your_answer"] = _stringify_weekly_exam_value(
+        answer_payload.get("recognized_text")
+        or answer_payload.get("user_romanized_text")
+        or answer_payload.get("user_gap_tokens")
+        or answer_payload.get("ordered_tokens_by_user")
+        or answer_payload.get("selected_particle")
+        or answer_payload.get("selected_option_id"),
+        delimiter=", ",
+    )
+    review["correct_answer"] = _stringify_weekly_exam_value(
+        result.get("correct_particle")
+        or result.get("expected_sentence")
+        or result.get("expected_gap_tokens")
+        or result.get("expected_words"),
+        delimiter=", ",
+    )
+    if isinstance(result.get("display"), dict):
+        review["literal_translation"] = str(result["display"].get("literal_translation") or "").strip()
+        review["romanized_line"] = str(
+            result["display"].get("romanized_line_full")
+            or result["display"].get("romanized_line")
+            or ""
+        ).strip()
+    return review
+
+
 def _weekly_exam_questions(
     *,
     learner_id: str,
@@ -3865,6 +4042,23 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             payload=answer_payload,
             score=question_score,
         )
+        try:
+            review_payload = _weekly_exam_review_payload(
+                question=answer_question,
+                answer_payload=answer_payload,
+                result=result if isinstance(result, dict) else {},
+                score=question_score,
+            )
+        except Exception:
+            logger.exception(
+                "weekly_exam_review_build_failed learner_id=%s language=%s topic=%s game_type=%s item_id=%s",
+                learner_id,
+                language,
+                topic.topic_key,
+                game_type,
+                item_id,
+            )
+            review_payload = {}
         answer_results.append(
             {
                 "question_id": answer_question["question_id"],
@@ -3872,6 +4066,7 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
                 "game_type": game_type,
                 "item_id": item_id,
                 "score": question_score,
+                **review_payload,
                 "result": result,
             }
         )
