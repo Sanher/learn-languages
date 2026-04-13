@@ -23,6 +23,12 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertIn("storage", payload)
         self.assertIn("db_exists", payload["storage"])
         self.assertIn("db_writable_parent", payload["storage"])
+        self.assertIn("db_path", payload["storage"])
+        self.assertIn("runtime", payload)
+        self.assertIn("addon_data_dir_present", payload["runtime"])
+        self.assertIn("options_path", payload["runtime"])
+        self.assertIn("options_exists", payload["runtime"])
+        self.assertIn("log_level", payload["runtime"])
 
     def test_missing_web_asset_returns_404(self) -> None:
         client = TestClient(app, raise_server_exceptions=False)

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
+from languages.japanese.app import api
 from languages.japanese.app.services.elevenlabs_client import ElevenLabsService
 from languages.japanese.app.services.openai_client import OpenAIPlanner
 from languages.japanese.app.services.runtime_config import clear_cached_options, get_setting
@@ -80,6 +81,10 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(planner.api_key, "openai-from-options")
                 self.assertEqual(planner.model, "gpt-4.1-mini")
                 self.assertEqual(planner.stt_models, ["whisper-1", "gpt-4o-mini-transcribe"])
+
+    def test_api_db_path_prefers_explicit_env_override(self) -> None:
+        with patch.dict(os.environ, {"JAPANESE_DB_PATH": "/tmp/learn-languages/test-progress.db"}, clear=False):
+            self.assertEqual(api._resolve_db_path(), "/tmp/learn-languages/test-progress.db")
 
     def test_elevenlabs_service_uses_options_file_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

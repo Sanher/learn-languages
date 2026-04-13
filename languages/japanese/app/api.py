@@ -49,6 +49,7 @@ from .game_engine import DailyGamePlanner, LearnerSnapshot
 from .memory import ItemReviewState, ProgressMemory
 from .services.elevenlabs_client import ElevenLabsService
 from .services.openai_client import OpenAIPlanner
+from .services.runtime_config import DEFAULT_OPTIONS_PATH, OPTIONS_PATH_ENV
 from .topic_flow import (
     RANK_COMPETENCIES,
     TOPICS_BY_LANGUAGE,
@@ -63,7 +64,18 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
 ADDON_LANGUAGE_DATA_DIR = Path("/data") / "japanese"
 LOCAL_LANGUAGE_DATA_DIR = BASE_DIR / "data" / "japanese"
-DB_PATH = str((ADDON_LANGUAGE_DATA_DIR if Path("/data").exists() else LOCAL_LANGUAGE_DATA_DIR) / "progress.db")
+
+
+def _resolve_db_path() -> str:
+    configured = str(os.getenv("JAPANESE_DB_PATH", "")).strip()
+    if configured:
+        return str(Path(configured).expanduser())
+    default_root = ADDON_LANGUAGE_DATA_DIR if Path("/data").exists() else LOCAL_LANGUAGE_DATA_DIR
+    return str(default_root / "progress.db")
+
+
+DB_PATH = _resolve_db_path()
+OPTIONS_PATH = Path(os.getenv(OPTIONS_PATH_ENV, DEFAULT_OPTIONS_PATH))
 DEFAULT_LEARNER_ID = os.getenv("HA_DEFAULT_LEARNER_ID", "ha_default_user")
 AVAILABLE_LANGUAGES = ["ja"]
 AVAILABLE_SECONDARY_TRANSLATION_LANGUAGES = {"es": "Español"}
@@ -123,7 +135,9 @@ if not logger.handlers:
         )
     )
     logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+configured_log_level_name = str(os.getenv("LEARN_LANGUAGES_LOG_LEVEL", "INFO") or "INFO").strip().upper()
+configured_log_level = getattr(logging, configured_log_level_name, logging.INFO)
+logger.setLevel(configured_log_level)
 logger.propagate = False
 
 planner = DailyGamePlanner()
@@ -144,6 +158,14 @@ logger.info(
     bool(elevenlabs.voice_id),
     elevenlabs.model_id,
     "legacy" if WEEKLY_EXAM_FORCE_LEGACY else "cumulative",
+)
+logger.info(
+    "runtime_paths db_path=%s db_parent_exists=%s options_path=%s options_exists=%s addon_data_dir=%s",
+    DB_PATH,
+    Path(DB_PATH).parent.exists(),
+    OPTIONS_PATH,
+    OPTIONS_PATH.exists(),
+    Path("/data").exists(),
 )
 
 
@@ -309,8 +331,15 @@ def health() -> dict[str, Any]:
             "elevenlabs_configured": bool(elevenlabs.api_key and elevenlabs.voice_id),
         },
         "storage": {
+            "db_path": str(db_file),
             "db_exists": db_file.exists(),
             "db_writable_parent": db_file.parent.exists() and os.access(db_file.parent, os.W_OK),
+        },
+        "runtime": {
+            "addon_data_dir_present": Path("/data").exists(),
+            "options_path": str(OPTIONS_PATH),
+            "options_exists": OPTIONS_PATH.exists(),
+            "log_level": configured_log_level_name,
         },
     }
 
