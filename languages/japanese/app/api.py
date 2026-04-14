@@ -2318,6 +2318,9 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
             return {
                 "tokens_scrambled": scrambled,
                 "ordered_tokens": item.ordered_tokens,
+                "script_line": item.script_line,
+                "romanized_line": item.romanized_line or "",
+                "literal_translation": item.literal_translation,
             }
 
     if game_type == GAME_TYPE_LISTENING_GAP_FILL:
@@ -2348,6 +2351,8 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
                 "mora_romaji_tokens": item.mora_romaji if mode in {"beginner", "intermediate"} else [],
                 "japanese_text": item.japanese_text if mode == "advanced" else "",
                 "literal_translation": item.literal_translation,
+                "expected_word_count": len(item.expected_words),
+                "word_length_pattern": [len(word) for word in item.expected_words],
             }
             logger.info(
                 "payload_mora_romanization_ready language=%s level=%s activity_id=%s mode=%s",

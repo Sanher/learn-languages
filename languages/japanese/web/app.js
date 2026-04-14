@@ -1297,6 +1297,20 @@ function renderSingleGame(game) {
       ? payload.tokens_scrambled
       : fallbackTokens;
     const orderedTokens = Array.isArray(payload.ordered_tokens) ? payload.ordered_tokens : [];
+    const scriptLine = String(payload.script_line || '').trim();
+    const romanizedLine = String(payload.romanized_line || '').trim();
+    const sentenceTranslationHtml = renderTranslatedField(payload, 'literal_translation', {
+      label: 'Literal',
+      className: 'game-meta-line',
+    });
+    promptHtml = `
+      <div class="prompt game-meta">
+        ${scriptLine ? `<p class="game-meta-line"><strong>Script:</strong> ${escapeHtml(scriptLine)}</p>` : ''}
+        ${romanizedLine ? `<p class="game-meta-line"><strong>Romanized:</strong> ${escapeHtml(romanizedLine)}</p>` : ''}
+        ${sentenceTranslationHtml}
+      </div>
+    `;
+    promptIncludesTranslation = false;
     const items = sourceTokens.map((token, index) => ({
       id: `frag-${index}`,
       token,
@@ -1342,10 +1356,14 @@ function renderSingleGame(game) {
     const moraKanaLine = Array.isArray(payload.mora_kana_tokens) ? payload.mora_kana_tokens.join(' | ') : '';
     const moraRomajiLine = Array.isArray(payload.mora_romaji_tokens) ? payload.mora_romaji_tokens.join(' ') : '';
     const japaneseText = payload.japanese_text || '';
+    const expectedWordCount = Number(payload.expected_word_count || 0);
+    const wordLengthPattern = Array.isArray(payload.word_length_pattern) ? payload.word_length_pattern : [];
     const metaLines = [];
     if (mode === 'beginner' || mode === 'intermediate') {
       if (moraKanaLine) metaLines.push(`Mora (kana): ${moraKanaLine}`);
       if (moraRomajiLine) metaLines.push(`Mora (romaji): ${moraRomajiLine}`);
+      if (expectedWordCount > 0) metaLines.push(`Word groups: ${expectedWordCount}`);
+      if (wordLengthPattern.length > 0) metaLines.push(`Word pattern: ${wordLengthPattern.map((length) => '_'.repeat(Number(length) || 1)).join(' ')}`);
     } else if (japaneseText) {
       metaLines.push(`Japanese text: ${japaneseText}`);
     }
@@ -2114,6 +2132,13 @@ function renderEvaluation(data) {
   const pronunciationSummaryHtml = (data.is_match != null)
     ? `<p class="result-line"><strong>Match:</strong> ${data.is_match ? 'Yes' : 'No'}${data.match_threshold != null ? ` (target ${Math.round(Number(data.match_threshold) * 100)}%)` : ''}</p>`
     : '';
+  const pronunciationMetrics = (data && typeof data.metrics === 'object' && data.metrics) ? data.metrics : {};
+  const textSimilarityHtml = pronunciationMetrics.character_similarity != null
+    ? `<p class="result-line"><strong>Text similarity:</strong> ${escapeHtml(Math.round(Number(pronunciationMetrics.character_similarity) * 100))}%</p>`
+    : '';
+  const segmentOverlapHtml = pronunciationMetrics.token_overlap != null
+    ? `<p class="result-line"><strong>Segment overlap:</strong> ${escapeHtml(Math.round(Number(pronunciationMetrics.token_overlap) * 100))}%</p>`
+    : '';
   const kanaRomanizedHtml = data.expected_romaji || data.recognized_romaji
     ? `
       <div class="result-block">
@@ -2136,6 +2161,8 @@ function renderEvaluation(data) {
     ${alertsHtml}
     ${scoreHtml}
     ${pronunciationSummaryHtml}
+    ${textSimilarityHtml}
+    ${segmentOverlapHtml}
     ${readingAccuracyHtml}
     ${meaningAccuracyHtml}
     ${romanizationAccuracyHtml}

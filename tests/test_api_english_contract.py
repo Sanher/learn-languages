@@ -444,6 +444,38 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertEqual(payload.get("assistance_stage"), "beginner")
         self.assertTrue(payload.get("romanized_line_full"))
 
+    def test_sentence_order_payload_contains_romanized_and_translation(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user-sentence-order-contract", "level_override_today": 1},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        sentence_order_card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "sentence_order"),
+            None,
+        )
+        self.assertIsNotNone(sentence_order_card)
+        payload = sentence_order_card.get("payload", {})
+        self.assertTrue(payload.get("romanized_line"))
+        self.assertTrue(payload.get("literal_translation"))
+
+    def test_mora_romanization_payload_contains_structure_hints(self) -> None:
+        response = self.client.post(
+            "/api/games/daily",
+            json={"learner_id": "test-user-mora-hints-contract", "level_override_today": 1},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        mora_card = next(
+            (entry for entry in data.get("all_games", []) if entry.get("game_type") == "mora_romanization"),
+            None,
+        )
+        self.assertIsNotNone(mora_card)
+        payload = mora_card.get("payload", {})
+        self.assertGreaterEqual(int(payload.get("expected_word_count", 0)), 1)
+        self.assertTrue(payload.get("word_length_pattern"))
+
     def test_listening_gap_fill_payload_keeps_drag_fragments_in_level_two(self) -> None:
         response = self.client.post(
             "/api/games/daily",

@@ -104,6 +104,26 @@ class PronunciationMatchServiceTests(unittest.TestCase):
         self.assertTrue(result["alerts"])
         self.assertIn("STT/TTS", result["alerts"][0])
 
+    def test_japanese_recognized_text_without_spaces_is_still_a_match(self) -> None:
+        service = PronunciationMatchService()
+        activity = service.get_activities(language="ja", level=3)[0]
+        result = service.evaluate_attempt(
+            PronunciationMatchAttempt(
+                language="ja",
+                item_id=activity.activity_id,
+                expected_text=activity.prompt,
+                recognized_text="日本語の発音を毎日練習しています。",
+                audio_duration_seconds=7.1,
+                speech_seconds=7.1,
+                pause_seconds=0.2,
+                pitch_track_hz=[150.0, 151.0, 149.0],
+                level=3,
+            )
+        )
+        self.assertTrue(result["is_match"])
+        self.assertGreaterEqual(result["score"], 90)
+        self.assertFalse(result["word_feedback"])
+
     def test_service_is_reusable_through_registry(self) -> None:
         registry = GameServiceRegistry()
         registry.register(PronunciationMatchService())

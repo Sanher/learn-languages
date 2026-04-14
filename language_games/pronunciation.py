@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from difflib import SequenceMatcher
+import re
 from typing import Iterable
+import unicodedata
 
 from .policy import language_for_date
 
@@ -30,12 +33,44 @@ def _tokenize(text: str) -> list[str]:
     return [token.strip() for token in text.split() if token.strip()]
 
 
-def _word_overlap(expected: list[str], recognized: list[str]) -> float:
+def _is_japanese_language(language: str | None) -> bool:
+    return (language or "").strip().lower() == "ja"
+
+
+def _normalize_text(text: str, language: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "").strip()
+    if _is_japanese_language(language):
+        normalized = re.sub(r"[\s。、，「」『』・！？!?\-]", "", normalized)
+        return normalized
+    return " ".join(normalized.lower().split())
+
+
+def _word_overlap(expected: list[str], recognized: list[str], language: str | None) -> float:
     if not expected:
         return 0.0
-    recognized_set = set(recognized)
-    matches = sum(1 for token in expected if token in recognized_set)
+
+    if _is_japanese_language(language):
+        normalized_recognized = _normalize_text("".join(recognized), language)
+        if not normalized_recognized:
+            return 0.0
+        matches = 0
+        for token in expected:
+            normalized_token = _normalize_text(token, language)
+            if normalized_token and normalized_token in normalized_recognized:
+                matches += 1
+        return matches / len(expected)
+
+    recognized_set = {_normalize_text(token, language) for token in recognized}
+    matches = sum(1 for token in expected if _normalize_text(token, language) in recognized_set)
     return matches / len(expected)
+
+
+def _character_similarity(expected_text: str, recognized_text: str, language: str | None) -> float:
+    normalized_expected = _normalize_text(expected_text, language)
+    normalized_recognized = _normalize_text(recognized_text, language)
+    if not normalized_expected or not normalized_recognized:
+        return 0.0
+    return SequenceMatcher(a=normalized_expected, b=normalized_recognized).ratio()
 
 
 def _pitch_stability(pitch_track_hz: Iterable[float]) -> float:
@@ -57,12 +92,36 @@ def _speech_rate_wpm(recognized_words: list[str], speech_seconds: float) -> int:
     return round((len(recognized_words) / speech_seconds) * 60)
 
 
-def _build_word_feedback(expected: list[str], recognized: list[str]) -> list[WordFeedback]:
+def _build_word_feedback(expected: list[str], recognized: list[str], language: str | None) -> list[WordFeedback]:
     feedback: list[WordFeedback] = []
-    recognized_set = set(recognized)
+    if _is_japanese_language(language):
+        recognized_full = _normalize_text("".join(recognized), language)
+        for token in expected:
+            normalized_token = _normalize_text(token, language)
+            if normalized_token and normalized_token not in recognized_full:
+                feedback.append(
+                    WordFeedback(
+                        word=token,
+                        issue="omitted or mispronounced segment",
+                        hint="Repeat this segment in isolation three times before retrying the full sentence.",
+                    )
+                )
+        if not feedback and expected and recognized:
+            normalized_expected = _normalize_text("".join(expected), language)
+            if normalized_expected != recognized_full:
+                feedback.append(
+                    WordFeedback(
+                        word=expected[-1],
+                        issue="segment connection or vowel length can be improved",
+                        hint="Keep a steady rhythm and pay attention to long vowels and consonant links.",
+                    )
+                )
+        return feedback[:3]
+
+    recognized_set = {_normalize_text(token, language) for token in recognized}
 
     for token in expected:
-        if token not in recognized_set:
+        if _normalize_text(token, language) not in recognized_set:
             feedback.append(
                 WordFeedback(
                     word=token,
@@ -86,21 +145,31 @@ def _build_word_feedback(expected: list[str], recognized: list[str]) -> list[Wor
 def run_pronunciation_activity(request: PronunciationRequest, current_date: date) -> dict:
     expected_words = _tokenize(request.expected_text)
     recognized_words = _tokenize(request.recognized_text)
+    language = request.language or language_for_date(current_date)
 
-    overlap = _word_overlap(expected_words, recognized_words)
+    overlap = _word_overlap(expected_words, recognized_words, language)
+    char_similarity = _character_similarity(request.expected_text, request.recognized_text, language)
     pause_ratio = 0.0 if request.audio_duration_seconds <= 0 else min(1.0, request.pause_seconds / request.audio_duration_seconds)
     pitch_stability = _pitch_stability(request.pitch_track_hz)
 
-    pronunciation_confidence = max(
-        0.0,
-        min(
-            1.0,
-            (overlap * 0.6) + (pitch_stability * 0.25) + ((1 - pause_ratio) * 0.15),
-        ),
-    )
+    if _is_japanese_language(language):
+        pronunciation_confidence = max(
+            0.0,
+            min(
+                1.0,
+                (char_similarity * 0.75) + (overlap * 0.15) + (pitch_stability * 0.05) + ((1 - pause_ratio) * 0.05),
+            ),
+        )
+    else:
+        pronunciation_confidence = max(
+            0.0,
+            min(
+                1.0,
+                (overlap * 0.6) + (pitch_stability * 0.25) + ((1 - pause_ratio) * 0.15),
+            ),
+        )
 
-    feedback = _build_word_feedback(expected_words, recognized_words)
-    language = request.language or language_for_date(current_date)
+    feedback = _build_word_feedback(expected_words, recognized_words, language)
 
     return {
         "activity_type": request.activity_type,
@@ -109,6 +178,8 @@ def run_pronunciation_activity(request: PronunciationRequest, current_date: date
         "recognized_text": request.recognized_text,
         "metrics": {
             "pronunciation_confidence": round(pronunciation_confidence, 2),
+            "character_similarity": round(char_similarity, 2),
+            "token_overlap": round(overlap, 2),
             "speech_rate_wpm": _speech_rate_wpm(recognized_words, request.speech_seconds),
             "pause_ratio": round(pause_ratio, 2),
             "pitch_stability": round(pitch_stability, 2),
