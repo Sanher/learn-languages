@@ -257,6 +257,61 @@ button.is-loading {
   gap: 6px;
 }
 
+.focus-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #475569;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+
+.focus-chip-type {
+  opacity: 0.8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+
+.focus-chip-script {
+  font-size: 13px;
+}
+
+.focus-chip--particle {
+  border-color: #3b82f6;
+  background: rgba(37, 99, 235, 0.14);
+  color: #dbeafe;
+}
+
+.focus-chip--word {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+  color: #d1fae5;
+}
+
+.focus-chip--kanji {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.14);
+  color: #fef3c7;
+}
+
+.focus-chip--expression {
+  border-color: #a855f7;
+  background: rgba(168, 85, 247, 0.12);
+  color: #ede9fe;
+}
+
+.focus-chip--static {
+  width: fit-content;
+}
+
 .lesson-example {
   margin-top: 10px;
   padding: 10px;
@@ -267,6 +322,101 @@ button.is-loading {
 
 .lesson-example p {
   margin: 4px 0;
+}
+
+.lesson-focus-items {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #243244;
+}
+
+.lesson-focus-items-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.lesson-focus-items-head h3 {
+  margin: 0;
+}
+
+.lesson-focus-items-head p {
+  margin: 0;
+}
+
+.focus-item-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.focus-item-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #0b1220;
+}
+
+.focus-item-card--particle {
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.12);
+}
+
+.focus-item-card--word {
+  box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.12);
+}
+
+.focus-item-card--kanji {
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.12);
+}
+
+.focus-item-card--expression {
+  box-shadow: inset 0 0 0 1px rgba(168, 85, 247, 0.12);
+}
+
+.focus-item-card-head,
+.focus-item-reading,
+.focus-item-example {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.focus-item-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.focus-item-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.focus-item-status-badge.is-core {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+.focus-item-status-badge.is-exam {
+  background: #14532d;
+  color: #dcfce7;
+}
+
+.focus-item-reading p,
+.focus-item-definition,
+.focus-item-example p {
+  margin: 0;
 }
 
 .lesson-actions {

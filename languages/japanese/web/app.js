@@ -274,6 +274,178 @@ function renderTranslatedList(record, field) {
     .join('');
 }
 
+function lessonFocusItems() {
+  const items = Array.isArray(dailyLesson && dailyLesson.focus_items) ? dailyLesson.focus_items : [];
+  return items.filter((item) => item && typeof item === 'object' && String(item.script || '').trim());
+}
+
+function focusTypeLabel(itemType) {
+  const normalized = String(itemType || '').trim().toLowerCase();
+  if (normalized === 'particle') return 'Particle';
+  if (normalized === 'kanji') return 'Kanji';
+  if (normalized === 'expression') return 'Expression';
+  return 'Word';
+}
+
+function lessonFocusHighlightItems(focusItems) {
+  return [...focusItems]
+    .filter((item) => String(item && item.script || '').trim())
+    .sort((left, right) => String(right.script || '').length - String(left.script || '').length);
+}
+
+function renderFocusAwareText(value, focusItems, { multiline = false } = {}) {
+  const source = String(value || '');
+  if (!source) return '';
+  const items = lessonFocusHighlightItems(focusItems);
+  if (!items.length) {
+    return multiline ? multilineHtml(source) : escapeHtml(source);
+  }
+
+  const parts = [];
+  let index = 0;
+  while (index < source.length) {
+    const match = items.find((item) => source.startsWith(String(item.script || ''), index));
+    if (match) {
+      const type = String(match.item_type || 'word').trim().toLowerCase();
+      const classes = [
+        'focus-chip',
+        `focus-chip--${escapeHtml(type)}`,
+      ];
+      parts.push(
+        `<span class="${classes.join(' ')}" data-focus-item-id="${escapeHtml(match.item_id || '')}" data-focus-type="${escapeHtml(type)}">`
+          + `<span class="focus-chip-type">${escapeHtml(focusTypeLabel(type))}</span>`
+          + `<span class="focus-chip-script">${escapeHtml(match.script || '')}</span>`
+        + '</span>'
+      );
+      index += String(match.script || '').length;
+      continue;
+    }
+
+    const char = source[index];
+    parts.push(char === '\n' && multiline ? '<br />' : escapeHtml(char));
+    index += 1;
+  }
+  return parts.join('');
+}
+
+function renderTranslatedFieldWithFocus(record, field, focusItems, {
+  label = '',
+  className = '',
+  tag = 'p',
+  showEnglish = true,
+  multiline = false,
+} = {}) {
+  const bundle = translationBundleForField(record, field);
+  if (!bundle || typeof bundle !== 'object') return '';
+  const enText = String(bundle.en || '').trim();
+  const secondaryLang = normalizeSecondaryLanguage(bundle.secondary_lang);
+  const secondaryText = String(bundle.secondary || '').trim();
+  const parts = [];
+  if (showEnglish && enText) {
+    parts.push(`<span class="translation-primary-line">${renderFocusAwareText(enText, focusItems, { multiline })}</span>`);
+  }
+  if (secondaryLang && secondaryText) {
+    parts.push(
+      `<span class="translation-secondary-line">${escapeHtml(secondaryTranslationLabel(secondaryLang))}: `
+      + `${renderFocusAwareText(secondaryText, focusItems, { multiline })}</span>`
+    );
+  }
+  if (!parts.length) return '';
+  const classes = className ? ` class="${escapeHtml(className)}"` : '';
+  const labelHtml = label ? `<strong>${escapeHtml(label)}:</strong> ` : '';
+  return `<${tag}${classes}>${labelHtml}${parts.join('<br />')}</${tag}>`;
+}
+
+function renderTranslatedListWithFocus(record, field, focusItems) {
+  const values = Array.isArray(record && record[field]) ? record[field] : [];
+  const bundles = Array.isArray(record && record[`${field}_translations`]) ? record[`${field}_translations`] : [];
+  return values
+    .map((value, index) => {
+      const bundle = bundles[index] && typeof bundles[index] === 'object'
+        ? bundles[index]
+        : { en: value, secondary_lang: normalizeSecondaryLanguage(translationPreferences.secondary_translation_language), secondary: null };
+      const enText = String(bundle.en || '').trim();
+      const secondaryLang = normalizeSecondaryLanguage(bundle.secondary_lang);
+      const secondaryText = String(bundle.secondary || '').trim();
+      const lines = [];
+      if (enText) {
+        lines.push(`<span class="translation-primary-line">${renderFocusAwareText(enText, focusItems)}</span>`);
+      }
+      if (secondaryLang && secondaryText) {
+        lines.push(
+          `<span class="translation-secondary-line">${escapeHtml(secondaryTranslationLabel(secondaryLang))}: `
+          + `${renderFocusAwareText(secondaryText, focusItems)}</span>`
+        );
+      }
+      return lines.length ? `<li>${lines.join('<br />')}</li>` : '';
+    })
+    .filter(Boolean)
+    .join('');
+}
+
+function renderFocusItemsSection(focusItems) {
+  if (!focusItems.length) return '';
+  const cards = focusItems.map((item) => {
+    const type = String(item.item_type || 'word').trim().toLowerCase();
+    const script = String(item.script || '').trim();
+    if (!script) return '';
+    const typeLabel = focusTypeLabel(type);
+    const coreBadge = item.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
+    const examBadge = item.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
+    const readingKana = String(item.reading_kana || '').trim();
+    const readingRomanized = String(item.reading_romanized || '').trim();
+    const definitionLabel = type === 'particle' ? 'Function' : 'Meaning';
+    const definitionText = String(type === 'particle' ? (item.function || '') : (item.meaning_en || '')).trim();
+    const secondaryMeaning = String(item.meaning_secondary || '').trim();
+    const exampleScript = String(item.example_script || '').trim();
+    const exampleRomanized = String(item.example_romanized || '').trim();
+    const exampleLiteral = String(item.example_literal_translation || '').trim();
+    const secondaryLabel = secondaryTranslationLabel(translationPreferences.secondary_translation_language);
+    return `
+      <article class="focus-item-card focus-item-card--${escapeHtml(type)}">
+        <div class="focus-item-card-head">
+          <div class="focus-item-card-tags">
+            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
+              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
+              <span class="focus-chip-script">${escapeHtml(script)}</span>
+            </span>
+            ${coreBadge}
+            ${examBadge}
+          </div>
+          ${(readingKana || readingRomanized) ? `
+            <div class="focus-item-reading">
+              ${readingKana ? `<p><strong>Kana:</strong> ${escapeHtml(readingKana)}</p>` : ''}
+              ${readingRomanized ? `<p><strong>Romanized:</strong> ${escapeHtml(readingRomanized)}</p>` : ''}
+            </div>
+          ` : ''}
+        </div>
+        ${definitionText ? `<p class="focus-item-definition"><strong>${escapeHtml(definitionLabel)}:</strong> ${escapeHtml(definitionText)}</p>` : ''}
+        ${secondaryMeaning ? `<p class="translation-secondary-line">${escapeHtml(secondaryLabel)}: ${escapeHtml(secondaryMeaning)}</p>` : ''}
+        ${(exampleScript || exampleRomanized || exampleLiteral) ? `
+          <div class="focus-item-example">
+            ${exampleScript ? `<p><strong>Example:</strong> ${renderFocusAwareText(exampleScript, focusItems)}</p>` : ''}
+            ${exampleRomanized ? `<p><strong>Romanized:</strong> ${escapeHtml(exampleRomanized)}</p>` : ''}
+            ${exampleLiteral ? `<p><strong>Literal:</strong> ${escapeHtml(exampleLiteral)}</p>` : ''}
+          </div>
+        ` : ''}
+      </article>
+    `;
+  }).filter(Boolean).join('');
+
+  if (!cards) return '';
+  return `
+    <section class="lesson-focus-items">
+      <div class="lesson-focus-items-head">
+        <h3>Focus items</h3>
+        <p class="muted">The same labels appear inline in the lesson, so you can quickly spot particles, words, and kanji before reviewing them below.</p>
+      </div>
+      <div class="focus-item-grid">
+        ${cards}
+      </div>
+    </section>
+  `;
+}
+
 function titleCaseWord(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return '';
@@ -707,6 +879,7 @@ function nextPendingDailyGame() {
 
 function renderLessonPanel() {
   if (!dailyLesson) return '';
+  const focusItems = lessonFocusItems();
 
   if (isReviewMode) {
     const reviewTopicHtml = renderTranslatedField(dailyTopic, 'title', {
@@ -730,7 +903,7 @@ function renderLessonPanel() {
     `;
   }
 
-  const points = renderTranslatedList(dailyLesson, 'theory_points');
+  const points = renderTranslatedListWithFocus(dailyLesson, 'theory_points', focusItems);
   const lessonLevelProgressHtml = renderLevelProgressBlock({ compact: false, includeNotice: true });
   const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
   const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 0);
@@ -780,10 +953,12 @@ function renderLessonPanel() {
     label: 'Topic',
     className: 'muted',
   });
-  const topicDescriptionHtml = renderTranslatedField(dailyTopic, 'description', {
+  const topicDescriptionHtml = renderTranslatedFieldWithFocus(dailyTopic, 'description', focusItems, {
     className: 'muted',
     multiline: true,
   });
+  const objectiveHtml = renderTranslatedFieldWithFocus(dailyLesson, 'objective', focusItems, { className: 'muted' });
+  const focusItemsHtml = renderFocusItemsSection(focusItems);
   const closedSummary = closedTopicsSummaryState();
   const roadmapItems = Array.isArray(closedTopicsRoadmap) ? closedTopicsRoadmap : [];
   const currentRoadmapTopic = closedTopicsCurrent || roadmapItems.find((item) => String(item.status || '').trim().toLowerCase() === 'current') || null;
@@ -888,13 +1063,14 @@ function renderLessonPanel() {
       </div>
       ${topicTitleHtml || `<p class="muted"><strong>Topic:</strong> ${escapeHtml((dailyTopic && dailyTopic.title) || dailyLesson.topic_title || '')}</p>`}
       ${topicDescriptionHtml}
-      ${renderTranslatedField(dailyLesson, 'objective', { className: 'muted' })}
+      ${objectiveHtml}
       ${points ? `<ul class="lesson-points">${points}</ul>` : ''}
       <div class="lesson-example">
-        <p><strong>Example:</strong> ${escapeHtml(dailyLesson.example_script || '')}</p>
+        <p><strong>Example:</strong> ${renderFocusAwareText(dailyLesson.example_script || '', focusItems)}</p>
         <p><strong>Romanized:</strong> ${escapeHtml(dailyLesson.example_romanized || '')}</p>
         ${renderTranslatedField(dailyLesson, 'example_literal_translation', { label: 'Literal' })}
       </div>
+      ${focusItemsHtml}
       <div class="lesson-actions">
         ${lessonButton}
         ${lessonDone ? '<button id="review-lesson-btn" type="button" class="ghost-btn">Review lesson</button>' : ''}
