@@ -103,6 +103,43 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertFalse(level_progress.get("level_cap_reached"))
         self.assertIsNone(data.get("selected_game"))
 
+    def test_static_fallback_topic_sequence_spans_basic_intermediate_and_advanced(self) -> None:
+        topics = api._fallback_topics_for_language("ja")
+
+        self.assertGreaterEqual(len(topics), 15)
+        self.assertEqual(topics[0].topic_key, "identity_and_plans")
+        self.assertEqual(topics[-1].topic_key, "formal_register_patterns")
+
+        stages = {topic.stage for topic in topics}
+        self.assertEqual(stages, {"basic", "intermediate", "advanced"})
+        self.assertGreaterEqual(sum(1 for topic in topics if topic.stage == "basic"), 5)
+        self.assertGreaterEqual(sum(1 for topic in topics if topic.stage == "intermediate"), 5)
+        self.assertGreaterEqual(sum(1 for topic in topics if topic.stage == "advanced"), 5)
+
+    def test_fallback_sequence_advances_to_intermediate_after_basic_topics_close(self) -> None:
+        fallback_topics = api._fallback_topics_for_language("ja")
+        basic_topics = [topic for topic in fallback_topics if topic.stage == "basic"]
+        self.assertGreaterEqual(len(basic_topics), 5)
+
+        for topic in basic_topics:
+            api.memory.mark_topic_closed(
+                learner_id=self.learner_id,
+                language="ja",
+                topic_key=topic.topic_key,
+                closed_day_iso=date.today().isoformat(),
+                closed_level=5,
+                reason="test_close_basic_fallback_topic",
+                closed_rank="beginner",
+                covers=list(topic.covers),
+            )
+
+        roadmap_payload = api._topic_roadmap_payload(learner_id=self.learner_id, language="ja")
+        current_topic = roadmap_payload["current_topic"]
+
+        self.assertIsNotNone(current_topic)
+        self.assertEqual(current_topic["topic_key"], "past_negative_patterns")
+        self.assertEqual(current_topic["stage"], "intermediate")
+
     def test_daily_game_rotation_is_stable_on_same_day(self) -> None:
         frozen_day = date(2026, 3, 20)
         with unittest.mock.patch.object(api, "date", _FrozenDate):
@@ -1737,18 +1774,26 @@ class TopicDailyFlowTests(unittest.TestCase):
             last_seen_day_iso=today_iso,
         )
 
-        extra = self.client.post(
-            "/api/games/extra/load",
-            json={
-                "learner_id": self.learner_id,
-                "language": "ja",
-                "topic_key": topic_key,
-                "game_type": target_game_type,
-            },
+        current_topic, current_progress, current_day_iso = api._daily_topic_for(
+            learner_id=self.learner_id,
+            language="ja",
         )
-        self.assertEqual(extra.status_code, 200)
-        card = extra.json()["card"]
+        today_level = int(
+            current_progress.level_state
+            or api.memory.level_for_language(self.learner_id, "ja", default_level=1)
+        )
+        card, selection_source = api._select_extra_card_for_game_type(
+            learner_id=self.learner_id,
+            language="ja",
+            today_topic=current_topic,
+            today_level=today_level,
+            game_type=target_game_type,
+            today_iso=current_day_iso,
+        )
+
+        self.assertIsNotNone(card)
         self.assertEqual(card["activity_id"], target_activity_id)
+        self.assertEqual(selection_source, "due_closed_topic")
         self.assertEqual(card.get("selection_source"), "due_closed_topic")
         self.assertEqual(card.get("topic_key"), topic_key)
 
