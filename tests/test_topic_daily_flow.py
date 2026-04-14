@@ -1183,6 +1183,110 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertTrue(result["is_correct"])
         self.assertEqual(result["correct_reading"], card["payload"]["correct_reading"])
 
+    def test_extra_games_include_meaning_match_when_topic_has_meaning_focus_items(self) -> None:
+        daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(daily.status_code, 200)
+        daily_data = daily.json()
+
+        self.client.post(
+            "/api/games/lesson/complete",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": daily_data["lesson"]["topic_key"],
+            },
+        )
+        for card in daily_data["daily_games"]:
+            payload = self._payload_for_daily_card(card)
+            self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": card["game_type"],
+                    "language": "ja",
+                    "level": card["level"],
+                    "retry_count": 0,
+                    "payload": payload,
+                },
+            )
+
+        unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(unlocked.status_code, 200)
+        extra_types = {card["game_type"] for card in unlocked.json()["extra_games"]}
+        self.assertIn("meaning_match", extra_types)
+
+    def test_meaning_match_extra_load_and_evaluate(self) -> None:
+        daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(daily.status_code, 200)
+        daily_data = daily.json()
+
+        self.client.post(
+            "/api/games/lesson/complete",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": daily_data["lesson"]["topic_key"],
+            },
+        )
+        for card in daily_data["daily_games"]:
+            payload = self._payload_for_daily_card(card)
+            self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": card["game_type"],
+                    "language": "ja",
+                    "level": card["level"],
+                    "retry_count": 0,
+                    "payload": payload,
+                },
+            )
+
+        unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(unlocked.status_code, 200)
+        topic_key = unlocked.json()["topic"]["topic_key"]
+        extra_meta = next(card for card in unlocked.json()["extra_games"] if card["game_type"] == "meaning_match")
+
+        load = self.client.post(
+            "/api/games/extra/load",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": topic_key,
+                "game_type": extra_meta["game_type"],
+            },
+        )
+        self.assertEqual(load.status_code, 200)
+        card = load.json()["card"]
+        self.assertEqual(card["game_type"], "meaning_match")
+        self.assertTrue(card["payload"]["script"])
+        self.assertGreaterEqual(len(card["payload"]["options"]), 3)
+
+        evaluated = self.client.post(
+            "/api/games/evaluate",
+            json={
+                "learner_id": self.learner_id,
+                "game_type": card["game_type"],
+                "language": card["language"],
+                "level": card["level"],
+                "retry_count": 0,
+                "payload": {
+                    "item_id": card["activity_id"],
+                    "script": card["payload"]["script"],
+                    "selected_option_id": card["payload"]["correct_option_id"],
+                    "correct_option_id": card["payload"]["correct_option_id"],
+                    "correct_meaning": card["payload"]["correct_meaning"],
+                    "reading_romanized": card["payload"]["reading_romanized"],
+                    "reading_kana": card["payload"]["reading_kana"],
+                },
+            },
+        )
+        self.assertEqual(evaluated.status_code, 200)
+        result = evaluated.json()
+        self.assertEqual(result["score"], 100)
+        self.assertTrue(result["is_correct"])
+        self.assertEqual(result["correct_meaning"], card["payload"]["correct_meaning"])
+
     def test_playing_extra_game_does_not_change_daily_score(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)

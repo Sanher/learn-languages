@@ -1739,6 +1739,51 @@ function renderSingleGame(game) {
         ${options}
       </fieldset>
     `;
+  } else if (gameType === 'meaning_match') {
+    const type = String(payload.item_type || 'word').trim().toLowerCase();
+    const typeLabel = focusTypeLabel(type);
+    const script = String(payload.script || '').trim();
+    const readingKana = String(payload.reading_kana || '').trim();
+    const readingRomanized = String(payload.reading_romanized || '').trim();
+    const coreBadge = payload.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
+    const examBadge = payload.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
+    const readingLines = [
+      readingKana ? `<p class="game-meta-line"><strong>Kana:</strong> ${escapeHtml(readingKana)}</p>` : '',
+      readingRomanized ? `<p class="game-meta-line"><strong>Romanized:</strong> ${escapeHtml(readingRomanized)}</p>` : '',
+    ].join('');
+    promptHtml = `
+      <div class="prompt game-meta">
+        <div class="kanji-reading-match-head">
+          <div class="focus-item-card-tags">
+            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
+              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
+              <span class="focus-chip-script">${escapeHtml(script)}</span>
+            </span>
+            ${coreBadge}
+            ${examBadge}
+          </div>
+        </div>
+        ${readingLines}
+      </div>
+    `;
+    promptIncludesTranslation = false;
+    const options = (payload.options || [])
+      .map((option, idx) => {
+        const checked = idx === 0 ? 'checked' : '';
+        return `
+          <label class="radio-option meaning-match-option" data-option-id="${escapeHtml(option.option_id)}">
+            <input type="radio" name="meaning-match-option" value="${escapeHtml(option.option_id)}" ${checked} />
+            <span>${escapeHtml(option.meaning || '')}</span>
+          </label>
+        `;
+      })
+      .join('');
+    controls = `
+      <fieldset class="response-group context-group">
+        <legend>Answer</legend>
+        ${options}
+      </fieldset>
+    `;
   } else if (gameType === 'kana_speed_round') {
     const expectedText = payload.expected_text || extractKanaSequenceFromPrompt(game.prompt || '');
     setKanaElapsed(KANA_DEFAULT_ELAPSED_SECONDS, true);
@@ -2109,6 +2154,15 @@ function collectPayload(game) {
     payload.script = String(game.payload?.script || '').trim();
     payload.meaning = String(game.payload?.meaning || '').trim();
   }
+  if (game.game_type === 'meaning_match') {
+    const checked = gameZoneEl.querySelector('input[name="meaning-match-option"]:checked');
+    payload.selected_option_id = checked ? checked.value : '';
+    payload.correct_option_id = String(game.payload?.correct_option_id || '').trim();
+    payload.correct_meaning = String(game.payload?.correct_meaning || '').trim();
+    payload.reading_romanized = String(game.payload?.reading_romanized || '').trim();
+    payload.reading_kana = String(game.payload?.reading_kana || '').trim();
+    payload.script = String(game.payload?.script || '').trim();
+  }
   if (game.game_type === 'listening_gap_fill') {
     const dropzones = Array.from(gameZoneEl.querySelectorAll('.gap-dropzone[data-gap-index]'))
       .sort((a, b) => Number(a.dataset.gapIndex || 0) - Number(b.dataset.gapIndex || 0));
@@ -2355,6 +2409,12 @@ function renderEvaluation(data) {
   const correctReadingKanaHtml = data.correct_reading_kana
     ? `<p class="result-line"><strong>Kana:</strong> ${escapeHtml(data.correct_reading_kana)}</p>`
     : '';
+  const readingRomanizedHtml = !data.correct_reading && data.reading_romanized
+    ? `<p class="result-line"><strong>Reading:</strong> ${escapeHtml(data.reading_romanized)}</p>`
+    : '';
+  const readingKanaHtml = !data.correct_reading_kana && data.reading_kana
+    ? `<p class="result-line"><strong>Kana:</strong> ${escapeHtml(data.reading_kana)}</p>`
+    : '';
   const meaningLineHtml = renderTranslatedField(data, 'meaning', {
     label: 'Meaning',
     className: 'result-line',
@@ -2407,6 +2467,8 @@ function renderEvaluation(data) {
     ${meaningAccuracyHtml}
     ${correctReadingHtml}
     ${correctReadingKanaHtml}
+    ${readingRomanizedHtml}
+    ${readingKanaHtml}
     ${meaningLineHtml}
     ${romanizationAccuracyHtml}
     ${segmentationAccuracyHtml}
@@ -2421,12 +2483,29 @@ function renderEvaluation(data) {
   applyListeningGapFillFeedback(data);
   applyKanjiEvaluationFeedback(data);
   applyKanjiReadingMatchFeedback(data);
+  applyMeaningMatchFeedback(data);
 }
 
 function applyKanjiReadingMatchFeedback(data) {
   const options = Array.from(gameZoneEl.querySelectorAll('.kanji-reading-option[data-option-id]'));
   options.forEach((option) => option.classList.remove('is-correct', 'is-incorrect'));
   if (!selectedGame || selectedGame.game_type !== 'kanji_reading_match' || !data) return;
+  const selectedOptionId = String(data.selected_option_id || '').trim();
+  const correctOptionId = String(data.correct_option_id || '').trim();
+  options.forEach((option) => {
+    const optionId = String(option.dataset.optionId || '').trim();
+    if (optionId === correctOptionId) {
+      option.classList.add('is-correct');
+    } else if (!data.is_correct && optionId === selectedOptionId) {
+      option.classList.add('is-incorrect');
+    }
+  });
+}
+
+function applyMeaningMatchFeedback(data) {
+  const options = Array.from(gameZoneEl.querySelectorAll('.meaning-match-option[data-option-id]'));
+  options.forEach((option) => option.classList.remove('is-correct', 'is-incorrect'));
+  if (!selectedGame || selectedGame.game_type !== 'meaning_match' || !data) return;
   const selectedOptionId = String(data.selected_option_id || '').trim();
   const correctOptionId = String(data.correct_option_id || '').trim();
   options.forEach((option) => {

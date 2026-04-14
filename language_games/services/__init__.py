@@ -33,6 +33,14 @@ from .kanji_reading_match_service import (
     KanjiReadingMatchRound,
     KanjiReadingMatchService,
 )
+from .meaning_match_service import (
+    GAME_TYPE_MEANING_MATCH,
+    MeaningMatchAttempt,
+    MeaningMatchItem,
+    MeaningMatchOption,
+    MeaningMatchRound,
+    MeaningMatchService,
+)
 from .listening_gap_fill_service import (
     ENGLISH_LISTENING_GAP_FILL_ITEMS_BY_LEVEL,
     GAME_TYPE_LISTENING_GAP_FILL,
@@ -110,6 +118,12 @@ __all__ = [
     "KanjiReadingMatchAttempt",
     "KanjiReadingMatchService",
     "GAME_TYPE_KANJI_READING_MATCH",
+    "MeaningMatchItem",
+    "MeaningMatchOption",
+    "MeaningMatchRound",
+    "MeaningMatchAttempt",
+    "MeaningMatchService",
+    "GAME_TYPE_MEANING_MATCH",
     "JAPANESE_KANJI_PAIRS_BY_LEVEL",
     "WESTERN_ALPHABET_LANGUAGE_CODES",
     "ListeningGapFillItem",
