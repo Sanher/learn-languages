@@ -119,8 +119,28 @@ WEEKLY_EXAM_FORCE_LEGACY = WEEKLY_EXAM_MODE != "cumulative"
 TOPIC_MASTERY_WINDOW_DAYS = 5
 TOPIC_EXAM_MIN_MASTERY_LEVEL = 3
 WEEKLY_EXAM_MIN_LEVEL = 5
-TOPIC_DAILY_REQUIRED_GAME_COUNT = 4
+TOPIC_DAILY_REQUIRED_GAME_COUNT = 5
 DAILY_SCORE_PER_GAME = 100
+TOPIC_MASTERY_LEVEL_TWO_SCORE = 150.0
+TOPIC_MASTERY_LEVEL_THREE_SCORE = 200.0
+WEEKLY_EXAM_PASS_SCORE = 200
+CORE_DAILY_GAME_TYPES = (
+    GAME_TYPE_SENTENCE_ORDER,
+    GAME_TYPE_LISTENING_GAP_FILL,
+    GAME_TYPE_MORA_ROMANIZATION,
+    GAME_TYPE_GRAMMAR_PARTICLE_FIX,
+    GAME_TYPE_CONTEXT_QUIZ,
+    GAME_TYPE_PRONUNCIATION_MATCH,
+    GAME_TYPE_MEANING_MATCH,
+)
+SPECIALIZED_DAILY_GAME_TYPES = (
+    GAME_TYPE_KANJI_MATCH,
+    ALIAS_GAME_TYPE_KANA_SPEED_ROUND,
+    GAME_TYPE_KANJI_READING_MATCH,
+    GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+)
+CORE_DAILY_ROTATION_COUNT = 3
+SPECIALIZED_DAILY_ROTATION_COUNT = 2
 GAME_NAME_ALIASES = {
     GAME_TYPE_KANJI_MATCH: "Kanji Match",
     ALIAS_GAME_TYPE_KANA_SPEED_ROUND: "Kana Speed Round",
@@ -977,18 +997,174 @@ def _daily_plan_for_topic_day(
     learner_id: str,
     day_iso: str,
 ) -> list[tuple[str, str]]:
-    target_day = date.fromisoformat(day_iso)
-    plan = topic.daily_plan_for_day(level=level, learner_id=learner_id, target_day=target_day)
-    logger.debug(
-        "topic_daily_plan_selected learner_id=%s language=%s topic=%s day=%s level=%s games=%s",
+    def _card_seed(game_type: str) -> str:
+        return f"daily:{learner_id}:{day_iso}:{topic.topic_key}:{level}:{game_type}"
+
+    def _plan_entry_for_game_type(game_type: str, activity_id: str | None = None) -> tuple[str, str] | None:
+        if game_type == GAME_TYPE_KANJI_READING_MATCH:
+            card = _build_kanji_reading_match_card_for_topic(
+                topic=topic,
+                level=level,
+                activity_id=activity_id,
+                seed=_card_seed(game_type),
+            )
+        elif game_type == GAME_TYPE_MEANING_MATCH:
+            card = _build_meaning_match_card_for_topic(
+                topic=topic,
+                level=level,
+                activity_id=activity_id,
+                seed=_card_seed(game_type),
+            )
+        elif game_type == GAME_TYPE_PARTICLE_FUNCTION_MATCH:
+            card = _build_particle_function_match_card_for_topic(
+                topic=topic,
+                level=level,
+                activity_id=activity_id,
+                seed=_card_seed(game_type),
+            )
+        elif activity_id:
+            card = _build_card_for_activity(
+                game_type=game_type,
+                language=topic.language,
+                level=level,
+                activity_id=activity_id,
+            )
+        else:
+            card = _build_card_for_game_type(
+                game_type=game_type,
+                language=topic.language,
+                level=level,
+            )
+        if card is None:
+            return None
+        return str(card["game_type"]), str(card["activity_id"])
+
+    def _pick_entries(
+        candidates: list[tuple[str, str]],
+        *,
+        count: int,
+        avoid_game_types: set[str],
+        seed: str,
+    ) -> list[tuple[str, str]]:
+        if not candidates or count <= 0:
+            return []
+        ordered = candidates.copy()
+        Random(seed).shuffle(ordered)
+        preferred = [entry for entry in ordered if entry[0] not in avoid_game_types]
+        fallback = [entry for entry in ordered if entry[0] in avoid_game_types]
+        return [*preferred, *fallback][:count]
+
+    static_topic_plan = dict(topic.daily_plan_for_level(level) + topic.extra_plan_for_level(level))
+    core_candidates: list[tuple[str, str]] = []
+    for game_type in CORE_DAILY_GAME_TYPES:
+        entry = _plan_entry_for_game_type(game_type, static_topic_plan.get(game_type))
+        if entry is not None:
+            core_candidates.append(entry)
+
+    specialized_candidates: list[tuple[str, str]] = []
+    for game_type in SPECIALIZED_DAILY_GAME_TYPES:
+        entry = _plan_entry_for_game_type(game_type)
+        if entry is not None:
+            specialized_candidates.append(entry)
+
+    previous_progress = memory.latest_daily_topic_progress_before(
+        learner_id=learner_id,
+        language=topic.language,
+        before_day_iso=day_iso,
+    )
+    previous_day_games: set[str] = set()
+    if previous_progress is not None:
+        previous_day_games.update(previous_progress.completed_daily_games())
+        previous_day_games.update(previous_progress.daily_game_scores().keys())
+        previous_day_games.update(previous_progress.daily_game_failures().keys())
+
+    core_selected = _pick_entries(
+        core_candidates,
+        count=min(CORE_DAILY_ROTATION_COUNT, len(core_candidates)),
+        avoid_game_types=previous_day_games,
+        seed=f"core:{learner_id}:{day_iso}:{topic.topic_key}:{level}",
+    )
+    specialized_selected = _pick_entries(
+        specialized_candidates,
+        count=min(SPECIALIZED_DAILY_ROTATION_COUNT, len(specialized_candidates)),
+        avoid_game_types=previous_day_games,
+        seed=f"specialized:{learner_id}:{day_iso}:{topic.topic_key}:{level}",
+    )
+
+    plan = [*core_selected, *specialized_selected]
+    if len(plan) < TOPIC_DAILY_REQUIRED_GAME_COUNT:
+        selected_game_types = {game_type for game_type, _activity_id in plan}
+        overflow_candidates = [
+            entry
+            for entry in [*core_candidates, *specialized_candidates]
+            if entry[0] not in selected_game_types
+        ]
+        overflow_selected = _pick_entries(
+            overflow_candidates,
+            count=TOPIC_DAILY_REQUIRED_GAME_COUNT - len(plan),
+            avoid_game_types=previous_day_games,
+            seed=f"overflow:{learner_id}:{day_iso}:{topic.topic_key}:{level}",
+        )
+        plan.extend(overflow_selected)
+
+    Random(f"daily-order:{learner_id}:{day_iso}:{topic.topic_key}:{level}").shuffle(plan)
+    logger.info(
+        "topic_daily_plan_selected learner_id=%s language=%s topic=%s day=%s level=%s core=%s specialized=%s avoid_previous=%s games=%s",
         learner_id,
         topic.language,
         topic.topic_key,
         day_iso,
         level,
+        ",".join(game_type for game_type, _activity_id in core_selected),
+        ",".join(game_type for game_type, _activity_id in specialized_selected),
+        ",".join(sorted(previous_day_games)),
         ",".join(game_type for game_type, _activity_id in plan),
     )
     return plan
+
+
+def _build_topic_card_for_plan_entry(
+    *,
+    topic: TopicDefinition,
+    game_type: str,
+    level: int,
+    activity_id: str,
+    learner_id: str,
+    day_iso: str,
+    secondary_translation_language: str | None = None,
+) -> dict[str, Any] | None:
+    seed = f"daily:{learner_id}:{day_iso}:{topic.topic_key}:{level}:{game_type}"
+    if game_type == GAME_TYPE_KANJI_READING_MATCH:
+        return _build_kanji_reading_match_card_for_topic(
+            topic=topic,
+            level=level,
+            activity_id=activity_id,
+            seed=seed,
+            secondary_translation_language=secondary_translation_language,
+        )
+    if game_type == GAME_TYPE_MEANING_MATCH:
+        return _build_meaning_match_card_for_topic(
+            topic=topic,
+            level=level,
+            activity_id=activity_id,
+            seed=seed,
+            secondary_translation_language=secondary_translation_language,
+        )
+    if game_type == GAME_TYPE_PARTICLE_FUNCTION_MATCH:
+        return _build_particle_function_match_card_for_topic(
+            topic=topic,
+            level=level,
+            activity_id=activity_id,
+            seed=seed,
+            secondary_translation_language=secondary_translation_language,
+        )
+    return _build_card_for_activity(
+        game_type=game_type,
+        language=topic.language,
+        level=level,
+        activity_id=activity_id,
+        secondary_translation_language=secondary_translation_language,
+    )
 
 
 def _fallback_topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str, Any]]:
@@ -1462,11 +1638,13 @@ def _prewarm_lesson_daily_translation_cache(
         daily_game_types = [game_type for game_type, _activity_id in daily_pairs]
         daily_cards: list[dict[str, Any]] = []
         for game_type, activity_id in daily_pairs:
-            card = _build_card_for_activity_with_level_fallback(
+            card = _build_topic_card_for_plan_entry(
+                topic=topic,
                 game_type=game_type,
-                language=language,
-                preferred_level=level,
+                level=level,
                 activity_id=activity_id,
+                learner_id=learner_id,
+                day_iso=date.today().isoformat(),
                 secondary_translation_language=None,
             )
             if card is not None:
@@ -1632,9 +1810,9 @@ def _topic_mastery_level(*, recent_scores: list[int], window_days: int = TOPIC_M
         return 1, 0.0
     sample_days = len(recent_scores)
     average_score = round(sum(int(score) for score in recent_scores) / sample_days, 1)
-    if sample_days >= int(window_days) and average_score >= 150.0:
+    if sample_days >= int(window_days) and average_score >= TOPIC_MASTERY_LEVEL_THREE_SCORE:
         return 3, average_score
-    if sample_days >= 3 and average_score >= 100.0:
+    if sample_days >= 3 and average_score >= TOPIC_MASTERY_LEVEL_TWO_SCORE:
         return 2, average_score
     return 1, average_score
 
@@ -3531,11 +3709,13 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
     )
     daily_cards: list[dict[str, Any]] = []
     for game_type, activity_id in daily_plan:
-        card = _build_card_for_activity(
+        card = _build_topic_card_for_plan_entry(
+            topic=topic,
             game_type=game_type,
-            language=preferred_language,
             level=today_level,
             activity_id=activity_id,
+            learner_id=req.learner_id,
+            day_iso=today_iso,
             secondary_translation_language=secondary_translation_language,
         )
         if card is not None:
@@ -4331,11 +4511,10 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
                 topic.topic_key,
                 len(submitted_answers),
             )
-        lesson_and_daily_done = bool(progress.lesson_completed) and len(base_daily["completed_daily_games"]) >= len(daily_game_types)
-        target_score = int(insights["topic_day_target_score"])
+        lesson_and_daily_done = bool(progress.lesson_completed) and len(progress.completed_daily_games()) >= TOPIC_DAILY_REQUIRED_GAME_COUNT
         exam_score = int(req.exam_score) if req.exam_score is not None else int(base_daily["daily_score"])
         failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
-        min_pass_score = max(120, int(round(target_score * 0.85)))
+        min_pass_score = WEEKLY_EXAM_PASS_SCORE
         passed = bool(lesson_and_daily_done and exam_score >= min_pass_score and failure_total <= 16)
         memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
         if passed:
@@ -4515,10 +4694,9 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
     raw_average = sum(raw_scores) / score_count
     exam_score = int(round((raw_average / 100.0) * 300.0))
 
-    lesson_and_daily_done = bool(progress.lesson_completed) and len(base_daily["completed_daily_games"]) >= len(daily_game_types)
-    target_score = int(insights["topic_day_target_score"])
+    lesson_and_daily_done = bool(progress.lesson_completed) and len(progress.completed_daily_games()) >= TOPIC_DAILY_REQUIRED_GAME_COUNT
     failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
-    min_pass_score = max(120, int(round(target_score * 0.85)))
+    min_pass_score = WEEKLY_EXAM_PASS_SCORE
     answered_enough = len(answer_results) >= max(3, min(len(questions), 6))
     passed = bool(lesson_and_daily_done and answered_enough and exam_score >= min_pass_score and failure_total <= 16)
 

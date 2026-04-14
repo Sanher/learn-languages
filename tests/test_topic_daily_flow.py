@@ -50,7 +50,7 @@ class TopicDailyFlowTests(unittest.TestCase):
             conn.execute("DELETE FROM topic_sequence_cache WHERE language = 'ja'")
             conn.execute("DELETE FROM topic_lessons_cache WHERE language = 'ja'")
 
-    def test_daily_response_contains_lesson_and_four_topic_games(self) -> None:
+    def test_daily_response_contains_lesson_and_required_topic_games(self) -> None:
         response = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -109,6 +109,43 @@ class TopicDailyFlowTests(unittest.TestCase):
         second_games = [card["game_type"] for card in second.json()["daily_games"]]
         self.assertNotEqual(first_games, second_games)
         self.assertLessEqual(len(set(first_games) & set(second_games)), max(0, EXPECTED_DAILY_COUNT - 2))
+
+    def test_daily_rotation_uses_three_core_and_two_specialized_games(self) -> None:
+        response = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(response.status_code, 200)
+        daily_games = response.json()["daily_games"]
+        self.assertEqual(len(daily_games), EXPECTED_DAILY_COUNT)
+
+        core_count = sum(1 for card in daily_games if card["game_type"] in api.CORE_DAILY_GAME_TYPES)
+        specialized_count = sum(1 for card in daily_games if card["game_type"] in api.SPECIALIZED_DAILY_GAME_TYPES)
+
+        self.assertEqual(core_count, api.CORE_DAILY_ROTATION_COUNT)
+        self.assertEqual(specialized_count, api.SPECIALIZED_DAILY_ROTATION_COUNT)
+
+    def test_daily_rotation_avoids_previous_day_games_when_possible(self) -> None:
+        first_day = date(2026, 3, 20)
+        second_day = first_day + timedelta(days=1)
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = first_day
+            first = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+            self.assertEqual(first.status_code, 200)
+            first_games = [card["game_type"] for card in first.json()["daily_games"]]
+            topic_key = first.json()["topic"]["topic_key"]
+            for game_type in first_games:
+                api.memory.mark_daily_game_completed(
+                    learner_id=self.learner_id,
+                    day_iso=first_day.isoformat(),
+                    language="ja",
+                    topic_key=topic_key,
+                    game_type=game_type,
+                )
+
+            _FrozenDate._today = second_day
+            second = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(second.status_code, 200)
+        second_games = [card["game_type"] for card in second.json()["daily_games"]]
+        self.assertFalse(set(first_games) & set(second_games))
 
     def test_level_two_listening_gap_fill_card_keeps_drag_options(self) -> None:
         card = api._build_card_for_activity(
@@ -205,7 +242,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertEqual(result.get("score"), 100)
         self.assertIn(fallback_card["game_type"], result["daily_progress"]["completed_daily_games"])
 
-    def test_lesson_plus_four_daily_games_unlocks_extras(self) -> None:
+    def test_lesson_plus_required_daily_games_unlocks_extras(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
         daily_data = daily.json()
@@ -1079,7 +1116,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertIn("ai_generated_prompt_translations", card)
         self.assertEqual(card["ai_generated_prompt_translations"]["secondary_lang"], "es")
 
-    def test_extra_games_include_kanji_reading_match_when_topic_has_kanji_focus_items(self) -> None:
+    def test_kanji_reading_match_is_available_after_unlock(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
         daily_data = daily.json()
@@ -1108,8 +1145,8 @@ class TopicDailyFlowTests(unittest.TestCase):
 
         unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(unlocked.status_code, 200)
-        extra_types = {card["game_type"] for card in unlocked.json()["extra_games"]}
-        self.assertIn("kanji_reading_match", extra_types)
+        available_types = {card["game_type"] for card in unlocked.json()["available_games"]}
+        self.assertIn("kanji_reading_match", available_types)
 
     def test_kanji_reading_match_extra_load_and_evaluate(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
@@ -1141,19 +1178,22 @@ class TopicDailyFlowTests(unittest.TestCase):
         unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(unlocked.status_code, 200)
         topic_key = unlocked.json()["topic"]["topic_key"]
-        extra_meta = next(card for card in unlocked.json()["extra_games"] if card["game_type"] == "kanji_reading_match")
-
-        load = self.client.post(
-            "/api/games/extra/load",
-            json={
-                "learner_id": self.learner_id,
-                "language": "ja",
-                "topic_key": topic_key,
-                "game_type": extra_meta["game_type"],
-            },
-        )
-        self.assertEqual(load.status_code, 200)
-        card = load.json()["card"]
+        daily_card = next((card for card in unlocked.json()["daily_games"] if card["game_type"] == "kanji_reading_match"), None)
+        if daily_card is not None:
+            card = daily_card
+        else:
+            extra_meta = next(card for card in unlocked.json()["extra_games"] if card["game_type"] == "kanji_reading_match")
+            load = self.client.post(
+                "/api/games/extra/load",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "game_type": extra_meta["game_type"],
+                },
+            )
+            self.assertEqual(load.status_code, 200)
+            card = load.json()["card"]
         self.assertEqual(card["game_type"], "kanji_reading_match")
         self.assertTrue(card["payload"]["script"])
         self.assertGreaterEqual(len(card["payload"]["options"]), 3)
@@ -1183,7 +1223,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertTrue(result["is_correct"])
         self.assertEqual(result["correct_reading"], card["payload"]["correct_reading"])
 
-    def test_extra_games_include_meaning_match_when_topic_has_meaning_focus_items(self) -> None:
+    def test_meaning_match_is_available_after_unlock(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
         daily_data = daily.json()
@@ -1212,8 +1252,8 @@ class TopicDailyFlowTests(unittest.TestCase):
 
         unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(unlocked.status_code, 200)
-        extra_types = {card["game_type"] for card in unlocked.json()["extra_games"]}
-        self.assertIn("meaning_match", extra_types)
+        available_types = {card["game_type"] for card in unlocked.json()["available_games"]}
+        self.assertIn("meaning_match", available_types)
 
     def test_meaning_match_extra_load_and_evaluate(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
@@ -1245,19 +1285,22 @@ class TopicDailyFlowTests(unittest.TestCase):
         unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(unlocked.status_code, 200)
         topic_key = unlocked.json()["topic"]["topic_key"]
-        extra_meta = next(card for card in unlocked.json()["extra_games"] if card["game_type"] == "meaning_match")
-
-        load = self.client.post(
-            "/api/games/extra/load",
-            json={
-                "learner_id": self.learner_id,
-                "language": "ja",
-                "topic_key": topic_key,
-                "game_type": extra_meta["game_type"],
-            },
-        )
-        self.assertEqual(load.status_code, 200)
-        card = load.json()["card"]
+        daily_card = next((card for card in unlocked.json()["daily_games"] if card["game_type"] == "meaning_match"), None)
+        if daily_card is not None:
+            card = daily_card
+        else:
+            extra_meta = next(card for card in unlocked.json()["extra_games"] if card["game_type"] == "meaning_match")
+            load = self.client.post(
+                "/api/games/extra/load",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "game_type": extra_meta["game_type"],
+                },
+            )
+            self.assertEqual(load.status_code, 200)
+            card = load.json()["card"]
         self.assertEqual(card["game_type"], "meaning_match")
         self.assertTrue(card["payload"]["script"])
         self.assertGreaterEqual(len(card["payload"]["options"]), 3)
@@ -1287,7 +1330,7 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertTrue(result["is_correct"])
         self.assertEqual(result["correct_meaning"], card["payload"]["correct_meaning"])
 
-    def test_extra_games_include_particle_function_match_when_topic_has_particle_focus_items(self) -> None:
+    def test_particle_function_match_is_available_after_unlock(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(daily.status_code, 200)
         daily_data = daily.json()
@@ -1316,8 +1359,8 @@ class TopicDailyFlowTests(unittest.TestCase):
 
         unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(unlocked.status_code, 200)
-        extra_types = {card["game_type"] for card in unlocked.json()["extra_games"]}
-        self.assertIn("particle_function_match", extra_types)
+        available_types = {card["game_type"] for card in unlocked.json()["available_games"]}
+        self.assertIn("particle_function_match", available_types)
 
     def test_particle_function_match_extra_load_and_evaluate(self) -> None:
         daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
@@ -1349,19 +1392,22 @@ class TopicDailyFlowTests(unittest.TestCase):
         unlocked = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
         self.assertEqual(unlocked.status_code, 200)
         topic_key = unlocked.json()["topic"]["topic_key"]
-        extra_meta = next(card for card in unlocked.json()["extra_games"] if card["game_type"] == "particle_function_match")
-
-        load = self.client.post(
-            "/api/games/extra/load",
-            json={
-                "learner_id": self.learner_id,
-                "language": "ja",
-                "topic_key": topic_key,
-                "game_type": extra_meta["game_type"],
-            },
-        )
-        self.assertEqual(load.status_code, 200)
-        card = load.json()["card"]
+        daily_card = next((card for card in unlocked.json()["daily_games"] if card["game_type"] == "particle_function_match"), None)
+        if daily_card is not None:
+            card = daily_card
+        else:
+            extra_meta = next(card for card in unlocked.json()["extra_games"] if card["game_type"] == "particle_function_match")
+            load = self.client.post(
+                "/api/games/extra/load",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "game_type": extra_meta["game_type"],
+                },
+            )
+            self.assertEqual(load.status_code, 200)
+            card = load.json()["card"]
         self.assertEqual(card["game_type"], "particle_function_match")
         self.assertTrue(card["payload"]["script"])
         self.assertGreaterEqual(len(card["payload"]["options"]), 3)
@@ -2853,10 +2899,11 @@ class TopicDailyFlowTests(unittest.TestCase):
             day_iso = target_day.isoformat()
             daily_games = [
                 game
-                for game, _activity_id in topic_definition.daily_plan_for_day(
+                for game, _activity_id in api._daily_plan_for_topic_day(
+                    topic=topic_definition,
                     level=1,
                     learner_id=self.learner_id,
-                    target_day=target_day,
+                    day_iso=day_iso,
                 )
             ]
             self.assertGreaterEqual(len(daily_games), 1)
@@ -2931,6 +2978,57 @@ class TopicDailyFlowTests(unittest.TestCase):
             payload["speech_seconds"] = 1.8
             payload["pause_seconds"] = 0.2
             payload["pitch_track_hz"] = [150.0, 151.0, 149.0]
+            return payload
+
+        if game_type == "kanji_match":
+            learner_matches = {
+                pair.symbol: pair.meaning
+                for pair in api.game_services[game_type].get_pairs(language=card["language"], level=card["level"])
+            }
+            payload["learner_matches"] = learner_matches
+            payload["learner_meanings"] = learner_matches
+            return payload
+
+        if game_type == "kana_speed_round":
+            expected_text = str(card_payload.get("expected_text", ""))
+            expected_sequence = [chunk for chunk in expected_text.split() if chunk]
+            payload["sequence_expected"] = expected_sequence
+            payload["sequence_read"] = expected_sequence
+            payload["elapsed_seconds"] = 4.0
+            payload["expected_text"] = expected_text
+            payload["recognized_text"] = expected_text
+            payload["audio_duration_seconds"] = 4.0
+            payload["speech_seconds"] = 4.0
+            payload["pause_seconds"] = 0.2
+            payload["pitch_track_hz"] = [150.0, 151.0, 149.0]
+            return payload
+
+        if game_type == "meaning_match":
+            payload["script"] = card_payload.get("script", "")
+            payload["selected_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_meaning"] = card_payload.get("correct_meaning", "")
+            payload["reading_romanized"] = card_payload.get("reading_romanized", "")
+            payload["reading_kana"] = card_payload.get("reading_kana", "")
+            return payload
+
+        if game_type == "kanji_reading_match":
+            payload["script"] = card_payload.get("script", "")
+            payload["selected_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_reading"] = card_payload.get("correct_reading", "")
+            payload["correct_reading_kana"] = card_payload.get("correct_reading_kana", "")
+            payload["meaning"] = card_payload.get("meaning", "")
+            return payload
+
+        if game_type == "particle_function_match":
+            payload["script"] = card_payload.get("script", "")
+            payload["selected_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_function"] = card_payload.get("correct_function", "")
+            payload["explanation"] = card_payload.get("explanation", "")
+            payload["reading_romanized"] = card_payload.get("reading_romanized", "")
+            payload["reading_kana"] = card_payload.get("reading_kana", "")
             return payload
 
         raise AssertionError(f"Unsupported daily game in topic flow test: {game_type}")
@@ -3008,6 +3106,58 @@ class TopicDailyFlowTests(unittest.TestCase):
             payload["speech_seconds"] = 1.8
             payload["pause_seconds"] = 0.2
             payload["pitch_track_hz"] = [150.0, 151.0, 149.0]
+            return payload
+
+        if game_type == "kanji_match":
+            pairs = api.game_services[game_type].get_pairs(language=card["language"], level=card["level"])
+            learner_matches = {pair.symbol: "__wrong__" for pair in pairs}
+            payload["learner_matches"] = learner_matches
+            payload["learner_meanings"] = learner_matches
+            return payload
+
+        if game_type == "kana_speed_round":
+            expected_text = str(card_payload.get("expected_text", ""))
+            expected_sequence = [chunk for chunk in expected_text.split() if chunk]
+            payload["sequence_expected"] = expected_sequence
+            payload["sequence_read"] = ["__wrong__" for _ in expected_sequence]
+            payload["elapsed_seconds"] = 4.0
+            payload["expected_text"] = expected_text
+            payload["recognized_text"] = "__wrong__"
+            payload["audio_duration_seconds"] = 4.0
+            payload["speech_seconds"] = 4.0
+            payload["pause_seconds"] = 0.2
+            payload["pitch_track_hz"] = [150.0, 151.0, 149.0]
+            return payload
+
+        if game_type == "meaning_match":
+            options = [option for option in card_payload.get("options", []) if option.get("option_id") != card_payload.get("correct_option_id")]
+            payload["script"] = card_payload.get("script", "")
+            payload["selected_option_id"] = options[0]["option_id"] if options else "__wrong__"
+            payload["correct_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_meaning"] = card_payload.get("correct_meaning", "")
+            payload["reading_romanized"] = card_payload.get("reading_romanized", "")
+            payload["reading_kana"] = card_payload.get("reading_kana", "")
+            return payload
+
+        if game_type == "kanji_reading_match":
+            options = [option for option in card_payload.get("options", []) if option.get("option_id") != card_payload.get("correct_option_id")]
+            payload["script"] = card_payload.get("script", "")
+            payload["selected_option_id"] = options[0]["option_id"] if options else "__wrong__"
+            payload["correct_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_reading"] = card_payload.get("correct_reading", "")
+            payload["correct_reading_kana"] = card_payload.get("correct_reading_kana", "")
+            payload["meaning"] = card_payload.get("meaning", "")
+            return payload
+
+        if game_type == "particle_function_match":
+            options = [option for option in card_payload.get("options", []) if option.get("option_id") != card_payload.get("correct_option_id")]
+            payload["script"] = card_payload.get("script", "")
+            payload["selected_option_id"] = options[0]["option_id"] if options else "__wrong__"
+            payload["correct_option_id"] = card_payload.get("correct_option_id", "")
+            payload["correct_function"] = card_payload.get("correct_function", "")
+            payload["explanation"] = card_payload.get("explanation", "")
+            payload["reading_romanized"] = card_payload.get("reading_romanized", "")
+            payload["reading_kana"] = card_payload.get("reading_kana", "")
             return payload
 
         raise AssertionError(f"Unsupported daily game in topic flow test: {game_type}")
