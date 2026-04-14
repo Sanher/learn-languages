@@ -1695,6 +1695,50 @@ function renderSingleGame(game) {
         </div>
       </fieldset>
     `;
+  } else if (gameType === 'kanji_reading_match') {
+    const type = String(payload.item_type || 'kanji').trim().toLowerCase();
+    const typeLabel = focusTypeLabel(type);
+    const script = String(payload.script || '').trim();
+    const coreBadge = payload.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
+    const examBadge = payload.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
+    const meaningHtml = renderTranslatedField(payload, 'meaning', {
+      label: type === 'particle' ? 'Function' : 'Meaning',
+      className: 'game-meta-line',
+      multiline: true,
+    });
+    promptHtml = `
+      <div class="prompt game-meta">
+        <div class="kanji-reading-match-head">
+          <div class="focus-item-card-tags">
+            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
+              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
+              <span class="focus-chip-script">${escapeHtml(script)}</span>
+            </span>
+            ${coreBadge}
+            ${examBadge}
+          </div>
+        </div>
+        ${meaningHtml}
+      </div>
+    `;
+    promptIncludesTranslation = false;
+    const options = (payload.options || [])
+      .map((option, idx) => {
+        const checked = idx === 0 ? 'checked' : '';
+        return `
+          <label class="radio-option kanji-reading-option" data-option-id="${escapeHtml(option.option_id)}">
+            <input type="radio" name="kanji-reading-option" value="${escapeHtml(option.option_id)}" ${checked} />
+            <span>${escapeHtml(option.reading_romanized || '')}</span>
+          </label>
+        `;
+      })
+      .join('');
+    controls = `
+      <fieldset class="response-group context-group">
+        <legend>Answer</legend>
+        ${options}
+      </fieldset>
+    `;
   } else if (gameType === 'kana_speed_round') {
     const expectedText = payload.expected_text || extractKanaSequenceFromPrompt(game.prompt || '');
     setKanaElapsed(KANA_DEFAULT_ELAPSED_SECONDS, true);
@@ -2056,6 +2100,15 @@ function collectPayload(game) {
     const checked = gameZoneEl.querySelector('input[name="context-option"]:checked');
     payload.selected_option_id = checked ? checked.value : '';
   }
+  if (game.game_type === 'kanji_reading_match') {
+    const checked = gameZoneEl.querySelector('input[name="kanji-reading-option"]:checked');
+    payload.selected_option_id = checked ? checked.value : '';
+    payload.correct_option_id = String(game.payload?.correct_option_id || '').trim();
+    payload.correct_reading = String(game.payload?.correct_reading || '').trim();
+    payload.correct_reading_kana = String(game.payload?.correct_reading_kana || '').trim();
+    payload.script = String(game.payload?.script || '').trim();
+    payload.meaning = String(game.payload?.meaning || '').trim();
+  }
   if (game.game_type === 'listening_gap_fill') {
     const dropzones = Array.from(gameZoneEl.querySelectorAll('.gap-dropzone[data-gap-index]'))
       .sort((a, b) => Number(a.dataset.gapIndex || 0) - Number(b.dataset.gapIndex || 0));
@@ -2296,6 +2349,17 @@ function renderEvaluation(data) {
   const meaningAccuracyHtml = data.meaning_accuracy != null
     ? `<p class="result-line"><strong>Meaning:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
     : '';
+  const correctReadingHtml = data.correct_reading
+    ? `<p class="result-line"><strong>Correct reading:</strong> ${escapeHtml(data.correct_reading)}</p>`
+    : '';
+  const correctReadingKanaHtml = data.correct_reading_kana
+    ? `<p class="result-line"><strong>Kana:</strong> ${escapeHtml(data.correct_reading_kana)}</p>`
+    : '';
+  const meaningLineHtml = renderTranslatedField(data, 'meaning', {
+    label: 'Meaning',
+    className: 'result-line',
+    multiline: true,
+  });
   const romanizationAccuracyHtml = data.romanization_accuracy != null
     ? `<p class="result-line"><strong>Romanization:</strong> ${escapeHtml(Math.round(Number(data.romanization_accuracy) * 100))}%</p>`
     : '';
@@ -2341,6 +2405,9 @@ function renderEvaluation(data) {
     ${segmentOverlapHtml}
     ${readingAccuracyHtml}
     ${meaningAccuracyHtml}
+    ${correctReadingHtml}
+    ${correctReadingKanaHtml}
+    ${meaningLineHtml}
     ${romanizationAccuracyHtml}
     ${segmentationAccuracyHtml}
     ${feedbackHtml}
@@ -2353,6 +2420,23 @@ function renderEvaluation(data) {
   `;
   applyListeningGapFillFeedback(data);
   applyKanjiEvaluationFeedback(data);
+  applyKanjiReadingMatchFeedback(data);
+}
+
+function applyKanjiReadingMatchFeedback(data) {
+  const options = Array.from(gameZoneEl.querySelectorAll('.kanji-reading-option[data-option-id]'));
+  options.forEach((option) => option.classList.remove('is-correct', 'is-incorrect'));
+  if (!selectedGame || selectedGame.game_type !== 'kanji_reading_match' || !data) return;
+  const selectedOptionId = String(data.selected_option_id || '').trim();
+  const correctOptionId = String(data.correct_option_id || '').trim();
+  options.forEach((option) => {
+    const optionId = String(option.dataset.optionId || '').trim();
+    if (optionId === correctOptionId) {
+      option.classList.add('is-correct');
+    } else if (!data.is_correct && optionId === selectedOptionId) {
+      option.classList.add('is-incorrect');
+    }
+  });
 }
 
 function setEvaluateLoadingState(isLoading) {

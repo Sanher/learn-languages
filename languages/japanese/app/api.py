@@ -23,6 +23,7 @@ from language_games.services import (
     GAME_TYPE_CONTEXT_QUIZ,
     GAME_TYPE_GRAMMAR_PARTICLE_FIX,
     GAME_TYPE_KANJI_MATCH,
+    GAME_TYPE_KANJI_READING_MATCH,
     GAME_TYPE_LISTENING_GAP_FILL,
     GAME_TYPE_MORA_ROMANIZATION,
     GAME_TYPE_PRONUNCIATION_MATCH,
@@ -34,6 +35,8 @@ from language_games.services import (
     KanaSpeedRoundService,
     KanjiMatchAttempt,
     KanjiMatchService,
+    KanjiReadingMatchAttempt,
+    KanjiReadingMatchService,
     ListeningGapFillAttempt,
     ListeningGapFillService,
     MoraRomanizationAttempt,
@@ -121,6 +124,7 @@ GAME_NAME_ALIASES = {
     GAME_TYPE_LISTENING_GAP_FILL: "Listening Gap Fill",
     GAME_TYPE_PRONUNCIATION_MATCH: "Guided Pronunciation",
     GAME_TYPE_CONTEXT_QUIZ: "Context Quiz",
+    GAME_TYPE_KANJI_READING_MATCH: "Kanji Reading Match",
 }
 
 app = FastAPI(title="Japanese Daily Trainer")
@@ -147,6 +151,7 @@ openai_planner = OpenAIPlanner()
 elevenlabs = ElevenLabsService()
 registry = GameServiceRegistry()
 game_services: dict[str, Any] = {}
+kanji_reading_match_service = KanjiReadingMatchService()
 # Cache only successful AI lesson ladders so daily/review calls do not repeat token usage.
 _TOPIC_LESSONS_AI_CACHE: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
 _TOPIC_SEQUENCE_CACHE: dict[str, tuple[TopicDefinition, ...]] = {}
@@ -999,6 +1004,19 @@ def _fallback_topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[s
     return lessons
 
 
+def _topic_focus_items_for_level(topic: TopicDefinition, level: int) -> list[dict[str, Any]]:
+    focus_items = [item.to_payload() for item in topic.focus_items_for_level(int(level))]
+    if focus_items:
+        return focus_items
+    return build_fallback_focus_items_for_topic(
+        language=topic.language,
+        topic_key=topic.topic_key,
+        stage=topic.stage,
+        covers=topic.covers,
+        max_items=8,
+    )
+
+
 async def _topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str, Any]]:
     cache_key = (topic.language, topic.topic_key)
     cached = _TOPIC_LESSONS_AI_CACHE.get(cache_key)
@@ -1037,6 +1055,7 @@ async def _topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str,
         topic_key=topic.topic_key,
         topic_title=topic.title,
         topic_description=topic.description,
+        topic_stage=topic.stage,
         fallback_lessons_by_level=fallback_lessons,
     )
     source = str(generated.get("source", "fallback")).strip().lower()
@@ -1097,6 +1116,53 @@ def _available_lesson_levels(
         if normalized:
             return tuple(normalized)
     return tuple(sorted(int(level) for level in topic.lessons_by_level.keys()))
+
+
+def _build_kanji_reading_match_card_for_topic(
+    *,
+    topic: TopicDefinition,
+    level: int,
+    seed: str,
+    activity_id: str | None = None,
+    secondary_translation_language: str | None = None,
+) -> dict[str, Any] | None:
+    focus_items = _topic_focus_items_for_level(topic, level)
+    round_data = kanji_reading_match_service.build_round(
+        focus_items=focus_items,
+        seed=seed,
+        item_id=activity_id,
+    )
+    if round_data is None:
+        logger.info(
+            "kanji_reading_match_card_skipped topic=%s level=%s activity_id=%s",
+            topic.topic_key,
+            level,
+            activity_id or "auto",
+        )
+        return None
+
+    payload = {
+        "game_type": GAME_TYPE_KANJI_READING_MATCH,
+        "display_name": GAME_NAME_ALIASES.get(GAME_TYPE_KANJI_READING_MATCH, GAME_TYPE_KANJI_READING_MATCH),
+        "activity_id": round_data.item.item_id,
+        "language": topic.language,
+        "prompt": round_data.prompt,
+        "level": int(level),
+        "payload": kanji_reading_match_service.round_payload(round_data),
+        "topic_key": topic.topic_key,
+    }
+    logger.info(
+        "kanji_reading_match_card_ready topic=%s level=%s activity_id=%s",
+        topic.topic_key,
+        level,
+        round_data.item.item_id,
+    )
+    return _augment_with_secondary_translations(
+        payload,
+        secondary_language=secondary_translation_language,
+        context=f"card.{GAME_TYPE_KANJI_READING_MATCH}.{round_data.item.item_id}",
+        memo={},
+    )
 
 
 def _nearest_available_lesson_level(requested_level: int, available_levels: tuple[int, ...]) -> int:
@@ -1304,6 +1370,7 @@ def _prewarm_lesson_daily_translation_cache(
 
         extra_cards = _extra_game_cards_metadata(
             learner_id=learner_id,
+            topic=topic,
             daily_game_types=daily_game_types,
             language=language,
             level=level,
@@ -2645,6 +2712,58 @@ def _select_extra_card_for_game_type(
     secondary_translation_language: str | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     closed_topics = _closed_topics_map(learner_id=learner_id, language=language)
+    if game_type == GAME_TYPE_KANJI_READING_MATCH:
+        if closed_topics:
+            due_items = memory.list_due_item_review_states(
+                learner_id=learner_id,
+                language=language,
+                current_day_iso=today_iso,
+                limit=120,
+            )
+            due_candidates = [
+                item
+                for item in due_items
+                if item.game_type == game_type and item.topic_key in closed_topics
+            ]
+            due_candidates.sort(key=lambda item: (item.due_day_iso, -int(item.lapses), int(item.last_score)))
+            for item in due_candidates:
+                closed = closed_topics[item.topic_key]
+                topic_def = _topic_definition_for_key(language=language, topic_key=item.topic_key)
+                if topic_def is None:
+                    continue
+                preferred_level = max(1, int(closed.closed_level))
+                card = _build_kanji_reading_match_card_for_topic(
+                    topic=topic_def,
+                    level=preferred_level,
+                    activity_id=item.item_id,
+                    seed=f"due:{learner_id}:{today_iso}:{item.topic_key}:{item.item_id}:{preferred_level}",
+                    secondary_translation_language=secondary_translation_language,
+                )
+                if card is None:
+                    continue
+                card["topic_key"] = item.topic_key
+                card["selection_source"] = "due_closed_topic"
+                return card, "due_closed_topic"
+
+        failures = memory.aggregate_topic_failures(
+            learner_id=learner_id,
+            language=language,
+            topic_key=today_topic.topic_key,
+        )
+        card = _build_kanji_reading_match_card_for_topic(
+            topic=today_topic,
+            level=today_level,
+            seed=f"{learner_id}:{today_iso}:{today_topic.topic_key}:{today_level}:{game_type}",
+            secondary_translation_language=secondary_translation_language,
+        )
+        if card is None:
+            return None, "missing"
+        if int(failures.get(game_type, 0)) > 0:
+            card["selection_source"] = "weak_current_topic"
+            return card, "weak_current_topic"
+        card["selection_source"] = "current_topic_default"
+        return card, "current_topic_default"
+
     if closed_topics:
         due_items = memory.list_due_item_review_states(
             learner_id=learner_id,
@@ -3032,6 +3151,7 @@ def _weekly_exam_questions(
 def _extra_game_cards_metadata(
     *,
     learner_id: str,
+    topic: TopicDefinition,
     daily_game_types: list[str],
     language: str,
     level: int,
@@ -3056,6 +3176,22 @@ def _extra_game_cards_metadata(
                 "deferred_load": True,
             }
         )
+    if GAME_TYPE_KANJI_READING_MATCH not in daily_game_types:
+        dynamic_card = _build_kanji_reading_match_card_for_topic(
+            topic=topic,
+            level=level,
+            seed=f"{learner_id}:{day_iso}:{topic.topic_key}:{level}:{GAME_TYPE_KANJI_READING_MATCH}",
+        )
+        if dynamic_card is not None:
+            cards.append(
+                {
+                    "game_type": GAME_TYPE_KANJI_READING_MATCH,
+                    "display_name": GAME_NAME_ALIASES.get(GAME_TYPE_KANJI_READING_MATCH, GAME_TYPE_KANJI_READING_MATCH),
+                    "language": language,
+                    "level": level,
+                    "deferred_load": True,
+                }
+            )
     seed = f"{learner_id}:{language}:{level}:{day_iso}:{','.join(sorted(daily_game_types))}"
     Random(seed).shuffle(cards)
     return cards
@@ -3174,6 +3310,7 @@ async def get_daily_games(req: DailyGamesRequest) -> dict:
     )
     extra_cards = _extra_game_cards_metadata(
         learner_id=req.learner_id,
+        topic=topic,
         daily_game_types=daily_game_types,
         language=preferred_language,
         level=today_level,
@@ -3413,6 +3550,7 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
 
     available_extra_cards = _extra_game_cards_metadata(
         learner_id=learner_id,
+        topic=topic,
         daily_game_types=daily_game_types,
         language=language,
         level=today_level,
@@ -4711,7 +4849,7 @@ def _evaluate_game_payload(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     service = game_services.get(game_type)
-    if service is None:
+    if service is None and game_type != GAME_TYPE_KANJI_READING_MATCH:
         return {"error": f"Unsupported game: {game_type}"}
 
     if game_type == GAME_TYPE_GRAMMAR_PARTICLE_FIX:
@@ -4773,6 +4911,20 @@ def _evaluate_game_payload(
                 learner_readings=payload.get("learner_readings", {}),
                 learner_meanings=payload.get("learner_meanings", payload.get("learner_matches", {})),
                 learner_matches=payload.get("learner_matches", {}),
+                level=level,
+            )
+        )
+    if game_type == GAME_TYPE_KANJI_READING_MATCH:
+        return kanji_reading_match_service.evaluate_attempt(
+            KanjiReadingMatchAttempt(
+                language=language,
+                item_id=payload.get("item_id", ""),
+                script=payload.get("script", ""),
+                selected_option_id=payload.get("selected_option_id", ""),
+                correct_option_id=payload.get("correct_option_id", ""),
+                correct_reading_romanized=payload.get("correct_reading", ""),
+                correct_reading_kana=payload.get("correct_reading_kana", ""),
+                meaning=payload.get("meaning", ""),
                 level=level,
             )
         )
