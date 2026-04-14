@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import logging
 from random import Random
 
+from .focus_items import FocusItem
 from language_games.services import (
     GAME_TYPE_CONTEXT_QUIZ,
     GAME_TYPE_GRAMMAR_PARTICLE_FIX,
@@ -99,6 +100,7 @@ class TopicDefinition:
     extra_games: tuple[TopicGamePlan, ...]
     stage: str = "basic"
     covers: tuple[str, ...] = ()
+    focus_items_by_level: dict[int, tuple[FocusItem, ...]] = field(default_factory=dict)
 
     def lesson_for_level(self, level: int) -> LessonDefinition:
         keys = sorted(self.lessons_by_level.keys())
@@ -109,6 +111,13 @@ class TopicDefinition:
 
     def daily_plan_for_level(self, level: int) -> list[tuple[str, str]]:
         return [(item.game_type, item.activity_id_for_level(level)) for item in self.daily_games]
+
+    def focus_items_for_level(self, level: int) -> tuple[FocusItem, ...]:
+        keys = sorted(self.focus_items_by_level.keys())
+        if not keys:
+            return ()
+        normalized_level = min(max(level, keys[0]), keys[-1])
+        return self.focus_items_by_level.get(normalized_level, ())
 
     def daily_pool_for_level(self, level: int) -> list[tuple[str, str]]:
         pool: list[tuple[str, str]] = []

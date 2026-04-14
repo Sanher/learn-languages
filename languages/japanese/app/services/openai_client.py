@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 import httpx
+from ..focus_items import normalize_focus_items
 from ..topic_flow import TOPIC_STAGES, normalize_topic_covers, normalize_topic_stage
 from .runtime_config import get_setting
 
@@ -167,6 +168,7 @@ class OpenAIPlanner:
             return None
         if len(theory_points) < 2:
             return None
+        focus_items = normalize_focus_items(raw.get("focus_items"), stage=raw.get("stage"))
         return {
             "title": title,
             "objective": objective,
@@ -174,6 +176,7 @@ class OpenAIPlanner:
             "example_script": example_script,
             "example_romanized": example_romanized,
             "example_literal_translation": example_literal_translation,
+            "focus_items": focus_items,
         }
 
     @staticmethod

@@ -46,6 +46,7 @@ from language_games.services import (
 )
 from language_games.services.registry import GameServiceRegistry
 from .game_engine import DailyGamePlanner, LearnerSnapshot
+from .focus_item_catalog import build_fallback_focus_items_for_topic
 from .memory import ItemReviewState, ProgressMemory
 from .services.elevenlabs_client import ElevenLabsService
 from .services.openai_client import OpenAIPlanner
@@ -978,6 +979,14 @@ def _daily_plan_for_topic_day(
 def _fallback_topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str, Any]]:
     lessons: dict[int, dict[str, Any]] = {}
     for level, lesson in topic.lessons_by_level.items():
+        focus_items = [item.to_payload() for item in topic.focus_items_for_level(int(level))]
+        if not focus_items:
+            focus_items = build_fallback_focus_items_for_topic(
+                language=topic.language,
+                topic_key=topic.topic_key,
+                stage=topic.stage,
+                covers=topic.covers,
+            )
         lessons[int(level)] = {
             "title": lesson.title,
             "objective": lesson.objective,
@@ -985,6 +994,7 @@ def _fallback_topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[s
             "example_script": lesson.example_script,
             "example_romanized": lesson.example_romanized,
             "example_literal_translation": lesson.example_literal_translation,
+            "focus_items": focus_items,
         }
     return lessons
 
@@ -1204,6 +1214,20 @@ def _topic_lesson_payload(
             "example_romanized": lesson.example_romanized,
             "example_literal_translation": lesson.example_literal_translation,
         }
+    if not list(lesson_payload.get("focus_items") or []):
+        lesson_payload["focus_items"] = build_fallback_focus_items_for_topic(
+            language=topic.language,
+            topic_key=topic.topic_key,
+            stage=topic.stage,
+            covers=topic.covers,
+        )
+        logger.info(
+            "lesson_focus_items_fallback_applied language=%s topic=%s level=%s count=%s",
+            topic.language,
+            topic.topic_key,
+            selected_level,
+            len(lesson_payload["focus_items"]),
+        )
 
     theory_points_raw = lesson_payload.get("theory_points")
     theory_points = [str(item).strip() for item in theory_points_raw if str(item).strip()] if isinstance(theory_points_raw, list) else []
@@ -1220,6 +1244,7 @@ def _topic_lesson_payload(
         "example_script": str(lesson_payload.get("example_script", "")).strip(),
         "example_romanized": str(lesson_payload.get("example_romanized", "")).strip(),
         "example_literal_translation": str(lesson_payload.get("example_literal_translation", "")).strip(),
+        "focus_items": list(lesson_payload.get("focus_items") or []),
     }
     if selection.get("reinforcement_mode"):
         payload["reinforcement_ranked_levels"] = list(selection.get("ranked_levels", []))

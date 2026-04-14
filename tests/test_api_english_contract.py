@@ -112,6 +112,17 @@ class ApiEnglishContractTests(unittest.TestCase):
             preferences.get("available_secondary_translation_languages", []),
         )
 
+    def test_lesson_payload_includes_focus_items_contract(self) -> None:
+        response = self.client.post("/api/games/daily", json={"learner_id": "test-user-focus-items-contract"})
+        self.assertEqual(response.status_code, 200)
+        lesson = response.json().get("lesson", {})
+        self.assertIn("focus_items", lesson)
+        self.assertIsInstance(lesson["focus_items"], list)
+        self.assertTrue(lesson["focus_items"])
+        self.assertIn("is_core", lesson["focus_items"][0])
+        self.assertIn("is_exam_relevant", lesson["focus_items"][0])
+        self.assertIn("covers_competencies", lesson["focus_items"][0])
+
     def test_secondary_translation_persists_in_daily_payload(self) -> None:
         learner_id = "test-user-translation-es"
         save = self.client.post(
