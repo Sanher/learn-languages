@@ -108,3 +108,43 @@ class FocusItemCatalogTests(unittest.TestCase):
         self.assertTrue(payload)
         self.assertTrue({"か", "どこ"} & scripts)
         self.assertTrue(any(item["is_exam_relevant"] for item in payload))
+
+    def test_past_negative_intermediate_catalog_exposes_expression_items(self) -> None:
+        payload = build_fallback_focus_items_for_topic(
+            language="ja",
+            topic_key="past_negative_patterns",
+            stage="intermediate",
+            max_items=8,
+        )
+
+        scripts = {item["script"] for item in payload}
+        self.assertIn("昨日", scripts)
+        self.assertIn("ませんでした", scripts)
+        self.assertTrue(any(item["item_type"] == "expression" for item in payload))
+
+    def test_modality_intermediate_catalog_highlights_core_patterns(self) -> None:
+        payload = build_fallback_focus_items_for_topic(
+            language="ja",
+            topic_key="modality_patterns",
+            stage="intermediate",
+            max_items=8,
+        )
+
+        scripts = {item["script"] for item in payload}
+        self.assertIn("できます", scripts)
+        self.assertIn("たいです", scripts)
+        self.assertIn("てもいいです", scripts)
+
+    def test_unknown_intermediate_topic_can_fallback_by_competency_coverage(self) -> None:
+        payload = build_fallback_focus_items_for_topic(
+            language="ja",
+            topic_key="unknown_intermediate_topic",
+            stage="intermediate",
+            covers=("modality", "register_control"),
+            max_items=8,
+        )
+
+        scripts = {item["script"] for item in payload}
+        self.assertTrue(payload)
+        self.assertTrue({"できます", "たいです", "です", "だ"} & scripts)
+        self.assertTrue(any(item["item_type"] == "expression" for item in payload))
