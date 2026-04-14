@@ -5,6 +5,7 @@ from languages.japanese.app.focus_items import (
     FOCUS_ITEM_TYPE_KANJI,
     FOCUS_ITEM_TYPE_PARTICLE,
     focus_item_type_allowed_for_stage,
+    merge_focus_item_payloads,
     normalize_focus_item,
     normalize_focus_items,
 )
@@ -73,3 +74,41 @@ class FocusItemTests(unittest.TestCase):
         self.assertFalse(focus_item_type_allowed_for_stage(FOCUS_ITEM_TYPE_EXPRESSION, "basic"))
         self.assertTrue(focus_item_type_allowed_for_stage(FOCUS_ITEM_TYPE_EXPRESSION, "intermediate"))
         self.assertTrue(focus_item_type_allowed_for_stage(FOCUS_ITEM_TYPE_KANJI, "basic"))
+
+    def test_merge_focus_item_payloads_keeps_catalog_structure_and_adds_optional_fields(self) -> None:
+        merged = merge_focus_item_payloads(
+            [
+                {
+                    "item_id": "particle-は",
+                    "item_type": FOCUS_ITEM_TYPE_PARTICLE,
+                    "script": "は",
+                    "reading_kana": "は",
+                    "reading_romanized": "wa",
+                    "function": "Marks the topic of the sentence.",
+                    "is_core": True,
+                    "is_exam_relevant": True,
+                    "covers_competencies": ["identity"],
+                    "source": "catalog",
+                }
+            ],
+            [
+                {
+                    "item_id": "particle-は",
+                    "item_type": FOCUS_ITEM_TYPE_PARTICLE,
+                    "script": "は",
+                    "meaning_secondary": "Marca el tema de la oración.",
+                    "example_script": "私は学生です。",
+                    "example_romanized": "watashi wa gakusei desu",
+                    "example_literal_translation": "I topic student am",
+                }
+            ],
+            stage="basic",
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["function"], "Marks the topic of the sentence.")
+        self.assertEqual(merged[0]["meaning_secondary"], "Marca el tema de la oración.")
+        self.assertEqual(merged[0]["example_script"], "私は学生です。")
+        self.assertTrue(merged[0]["is_core"])
+        self.assertTrue(merged[0]["is_exam_relevant"])
+        self.assertEqual(merged[0]["source"], "catalog+openai")

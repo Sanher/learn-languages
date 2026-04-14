@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 import httpx
-from ..focus_items import normalize_focus_items
+from ..focus_items import merge_focus_item_payloads
 from ..topic_flow import TOPIC_STAGES, normalize_topic_covers, normalize_topic_stage
 from .runtime_config import get_setting
 
@@ -148,7 +148,12 @@ class OpenAIPlanner:
         return candidate
 
     @staticmethod
-    def _normalize_topic_lesson(raw: Any) -> dict[str, Any] | None:
+    def _normalize_topic_lesson(
+        raw: Any,
+        *,
+        fallback_lesson: dict[str, Any] | None = None,
+        stage: str | None = None,
+    ) -> dict[str, Any] | None:
         if not isinstance(raw, dict):
             return None
         title = str(raw.get("title") or "").strip()
@@ -168,7 +173,15 @@ class OpenAIPlanner:
             return None
         if len(theory_points) < 2:
             return None
-        focus_items = normalize_focus_items(raw.get("focus_items"), stage=raw.get("stage"))
+        fallback_focus_items = []
+        if isinstance(fallback_lesson, dict):
+            fallback_focus_items = list(fallback_lesson.get("focus_items") or [])
+        focus_items = merge_focus_item_payloads(
+            fallback_focus_items,
+            raw.get("focus_items"),
+            stage=stage,
+            enrichment_source="openai",
+        )
         return {
             "title": title,
             "objective": objective,
@@ -176,6 +189,36 @@ class OpenAIPlanner:
             "example_script": example_script,
             "example_romanized": example_romanized,
             "example_literal_translation": example_literal_translation,
+            "focus_items": focus_items,
+        }
+
+    @staticmethod
+    def _topic_lesson_prompt_seed(raw: dict[str, Any]) -> dict[str, Any]:
+        focus_items: list[dict[str, Any]] = []
+        for entry in list(raw.get("focus_items") or []):
+            if not isinstance(entry, dict):
+                continue
+            focus_items.append(
+                {
+                    "item_id": str(entry.get("item_id") or "").strip(),
+                    "item_type": str(entry.get("item_type") or "").strip(),
+                    "script": str(entry.get("script") or "").strip(),
+                    "reading_kana": str(entry.get("reading_kana") or "").strip(),
+                    "reading_romanized": str(entry.get("reading_romanized") or "").strip(),
+                    "meaning_en": str(entry.get("meaning_en") or "").strip(),
+                    "function": str(entry.get("function") or "").strip(),
+                    "is_core": bool(entry.get("is_core")),
+                    "is_exam_relevant": bool(entry.get("is_exam_relevant")),
+                    "covers_competencies": list(entry.get("covers_competencies") or []),
+                }
+            )
+        return {
+            "title": str(raw.get("title") or "").strip(),
+            "objective": str(raw.get("objective") or "").strip(),
+            "theory_points": [str(item).strip() for item in list(raw.get("theory_points") or []) if str(item).strip()],
+            "example_script": str(raw.get("example_script") or "").strip(),
+            "example_romanized": str(raw.get("example_romanized") or "").strip(),
+            "example_literal_translation": str(raw.get("example_literal_translation") or "").strip(),
             "focus_items": focus_items,
         }
 
@@ -471,6 +514,7 @@ class OpenAIPlanner:
         topic_key: str,
         topic_title: str,
         topic_description: str,
+        topic_stage: str,
         fallback_lessons_by_level: dict[int, dict[str, Any]],
     ) -> dict[str, Any]:
         # Keep deterministic fallback structure in case provider output is partial/invalid.
@@ -487,21 +531,32 @@ class OpenAIPlanner:
             }
 
         levels_hint = ",".join(str(level) for level in fallback_levels)
+        fallback_prompt_lessons = {
+            str(level): self._topic_lesson_prompt_seed(value)
+            for level, value in fallback_lessons.items()
+        }
         system_prompt = (
             "You are a Japanese pedagogy planner. "
             "Return strict JSON only, no markdown. "
             "Produce a progressive lesson ladder from beginner to advanced. "
             "Output key 'lessons_by_level' with keys '1', '2', '3'. "
             "Each lesson must include: title, objective, theory_points (list of 2-5 bullets), "
-            "example_script (Japanese), example_romanized, example_literal_translation."
+            "example_script (Japanese), example_romanized, example_literal_translation, focus_items. "
+            "Keep the provided focus_items aligned to the scaffold for each level. "
+            "Do not invent, remove, or replace focus item identities. "
+            "Reuse the provided item_id, item_type, script, is_core, is_exam_relevant, and covers_competencies. "
+            "Only enrich optional lesson-facing fields when useful, especially meaning_secondary and example_* fields."
         )
         user_prompt = (
             f"Language={language}\n"
             f"Topic key={topic_key}\n"
             f"Topic title={topic_title}\n"
             f"Topic description={topic_description}\n"
+            f"Topic stage={topic_stage}\n"
             f"Required levels={levels_hint}\n"
-            "Keep all fields in English except example_script."
+            "Keep all fields in English except example_script.\n"
+            "Lesson scaffold by level:\n"
+            f"{json.dumps(fallback_prompt_lessons, ensure_ascii=False)}"
         )
 
         try:
@@ -565,13 +620,23 @@ class OpenAIPlanner:
 
         normalized: dict[int, dict[str, Any]] = {}
         missing_levels: list[int] = []
+        enriched_focus_items = 0
         for level in fallback_levels:
             raw_lesson = lessons_raw.get(str(level), lessons_raw.get(level))
-            lesson_payload = self._normalize_topic_lesson(raw_lesson)
+            lesson_payload = self._normalize_topic_lesson(
+                raw_lesson,
+                fallback_lesson=fallback_lessons.get(level),
+                stage=topic_stage,
+            )
             if lesson_payload is None:
                 missing_levels.append(level)
                 continue
             normalized[level] = lesson_payload
+            enriched_focus_items += sum(
+                1
+                for item in list(lesson_payload.get("focus_items") or [])
+                if "openai" in str(item.get("source") or "")
+            )
 
         if missing_levels:
             logger.warning(
@@ -588,10 +653,11 @@ class OpenAIPlanner:
             }
 
         logger.info(
-            "topic_lessons_generated language=%s topic=%s levels=%s model=%s",
+            "topic_lessons_generated language=%s topic=%s levels=%s enriched_focus_items=%s model=%s",
             language,
             topic_key,
             ",".join(str(level) for level in fallback_levels),
+            enriched_focus_items,
             self.model,
         )
         return {
