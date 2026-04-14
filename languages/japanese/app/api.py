@@ -27,6 +27,7 @@ from language_games.services import (
     GAME_TYPE_LISTENING_GAP_FILL,
     GAME_TYPE_MEANING_MATCH,
     GAME_TYPE_MORA_ROMANIZATION,
+    GAME_TYPE_PARTICLE_FUNCTION_MATCH,
     GAME_TYPE_PRONUNCIATION_MATCH,
     GAME_TYPE_SENTENCE_ORDER,
     ContextQuizAttempt,
@@ -44,6 +45,8 @@ from language_games.services import (
     MeaningMatchService,
     MoraRomanizationAttempt,
     MoraRomanizationService,
+    ParticleFunctionMatchAttempt,
+    ParticleFunctionMatchService,
     PronunciationMatchAttempt,
     PronunciationMatchService,
     ScriptSpeedAttempt,
@@ -129,6 +132,7 @@ GAME_NAME_ALIASES = {
     GAME_TYPE_CONTEXT_QUIZ: "Context Quiz",
     GAME_TYPE_KANJI_READING_MATCH: "Kanji Reading Match",
     GAME_TYPE_MEANING_MATCH: "Meaning Match",
+    GAME_TYPE_PARTICLE_FUNCTION_MATCH: "Particle Function Match",
 }
 
 app = FastAPI(title="Japanese Daily Trainer")
@@ -157,6 +161,7 @@ registry = GameServiceRegistry()
 game_services: dict[str, Any] = {}
 kanji_reading_match_service = KanjiReadingMatchService()
 meaning_match_service = MeaningMatchService()
+particle_function_match_service = ParticleFunctionMatchService()
 # Cache only successful AI lesson ladders so daily/review calls do not repeat token usage.
 _TOPIC_LESSONS_AI_CACHE: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
 _TOPIC_SEQUENCE_CACHE: dict[str, tuple[TopicDefinition, ...]] = {}
@@ -1213,6 +1218,53 @@ def _build_meaning_match_card_for_topic(
         payload,
         secondary_language=secondary_translation_language,
         context=f"card.{GAME_TYPE_MEANING_MATCH}.{round_data.item.item_id}",
+        memo={},
+    )
+
+
+def _build_particle_function_match_card_for_topic(
+    *,
+    topic: TopicDefinition,
+    level: int,
+    seed: str,
+    activity_id: str | None = None,
+    secondary_translation_language: str | None = None,
+) -> dict[str, Any] | None:
+    focus_items = _topic_focus_items_for_level(topic, level)
+    round_data = particle_function_match_service.build_round(
+        focus_items=focus_items,
+        seed=seed,
+        item_id=activity_id,
+    )
+    if round_data is None:
+        logger.info(
+            "particle_function_match_card_skipped topic=%s level=%s activity_id=%s",
+            topic.topic_key,
+            level,
+            activity_id or "auto",
+        )
+        return None
+
+    payload = {
+        "game_type": GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+        "display_name": GAME_NAME_ALIASES.get(GAME_TYPE_PARTICLE_FUNCTION_MATCH, GAME_TYPE_PARTICLE_FUNCTION_MATCH),
+        "activity_id": round_data.item.item_id,
+        "language": topic.language,
+        "prompt": round_data.prompt,
+        "level": int(level),
+        "payload": particle_function_match_service.round_payload(round_data),
+        "topic_key": topic.topic_key,
+    }
+    logger.info(
+        "particle_function_match_card_ready topic=%s level=%s activity_id=%s",
+        topic.topic_key,
+        level,
+        round_data.item.item_id,
+    )
+    return _augment_with_secondary_translations(
+        payload,
+        secondary_language=secondary_translation_language,
+        context=f"card.{GAME_TYPE_PARTICLE_FUNCTION_MATCH}.{round_data.item.item_id}",
         memo={},
     )
 
@@ -2868,6 +2920,58 @@ def _select_extra_card_for_game_type(
         card["selection_source"] = "current_topic_default"
         return card, "current_topic_default"
 
+    if game_type == GAME_TYPE_PARTICLE_FUNCTION_MATCH:
+        if closed_topics:
+            due_items = memory.list_due_item_review_states(
+                learner_id=learner_id,
+                language=language,
+                current_day_iso=today_iso,
+                limit=120,
+            )
+            due_candidates = [
+                item
+                for item in due_items
+                if item.game_type == game_type and item.topic_key in closed_topics
+            ]
+            due_candidates.sort(key=lambda item: (item.due_day_iso, -int(item.lapses), int(item.last_score)))
+            for item in due_candidates:
+                closed = closed_topics[item.topic_key]
+                topic_def = _topic_definition_for_key(language=language, topic_key=item.topic_key)
+                if topic_def is None:
+                    continue
+                preferred_level = max(1, int(closed.closed_level))
+                card = _build_particle_function_match_card_for_topic(
+                    topic=topic_def,
+                    level=preferred_level,
+                    activity_id=item.item_id,
+                    seed=f"due:{learner_id}:{today_iso}:{item.topic_key}:{item.item_id}:{preferred_level}",
+                    secondary_translation_language=secondary_translation_language,
+                )
+                if card is None:
+                    continue
+                card["topic_key"] = item.topic_key
+                card["selection_source"] = "due_closed_topic"
+                return card, "due_closed_topic"
+
+        failures = memory.aggregate_topic_failures(
+            learner_id=learner_id,
+            language=language,
+            topic_key=today_topic.topic_key,
+        )
+        card = _build_particle_function_match_card_for_topic(
+            topic=today_topic,
+            level=today_level,
+            seed=f"{learner_id}:{today_iso}:{today_topic.topic_key}:{today_level}:{game_type}",
+            secondary_translation_language=secondary_translation_language,
+        )
+        if card is None:
+            return None, "missing"
+        if int(failures.get(game_type, 0)) > 0:
+            card["selection_source"] = "weak_current_topic"
+            return card, "weak_current_topic"
+        card["selection_source"] = "current_topic_default"
+        return card, "current_topic_default"
+
     if closed_topics:
         due_items = memory.list_due_item_review_states(
             learner_id=learner_id,
@@ -3307,6 +3411,25 @@ def _extra_game_cards_metadata(
                 {
                     "game_type": GAME_TYPE_MEANING_MATCH,
                     "display_name": GAME_NAME_ALIASES.get(GAME_TYPE_MEANING_MATCH, GAME_TYPE_MEANING_MATCH),
+                    "language": language,
+                    "level": level,
+                    "deferred_load": True,
+                }
+            )
+    if GAME_TYPE_PARTICLE_FUNCTION_MATCH not in daily_game_types:
+        dynamic_card = _build_particle_function_match_card_for_topic(
+            topic=topic,
+            level=level,
+            seed=f"{learner_id}:{day_iso}:{topic.topic_key}:{level}:{GAME_TYPE_PARTICLE_FUNCTION_MATCH}",
+        )
+        if dynamic_card is not None:
+            cards.append(
+                {
+                    "game_type": GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+                    "display_name": GAME_NAME_ALIASES.get(
+                        GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+                        GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+                    ),
                     "language": language,
                     "level": level,
                     "deferred_load": True,
@@ -4969,7 +5092,11 @@ def _evaluate_game_payload(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     service = game_services.get(game_type)
-    if service is None and game_type not in {GAME_TYPE_KANJI_READING_MATCH, GAME_TYPE_MEANING_MATCH}:
+    if service is None and game_type not in {
+        GAME_TYPE_KANJI_READING_MATCH,
+        GAME_TYPE_MEANING_MATCH,
+        GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+    }:
         return {"error": f"Unsupported game: {game_type}"}
 
     if game_type == GAME_TYPE_GRAMMAR_PARTICLE_FIX:
@@ -5057,6 +5184,21 @@ def _evaluate_game_payload(
                 selected_option_id=payload.get("selected_option_id", ""),
                 correct_option_id=payload.get("correct_option_id", ""),
                 correct_meaning=payload.get("correct_meaning", ""),
+                reading_romanized=payload.get("reading_romanized", ""),
+                reading_kana=payload.get("reading_kana", ""),
+                level=level,
+            )
+        )
+    if game_type == GAME_TYPE_PARTICLE_FUNCTION_MATCH:
+        return particle_function_match_service.evaluate_attempt(
+            ParticleFunctionMatchAttempt(
+                language=language,
+                item_id=payload.get("item_id", ""),
+                script=payload.get("script", ""),
+                selected_option_id=payload.get("selected_option_id", ""),
+                correct_option_id=payload.get("correct_option_id", ""),
+                correct_function_label=payload.get("correct_function", ""),
+                function_explanation=payload.get("explanation", ""),
                 reading_romanized=payload.get("reading_romanized", ""),
                 reading_kana=payload.get("reading_kana", ""),
                 level=level,

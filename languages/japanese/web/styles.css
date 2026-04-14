@@ -910,6 +910,23 @@ button.is-loading {
   background: rgba(220, 38, 38, 0.12);
 }
 
+.particle-function-option {
+  padding: 10px 12px;
+  border: 1px solid #3f516b;
+  border-radius: 10px;
+  background: #0f172a;
+}
+
+.particle-function-option.is-correct {
+  border-color: #16a34a;
+  background: rgba(22, 163, 74, 0.12);
+}
+
+.particle-function-option.is-incorrect {
+  border-color: #dc2626;
+  background: rgba(220, 38, 38, 0.12);
+}
+
 .sentence-dropzone {
   margin-top: 8px;
   min-height: 54px;

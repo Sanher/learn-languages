@@ -41,6 +41,14 @@ from .meaning_match_service import (
     MeaningMatchRound,
     MeaningMatchService,
 )
+from .particle_function_match_service import (
+    GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+    ParticleFunctionMatchAttempt,
+    ParticleFunctionMatchItem,
+    ParticleFunctionMatchOption,
+    ParticleFunctionMatchRound,
+    ParticleFunctionMatchService,
+)
 from .listening_gap_fill_service import (
     ENGLISH_LISTENING_GAP_FILL_ITEMS_BY_LEVEL,
     GAME_TYPE_LISTENING_GAP_FILL,
@@ -124,6 +132,12 @@ __all__ = [
     "MeaningMatchAttempt",
     "MeaningMatchService",
     "GAME_TYPE_MEANING_MATCH",
+    "ParticleFunctionMatchItem",
+    "ParticleFunctionMatchOption",
+    "ParticleFunctionMatchRound",
+    "ParticleFunctionMatchAttempt",
+    "ParticleFunctionMatchService",
+    "GAME_TYPE_PARTICLE_FUNCTION_MATCH",
     "JAPANESE_KANJI_PAIRS_BY_LEVEL",
     "WESTERN_ALPHABET_LANGUAGE_CODES",
     "ListeningGapFillItem",

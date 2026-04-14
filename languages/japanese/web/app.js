@@ -1784,6 +1784,53 @@ function renderSingleGame(game) {
         ${options}
       </fieldset>
     `;
+  } else if (gameType === 'particle_function_match') {
+    const type = 'particle';
+    const typeLabel = focusTypeLabel(type);
+    const script = String(payload.script || '').trim();
+    const readingKana = String(payload.reading_kana || '').trim();
+    const readingRomanized = String(payload.reading_romanized || '').trim();
+    const coreBadge = payload.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
+    const examBadge = payload.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
+    const promptLine = renderTranslatedField(game, 'prompt', { className: 'game-meta-line', multiline: true });
+    const readingLines = [
+      readingKana ? `<p class="game-meta-line"><strong>Kana:</strong> ${escapeHtml(readingKana)}</p>` : '',
+      readingRomanized ? `<p class="game-meta-line"><strong>Romanized:</strong> ${escapeHtml(readingRomanized)}</p>` : '',
+    ].join('');
+    promptHtml = `
+      <div class="prompt game-meta">
+        <div class="kanji-reading-match-head">
+          <div class="focus-item-card-tags">
+            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
+              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
+              <span class="focus-chip-script">${escapeHtml(script)}</span>
+            </span>
+            ${coreBadge}
+            ${examBadge}
+          </div>
+        </div>
+        ${promptLine}
+        ${readingLines}
+      </div>
+    `;
+    promptIncludesTranslation = false;
+    const options = (payload.options || [])
+      .map((option, idx) => {
+        const checked = idx === 0 ? 'checked' : '';
+        return `
+          <label class="radio-option particle-function-option" data-option-id="${escapeHtml(option.option_id)}">
+            <input type="radio" name="particle-function-option" value="${escapeHtml(option.option_id)}" ${checked} />
+            <span>${escapeHtml(option.label || '')}</span>
+          </label>
+        `;
+      })
+      .join('');
+    controls = `
+      <fieldset class="response-group context-group">
+        <legend>Answer</legend>
+        ${options}
+      </fieldset>
+    `;
   } else if (gameType === 'kana_speed_round') {
     const expectedText = payload.expected_text || extractKanaSequenceFromPrompt(game.prompt || '');
     setKanaElapsed(KANA_DEFAULT_ELAPSED_SECONDS, true);
@@ -2163,6 +2210,16 @@ function collectPayload(game) {
     payload.reading_kana = String(game.payload?.reading_kana || '').trim();
     payload.script = String(game.payload?.script || '').trim();
   }
+  if (game.game_type === 'particle_function_match') {
+    const checked = gameZoneEl.querySelector('input[name="particle-function-option"]:checked');
+    payload.selected_option_id = checked ? checked.value : '';
+    payload.correct_option_id = String(game.payload?.correct_option_id || '').trim();
+    payload.correct_function = String(game.payload?.correct_function || '').trim();
+    payload.explanation = String(game.payload?.explanation || '').trim();
+    payload.reading_romanized = String(game.payload?.reading_romanized || '').trim();
+    payload.reading_kana = String(game.payload?.reading_kana || '').trim();
+    payload.script = String(game.payload?.script || '').trim();
+  }
   if (game.game_type === 'listening_gap_fill') {
     const dropzones = Array.from(gameZoneEl.querySelectorAll('.gap-dropzone[data-gap-index]'))
       .sort((a, b) => Number(a.dataset.gapIndex || 0) - Number(b.dataset.gapIndex || 0));
@@ -2420,6 +2477,11 @@ function renderEvaluation(data) {
     className: 'result-line',
     multiline: true,
   });
+  const explanationHtml = renderTranslatedField(data, 'explanation', {
+    label: 'Explanation',
+    className: 'result-line',
+    multiline: true,
+  });
   const romanizationAccuracyHtml = data.romanization_accuracy != null
     ? `<p class="result-line"><strong>Romanization:</strong> ${escapeHtml(Math.round(Number(data.romanization_accuracy) * 100))}%</p>`
     : '';
@@ -2470,6 +2532,7 @@ function renderEvaluation(data) {
     ${readingRomanizedHtml}
     ${readingKanaHtml}
     ${meaningLineHtml}
+    ${explanationHtml}
     ${romanizationAccuracyHtml}
     ${segmentationAccuracyHtml}
     ${feedbackHtml}
@@ -2484,6 +2547,7 @@ function renderEvaluation(data) {
   applyKanjiEvaluationFeedback(data);
   applyKanjiReadingMatchFeedback(data);
   applyMeaningMatchFeedback(data);
+  applyParticleFunctionMatchFeedback(data);
 }
 
 function applyKanjiReadingMatchFeedback(data) {
@@ -2506,6 +2570,22 @@ function applyMeaningMatchFeedback(data) {
   const options = Array.from(gameZoneEl.querySelectorAll('.meaning-match-option[data-option-id]'));
   options.forEach((option) => option.classList.remove('is-correct', 'is-incorrect'));
   if (!selectedGame || selectedGame.game_type !== 'meaning_match' || !data) return;
+  const selectedOptionId = String(data.selected_option_id || '').trim();
+  const correctOptionId = String(data.correct_option_id || '').trim();
+  options.forEach((option) => {
+    const optionId = String(option.dataset.optionId || '').trim();
+    if (optionId === correctOptionId) {
+      option.classList.add('is-correct');
+    } else if (!data.is_correct && optionId === selectedOptionId) {
+      option.classList.add('is-incorrect');
+    }
+  });
+}
+
+function applyParticleFunctionMatchFeedback(data) {
+  const options = Array.from(gameZoneEl.querySelectorAll('.particle-function-option[data-option-id]'));
+  options.forEach((option) => option.classList.remove('is-correct', 'is-incorrect'));
+  if (!selectedGame || selectedGame.game_type !== 'particle_function_match' || !data) return;
   const selectedOptionId = String(data.selected_option_id || '').trim();
   const correctOptionId = String(data.correct_option_id || '').trim();
   options.forEach((option) => {
