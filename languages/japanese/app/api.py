@@ -37,6 +37,7 @@ from language_games.services import (
     KanaSpeedRoundService,
     KanjiMatchAttempt,
     KanjiMatchService,
+    KanjiPair,
     KanjiReadingMatchAttempt,
     KanjiReadingMatchService,
     ListeningGapFillAttempt,
@@ -1135,35 +1136,51 @@ def _build_topic_card_for_plan_entry(
 ) -> dict[str, Any] | None:
     seed = f"daily:{learner_id}:{day_iso}:{topic.topic_key}:{level}:{game_type}"
     if game_type == GAME_TYPE_KANJI_READING_MATCH:
-        return _build_kanji_reading_match_card_for_topic(
+        return _decorate_card_with_focus_context(
+            card=_build_kanji_reading_match_card_for_topic(
+                topic=topic,
+                level=level,
+                activity_id=activity_id,
+                seed=seed,
+                secondary_translation_language=secondary_translation_language,
+            ),
             topic=topic,
             level=level,
-            activity_id=activity_id,
-            seed=seed,
-            secondary_translation_language=secondary_translation_language,
         )
     if game_type == GAME_TYPE_MEANING_MATCH:
-        return _build_meaning_match_card_for_topic(
+        return _decorate_card_with_focus_context(
+            card=_build_meaning_match_card_for_topic(
+                topic=topic,
+                level=level,
+                activity_id=activity_id,
+                seed=seed,
+                secondary_translation_language=secondary_translation_language,
+            ),
             topic=topic,
             level=level,
-            activity_id=activity_id,
-            seed=seed,
-            secondary_translation_language=secondary_translation_language,
         )
     if game_type == GAME_TYPE_PARTICLE_FUNCTION_MATCH:
-        return _build_particle_function_match_card_for_topic(
+        return _decorate_card_with_focus_context(
+            card=_build_particle_function_match_card_for_topic(
+                topic=topic,
+                level=level,
+                activity_id=activity_id,
+                seed=seed,
+                secondary_translation_language=secondary_translation_language,
+            ),
             topic=topic,
             level=level,
-            activity_id=activity_id,
-            seed=seed,
-            secondary_translation_language=secondary_translation_language,
         )
-    return _build_card_for_activity(
-        game_type=game_type,
-        language=topic.language,
+    return _decorate_card_with_focus_context(
+        card=_build_card_for_activity(
+            game_type=game_type,
+            language=topic.language,
+            level=level,
+            activity_id=activity_id,
+            secondary_translation_language=secondary_translation_language,
+        ),
+        topic=topic,
         level=level,
-        activity_id=activity_id,
-        secondary_translation_language=secondary_translation_language,
     )
 
 
@@ -1201,6 +1218,258 @@ def _topic_focus_items_for_level(topic: TopicDefinition, level: int) -> list[dic
         covers=topic.covers,
         max_items=8,
     )
+
+
+KANJI_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+
+
+def _contains_kanji_chars(text: str) -> bool:
+    return bool(KANJI_CHAR_RE.search(str(text or "")))
+
+
+def _focus_item_match_terms(item: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    for candidate in (
+        item.get("script"),
+        item.get("reading_kana"),
+        item.get("reading_romanized"),
+    ):
+        text = str(candidate or "").strip()
+        if text and text not in terms:
+            terms.append(text)
+    return terms
+
+
+def _text_contains_focus_term(text: str, term: str) -> bool:
+    source = str(text or "").strip()
+    needle = str(term or "").strip()
+    if not source or not needle:
+        return False
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9 _/-]*", needle):
+        return re.search(rf"\b{re.escape(needle.lower())}\b", source.lower()) is not None
+    return needle in source
+
+
+def _focus_item_matches_any_text(item: dict[str, Any], texts: list[str]) -> bool:
+    terms = _focus_item_match_terms(item)
+    if not terms:
+        return False
+    return any(_text_contains_focus_term(text, term) for text in texts for term in terms)
+
+
+def _compact_focus_item_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "item_id": str(item.get("item_id") or "").strip(),
+        "item_type": str(item.get("item_type") or "word").strip().lower(),
+        "script": str(item.get("script") or "").strip(),
+        "reading_kana": str(item.get("reading_kana") or "").strip(),
+        "reading_romanized": str(item.get("reading_romanized") or "").strip(),
+        "meaning_en": str(item.get("meaning_en") or "").strip(),
+        "meaning_secondary": str(item.get("meaning_secondary") or "").strip(),
+        "function": str(item.get("function") or "").strip(),
+        "is_core": bool(item.get("is_core")),
+        "is_exam_relevant": bool(item.get("is_exam_relevant")),
+    }
+
+
+def _focus_item_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+    script = str(item.get("script") or "").strip()
+    return (
+        0 if bool(item.get("is_core")) else 1,
+        0 if bool(item.get("is_exam_relevant")) else 1,
+        -len(script),
+        script,
+    )
+
+
+def _related_focus_items_for_game(
+    *,
+    game_type: str,
+    payload: dict[str, Any],
+    focus_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not focus_items:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    if game_type == GAME_TYPE_GRAMMAR_PARTICLE_FIX:
+        search_texts = [
+            str(payload.get("sentence_template") or "").strip(),
+            str(payload.get("romanized_line") or "").strip(),
+            str(payload.get("literal_translation") or "").strip(),
+        ]
+        choice_texts = [str(option or "").strip() for option in list(payload.get("options") or [])]
+        correct_particle = str(payload.get("correct_particle") or "").strip()
+        for item in focus_items:
+            script = str(item.get("script") or "").strip()
+            if not script:
+                continue
+            if script == correct_particle or script in choice_texts or _focus_item_matches_any_text(item, search_texts):
+                matches.append(item)
+    elif game_type == GAME_TYPE_SENTENCE_ORDER:
+        search_texts = [
+            str(payload.get("script_line") or "").strip(),
+            " ".join(str(token or "").strip() for token in list(payload.get("ordered_tokens") or []) if str(token or "").strip()),
+            str(payload.get("romanized_line") or "").strip(),
+            str(payload.get("literal_translation") or "").strip(),
+        ]
+        matches = [item for item in focus_items if _focus_item_matches_any_text(item, search_texts)]
+    elif game_type == GAME_TYPE_LISTENING_GAP_FILL:
+        search_texts = [
+            str(payload.get("script_line") or "").strip(),
+            str(payload.get("romanized_line") or "").strip(),
+            str(payload.get("literal_translation") or "").strip(),
+            " ".join(str(token or "").strip() for token in list(payload.get("tokens") or []) if str(token or "").strip()),
+            " ".join(str(option or "").strip() for option in list(payload.get("options") or []) if str(option or "").strip()),
+        ]
+        matches = [item for item in focus_items if _focus_item_matches_any_text(item, search_texts)]
+    elif game_type == GAME_TYPE_MORA_ROMANIZATION:
+        search_texts = [
+            str(payload.get("focus_japanese_text") or payload.get("japanese_text") or "").strip(),
+            " ".join(str(token or "").strip() for token in list(payload.get("expected_words") or []) if str(token or "").strip()),
+            " ".join(str(token or "").strip() for token in list(payload.get("mora_romaji_tokens") or []) if str(token or "").strip()),
+            str(payload.get("focus_kanji_mora_line") or payload.get("kanji_mora_line") or "").strip(),
+            str(payload.get("literal_translation") or "").strip(),
+        ]
+        matches = [item for item in focus_items if _focus_item_matches_any_text(item, search_texts)]
+    elif game_type == GAME_TYPE_CONTEXT_QUIZ:
+        option_texts = []
+        for option in list(payload.get("options") or []):
+            if isinstance(option, dict):
+                option_texts.extend(
+                    [
+                        str(option.get("text") or "").strip(),
+                        str(option.get("romaji") or "").strip(),
+                    ]
+                )
+        search_texts = [
+            str(payload.get("context_prompt") or "").strip(),
+            str(payload.get("script_line") or "").strip(),
+            str(payload.get("romanized_line") or "").strip(),
+            str(payload.get("literal_translation") or "").strip(),
+            *option_texts,
+        ]
+        matches = [item for item in focus_items if _focus_item_matches_any_text(item, search_texts)]
+    elif game_type == GAME_TYPE_KANJI_MATCH:
+        pair_symbols = {
+            str(pair.get("symbol") or "").strip()
+            for pair in list(payload.get("pairs") or [])
+            if str(pair.get("symbol") or "").strip()
+        }
+        matches = [
+            item
+            for item in focus_items
+            if str(item.get("script") or "").strip() in pair_symbols
+        ]
+    elif game_type in {
+        GAME_TYPE_KANJI_READING_MATCH,
+        GAME_TYPE_MEANING_MATCH,
+        GAME_TYPE_PARTICLE_FUNCTION_MATCH,
+    }:
+        item_id = str(payload.get("item_id") or "").strip()
+        script = str(payload.get("script") or "").strip()
+        matches = [
+            item
+            for item in focus_items
+            if (
+                item_id
+                and str(item.get("item_id") or "").strip() == item_id
+            )
+            or (
+                script
+                and str(item.get("script") or "").strip() == script
+            )
+        ]
+    elif game_type == GAME_TYPE_PRONUNCIATION_MATCH:
+        search_texts = [
+            str(payload.get("expected_text") or "").strip(),
+            str(payload.get("romanized_line") or "").strip(),
+            str(payload.get("romanized_line_full") or "").strip(),
+            str(payload.get("literal_translation") or "").strip(),
+        ]
+        matches = [item for item in focus_items if _focus_item_matches_any_text(item, search_texts)]
+
+    ordered = sorted(matches, key=_focus_item_sort_key)
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in ordered:
+        item_id = str(item.get("item_id") or item.get("script") or "").strip()
+        if not item_id or item_id in seen:
+            continue
+        seen.add(item_id)
+        deduped.append(_compact_focus_item_payload(item))
+    return deduped[:4]
+
+
+def _kanji_pairs_from_focus_items(focus_items: list[dict[str, Any]], *, max_pairs: int = 4) -> list[KanjiPair]:
+    pairs: list[KanjiPair] = []
+    seen_symbols: set[str] = set()
+    for item in sorted(focus_items, key=_focus_item_sort_key):
+        script = str(item.get("script") or "").strip()
+        reading_romanized = str(item.get("reading_romanized") or "").strip()
+        reading_kana = str(item.get("reading_kana") or "").strip()
+        meaning = str(item.get("meaning_en") or item.get("function") or "").strip()
+        if (
+            not script
+            or script in seen_symbols
+            or not reading_romanized
+            or not meaning
+            or not _contains_kanji_chars(script)
+        ):
+            continue
+        pairs.append(
+            KanjiPair(
+                symbol=script,
+                meaning=meaning,
+                reading_romaji=reading_romanized,
+                reading_kana=reading_kana,
+            )
+        )
+        seen_symbols.add(script)
+        if len(pairs) >= max_pairs:
+            break
+    return pairs
+
+
+def _decorate_card_with_focus_context(
+    *,
+    card: dict[str, Any] | None,
+    topic: TopicDefinition,
+    level: int,
+) -> dict[str, Any] | None:
+    if card is None:
+        return None
+    payload = dict(card.get("payload") or {})
+    focus_items = _topic_focus_items_for_level(topic, level)
+    if not focus_items:
+        card["payload"] = payload
+        return card
+
+    if str(card.get("game_type") or "").strip() == GAME_TYPE_KANJI_MATCH:
+        topic_pairs = _kanji_pairs_from_focus_items(focus_items)
+        if len(topic_pairs) >= 2:
+            payload["pairs"] = [
+                {
+                    "symbol": pair.symbol,
+                    "meaning": pair.meaning,
+                    "reading_romaji": pair.reading_romaji,
+                    "reading_kana": pair.reading_kana,
+                }
+                for pair in topic_pairs
+            ]
+            payload["expected_pairs"] = list(payload["pairs"])
+            payload["focus_sourced_pairs"] = True
+
+    related_focus_items = _related_focus_items_for_game(
+        game_type=str(card.get("game_type") or "").strip(),
+        payload=payload,
+        focus_items=focus_items,
+    )
+    if related_focus_items:
+        payload["related_focus_items"] = related_focus_items
+
+    card["payload"] = payload
+    return card
 
 
 async def _topic_lessons_by_level(topic: TopicDefinition) -> dict[int, dict[str, Any]]:
@@ -2677,7 +2946,10 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
             return {
                 "options": ordered_choices,
                 "options_enriched": service.options_with_romaji(ordered_choices),
+                "sentence_template": item.sentence_template,
+                "romanized_line": item.romanized_line,
                 "literal_translation": item.literal_translation,
+                "correct_particle": item.correct_particle,
             }
 
     if game_type == GAME_TYPE_SENTENCE_ORDER:
@@ -2707,6 +2979,9 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
                 "options": item.options,
                 "input_mode": "drag" if item.options else "text",
                 "tts_text": item.script_line if language == "ja" else "",
+                "script_line": item.script_line,
+                "romanized_line": item.romanized_line or "",
+                "literal_translation": item.literal_translation,
             }
 
     if game_type == GAME_TYPE_MORA_ROMANIZATION:
@@ -2724,9 +2999,13 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
                 "mora_kana_tokens": item.mora_kana if mode in {"beginner", "intermediate"} else [],
                 "mora_romaji_tokens": item.mora_romaji if mode in {"beginner", "intermediate"} else [],
                 "japanese_text": item.japanese_text if mode == "advanced" else "",
+                "kanji_mora_line": "",
+                "focus_japanese_text": item.japanese_text,
+                "focus_kanji_mora_line": " | ".join(item.kanji_mora_tokens),
                 "literal_translation": item.literal_translation,
                 "expected_word_count": len(item.expected_words),
                 "word_length_pattern": [len(word) for word in item.expected_words],
+                "expected_words": item.expected_words,
             }
             logger.info(
                 "payload_mora_romanization_ready language=%s level=%s activity_id=%s mode=%s",
@@ -2749,6 +3028,9 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
         if item:
             return {
                 "context_prompt": item.context_prompt,
+                "script_line": item.script_line,
+                "romanized_line": item.romanized_line or "",
+                "literal_translation": item.literal_translation,
                 "options": service.options_for_ui(item.options),
             }
 
@@ -2792,6 +3074,7 @@ def _game_payload(game_type: str, language: str, level: int, activity_id: str, p
             "show_romanized_line": bool(view.get("show_romanized_line")),
             "romanized_line": view.get("romanized_line"),
             "romanized_line_full": view.get("romanized_line_full"),
+            "literal_translation": view.get("literal_translation"),
         }
 
     if game_type == ALIAS_GAME_TYPE_KANA_SPEED_ROUND:
@@ -4013,6 +4296,12 @@ async def load_extra_game(req: ExtraGameLoadRequest) -> dict:
 
     card_topic_key = str(card.get("topic_key", topic.topic_key))
     card_topic_title = _topic_title(language=language, topic_key=card_topic_key)
+    focus_topic = _topic_definition_for_key(language=language, topic_key=card_topic_key) or topic
+    card = _decorate_card_with_focus_context(
+        card=card,
+        topic=focus_topic,
+        level=int(card.get("level", today_level) or today_level),
+    ) or card
     try:
         ai_prompt_result = await openai_planner.generate_extra_game_prompt(
             language=language,
@@ -5328,7 +5617,27 @@ def _evaluate_game_payload(
             )
         )
     if game_type == GAME_TYPE_KANJI_MATCH:
-        pairs = service.get_pairs(language=language, level=level)
+        payload_pairs = list(payload.get("expected_pairs") or payload.get("pairs") or [])
+        pairs: list[KanjiPair] = []
+        for pair in payload_pairs:
+            if not isinstance(pair, dict):
+                continue
+            symbol = str(pair.get("symbol") or "").strip()
+            meaning = str(pair.get("meaning") or "").strip()
+            reading_romaji = str(pair.get("reading_romaji") or "").strip()
+            reading_kana = str(pair.get("reading_kana") or "").strip()
+            if not symbol or not meaning or not reading_romaji:
+                continue
+            pairs.append(
+                KanjiPair(
+                    symbol=symbol,
+                    meaning=meaning,
+                    reading_romaji=reading_romaji,
+                    reading_kana=reading_kana,
+                )
+            )
+        if not pairs:
+            pairs = service.get_pairs(language=language, level=level)
         return service.evaluate_attempt(
             KanjiMatchAttempt(
                 language=language,

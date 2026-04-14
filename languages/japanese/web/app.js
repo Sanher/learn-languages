@@ -446,6 +446,64 @@ function renderFocusItemsSection(focusItems) {
   `;
 }
 
+function renderRelatedFocusItemsSection(focusItems) {
+  if (!Array.isArray(focusItems) || focusItems.length === 0) return '';
+  const cards = focusItems.map((item) => {
+    const type = String(item.item_type || 'word').trim().toLowerCase();
+    const script = String(item.script || '').trim();
+    if (!script) return '';
+    const typeLabel = focusTypeLabel(type);
+    const coreBadge = item.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
+    const examBadge = item.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
+    const readingKana = String(item.reading_kana || '').trim();
+    const readingRomanized = String(item.reading_romanized || '').trim();
+    const definitionLabel = type === 'particle' ? 'Function' : 'Meaning';
+    const definitionText = String(type === 'particle' ? (item.function || '') : (item.meaning_en || '')).trim();
+    const secondaryMeaning = String(item.meaning_secondary || '').trim();
+    const secondaryLabel = secondaryTranslationLabel(translationPreferences.secondary_translation_language);
+    return `
+      <article class="game-focus-item-card game-focus-item-card--${escapeHtml(type)}">
+        <div class="focus-item-card-tags">
+          <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
+            <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
+            <span class="focus-chip-script">${escapeHtml(script)}</span>
+          </span>
+          ${coreBadge}
+          ${examBadge}
+        </div>
+        ${(readingKana || readingRomanized) ? `
+          <p class="game-focus-item-reading">
+            ${readingKana ? `<strong>Kana:</strong> ${escapeHtml(readingKana)}` : ''}
+            ${readingKana && readingRomanized ? ' · ' : ''}
+            ${readingRomanized ? `<strong>Romanized:</strong> ${escapeHtml(readingRomanized)}` : ''}
+          </p>
+        ` : ''}
+        ${definitionText ? `<p class="game-focus-item-definition"><strong>${escapeHtml(definitionLabel)}:</strong> ${escapeHtml(definitionText)}</p>` : ''}
+        ${secondaryMeaning ? `<p class="game-focus-item-definition secondary">${escapeHtml(secondaryLabel)}: ${escapeHtml(secondaryMeaning)}</p>` : ''}
+      </article>
+    `;
+  }).filter(Boolean).join('');
+  if (!cards) return '';
+  return `
+    <section class="game-focus-items">
+      <div class="game-focus-items-head">
+        <h4>Related lesson items</h4>
+        <p class="muted">These cues connect the activity to the topic focus below.</p>
+      </div>
+      <div class="game-focus-item-grid">${cards}</div>
+    </section>
+  `;
+}
+
+function currentEvaluationFocusItems(data) {
+  const explicit = Array.isArray(data && data.related_focus_items) ? data.related_focus_items : [];
+  if (explicit.length > 0) return explicit;
+  const payloadItems = Array.isArray(selectedGame && selectedGame.payload && selectedGame.payload.related_focus_items)
+    ? selectedGame.payload.related_focus_items
+    : [];
+  return payloadItems;
+}
+
 function titleCaseWord(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return '';
@@ -620,7 +678,9 @@ function evaluationGuideLine(data) {
     data.resolved_sentence,
     data.expected_text,
     data.kanji_mora_line,
+    selectedGame && selectedGame.payload ? selectedGame.payload.focus_kanji_mora_line : '',
     selectedGame && selectedGame.payload ? selectedGame.payload.japanese_text : '',
+    selectedGame && selectedGame.payload ? selectedGame.payload.focus_japanese_text : '',
     selectedGame && selectedGame.payload ? selectedGame.payload.expected_text : '',
     selectedGame ? selectedGame.prompt : '',
   ];
@@ -649,13 +709,14 @@ function evaluationGuideRomanizedLine(data) {
 
 function renderKanaGuideHtml(data, translationSource) {
   if (currentLanguage !== 'ja') return '';
+  const focusItems = currentEvaluationFocusItems(data);
   const japaneseLine = evaluationGuideLine(data);
   if (!japaneseLine) return '';
   const romanizedLine = evaluationGuideRomanizedLine(data);
   const hiraganaLine = katakanaToHiragana(japaneseLine);
   const katakanaLine = hiraganaToKatakana(japaneseLine);
   const meaningHtml = translationSource
-    ? renderTranslatedField(translationSource, 'literal_translation', {
+    ? renderTranslatedFieldWithFocus(translationSource, 'literal_translation', focusItems, {
       label: 'Meaning',
       className: 'result-line',
       multiline: true,
@@ -663,9 +724,9 @@ function renderKanaGuideHtml(data, translationSource) {
     : '';
   const block = `
     <div class="result-block kana-guide-block">
-      <p class="result-line"><strong>Japanese:</strong> ${escapeHtml(japaneseLine)}</p>
-      ${romanizedLine ? `<p class="result-line"><strong>Romanized:</strong> ${escapeHtml(romanizedLine)}</p>` : ''}
-      <p class="result-line"><strong>Hiragana:</strong> ${escapeHtml(hiraganaLine)}</p>
+      <p class="result-line"><strong>Japanese:</strong> ${renderFocusAwareText(japaneseLine, focusItems)}</p>
+      ${romanizedLine ? `<p class="result-line"><strong>Romanized:</strong> ${renderFocusAwareText(romanizedLine, focusItems)}</p>` : ''}
+      <p class="result-line"><strong>Hiragana:</strong> ${renderFocusAwareText(hiraganaLine, focusItems)}</p>
       <p class="result-line"><strong>Katakana:</strong> ${escapeHtml(katakanaLine)}</p>
       ${meaningHtml}
     </div>
@@ -1392,6 +1453,8 @@ function renderSingleGame(game) {
   const payload = game.payload || {};
   const gameType = game.game_type;
   const displayName = game.display_name || gameType;
+  const relatedFocusItems = Array.isArray(payload.related_focus_items) ? payload.related_focus_items : [];
+  const relatedFocusHtml = gameType === 'mora_romanization' ? '' : renderRelatedFocusItemsSection(relatedFocusItems);
   let promptHtml = renderTranslatedField(game, 'prompt', { className: 'prompt', multiline: true });
   let promptIncludesTranslation = true;
   const weeklyExamHeaderHtml = weeklyExamActive
@@ -1428,14 +1491,13 @@ function renderSingleGame(game) {
       .filter(Boolean)
       .filter((line) => !/^Options:/i.test(line))
       .filter((line) => !/^Translation hint:/i.test(line));
-    const literalTranslationHtml = renderTranslatedField(payload, 'literal_translation', {
-      label: 'Literal',
-      className: 'game-meta-line',
-    });
     promptHtml = `
       <div class="prompt game-meta">
-        ${promptLines.map((line) => `<p class="game-meta-line">${escapeHtml(line)}</p>`).join('')}
-        ${literalTranslationHtml}
+        ${promptLines.map((line) => `<p class="game-meta-line">${renderFocusAwareText(line, relatedFocusItems)}</p>`).join('')}
+        ${renderTranslatedFieldWithFocus(payload, 'literal_translation', relatedFocusItems, {
+          label: 'Literal',
+          className: 'game-meta-line',
+        })}
       </div>
     `;
     promptIncludesTranslation = false;
@@ -1475,15 +1537,14 @@ function renderSingleGame(game) {
     const orderedTokens = Array.isArray(payload.ordered_tokens) ? payload.ordered_tokens : [];
     const scriptLine = String(payload.script_line || '').trim();
     const romanizedLine = String(payload.romanized_line || '').trim();
-    const sentenceTranslationHtml = renderTranslatedField(payload, 'literal_translation', {
-      label: 'Literal',
-      className: 'game-meta-line',
-    });
     promptHtml = `
       <div class="prompt game-meta">
-        ${scriptLine ? `<p class="game-meta-line"><strong>Script:</strong> ${escapeHtml(scriptLine)}</p>` : ''}
+        ${scriptLine ? `<p class="game-meta-line"><strong>Script:</strong> ${renderFocusAwareText(scriptLine, relatedFocusItems)}</p>` : ''}
         ${romanizedLine ? `<p class="game-meta-line"><strong>Romanized:</strong> ${escapeHtml(romanizedLine)}</p>` : ''}
-        ${sentenceTranslationHtml}
+        ${renderTranslatedFieldWithFocus(payload, 'literal_translation', relatedFocusItems, {
+          label: 'Literal',
+          className: 'game-meta-line',
+        })}
       </div>
     `;
     promptIncludesTranslation = false;
@@ -1928,6 +1989,7 @@ function renderSingleGame(game) {
       ${weeklyExamHeaderHtml}
       ${promptHtml}
       ${promptSecondaryHtml}
+      ${relatedFocusHtml}
       ${controls}
       <div class="actions">
         ${showEvaluateButton ? `<button id="evaluate-btn">${primaryActionLabel}</button>` : ''}
@@ -2172,6 +2234,9 @@ function collectPayload(game) {
     });
     payload.learner_meanings = payload.learner_meanings || {};
     payload.learner_matches = payload.learner_meanings;
+    payload.expected_pairs = Array.isArray(game.payload?.expected_pairs)
+      ? game.payload.expected_pairs
+      : (Array.isArray(game.payload?.pairs) ? game.payload.pairs : []);
   }
 
   if (game.game_type === 'sentence_order') {
@@ -2412,23 +2477,23 @@ function applyListeningGapFillFeedback(data) {
   });
 }
 
-function renderMismatchesHtml(mismatches) {
+function renderMismatchesHtml(mismatches, focusItems = []) {
   if (!Array.isArray(mismatches) || mismatches.length === 0) return '';
   const rows = mismatches
     .map((item) => {
       const position = Number(item.position || 0);
       const expected = String(item.expected || '').trim() || '∅';
       const recognized = String(item.recognized || '').trim() || '∅';
-      return `<li>#${position} expected: <strong>${escapeHtml(expected)}</strong> / recognized: <strong>${escapeHtml(recognized)}</strong></li>`;
+      return `<li>#${position} expected: <strong>${renderFocusAwareText(expected, focusItems)}</strong> / recognized: <strong>${renderFocusAwareText(recognized, focusItems)}</strong></li>`;
     })
     .join('');
   return `<div class="result-block"><p><strong>Mismatches</strong></p><ul class="result-list">${rows}</ul></div>`;
 }
 
-function renderWordFeedbackHtml(wordFeedback) {
+function renderWordFeedbackHtml(wordFeedback, focusItems = []) {
   if (!Array.isArray(wordFeedback) || wordFeedback.length === 0) return '';
   const rows = wordFeedback
-    .map((item) => `<li><strong>${escapeHtml(item.word || '')}</strong>: ${escapeHtml(item.issue || '')}. ${escapeHtml(item.hint || '')}</li>`)
+    .map((item) => `<li><strong>${renderFocusAwareText(item.word || '', focusItems)}</strong>: ${escapeHtml(item.issue || '')}. ${escapeHtml(item.hint || '')}</li>`)
     .join('');
   return `<div class="result-block"><p><strong>Word feedback</strong></p><ul class="result-list">${rows}</ul></div>`;
 }
@@ -2436,6 +2501,7 @@ function renderWordFeedbackHtml(wordFeedback) {
 function renderEvaluation(data) {
   const resultEl = document.getElementById('game-result');
   if (!resultEl) return;
+  const focusItems = currentEvaluationFocusItems(data);
 
   const alerts = Array.isArray(data.alerts) ? data.alerts : [];
   const alertsHtml = alerts.map((alert) => `<p class="alert">${escapeHtml(alert)}</p>`).join('');
@@ -2448,7 +2514,7 @@ function renderEvaluation(data) {
   const translationSource = String(data.literal_translation || '').trim()
     ? data
     : ((data.display && data.display.show_literal_translation) ? data.display : null);
-  const translationHtml = translationSource ? renderTranslatedField(translationSource, 'literal_translation', {
+  const translationHtml = translationSource ? renderTranslatedFieldWithFocus(translationSource, 'literal_translation', focusItems, {
     label: 'Literal translation',
     className: 'result-line',
     multiline: true,
@@ -2461,18 +2527,18 @@ function renderEvaluation(data) {
     ? `<p class="result-line"><strong>Meaning:</strong> ${escapeHtml(Math.round(Number(data.meaning_accuracy) * 100))}%</p>`
     : '';
   const correctReadingHtml = data.correct_reading
-    ? `<p class="result-line"><strong>Correct reading:</strong> ${escapeHtml(data.correct_reading)}</p>`
+    ? `<p class="result-line"><strong>Correct reading:</strong> ${renderFocusAwareText(data.correct_reading, focusItems)}</p>`
     : '';
   const correctReadingKanaHtml = data.correct_reading_kana
-    ? `<p class="result-line"><strong>Kana:</strong> ${escapeHtml(data.correct_reading_kana)}</p>`
+    ? `<p class="result-line"><strong>Kana:</strong> ${renderFocusAwareText(data.correct_reading_kana, focusItems)}</p>`
     : '';
   const readingRomanizedHtml = !data.correct_reading && data.reading_romanized
-    ? `<p class="result-line"><strong>Reading:</strong> ${escapeHtml(data.reading_romanized)}</p>`
+    ? `<p class="result-line"><strong>Reading:</strong> ${renderFocusAwareText(data.reading_romanized, focusItems)}</p>`
     : '';
   const readingKanaHtml = !data.correct_reading_kana && data.reading_kana
-    ? `<p class="result-line"><strong>Kana:</strong> ${escapeHtml(data.reading_kana)}</p>`
+    ? `<p class="result-line"><strong>Kana:</strong> ${renderFocusAwareText(data.reading_kana, focusItems)}</p>`
     : '';
-  const meaningLineHtml = renderTranslatedField(data, 'meaning', {
+  const meaningLineHtml = renderTranslatedFieldWithFocus(data, 'meaning', focusItems, {
     label: 'Meaning',
     className: 'result-line',
     multiline: true,
@@ -2489,7 +2555,7 @@ function renderEvaluation(data) {
     ? `<p class="result-line"><strong>Segmentation:</strong> ${escapeHtml(Math.round(Number(data.segmentation_accuracy) * 100))}%</p>`
     : '';
   const kanjiMoraHtml = data.kanji_mora_line
-    ? `<div class="result-block"><p><strong>Kanji (mora):</strong> ${escapeHtml(data.kanji_mora_line)}</p></div>`
+    ? `<div class="result-block"><p><strong>Kanji (mora):</strong> ${renderFocusAwareText(data.kanji_mora_line, focusItems)}</p></div>`
     : '';
   const pronunciationSummaryHtml = (data.is_match != null)
     ? `<p class="result-line"><strong>Match:</strong> ${data.is_match ? 'Yes' : 'No'}${data.match_threshold != null ? ` (target ${Math.round(Number(data.match_threshold) * 100)}%)` : ''}</p>`
@@ -2504,15 +2570,15 @@ function renderEvaluation(data) {
   const kanaRomanizedHtml = data.expected_romaji || data.recognized_romaji
     ? `
       <div class="result-block">
-        <p class="result-line"><strong>Expected (romanized):</strong> ${escapeHtml(data.expected_romaji || '-')}</p>
-        <p class="result-line"><strong>Recognized (romanized):</strong> ${escapeHtml(data.recognized_romaji || '-')}</p>
-        ${renderTranslatedField(data, 'expected_translation', { label: 'Expected translation', className: 'result-line' })}
-        ${renderTranslatedField(data, 'recognized_translation', { label: 'Recognized translation', className: 'result-line' })}
+        <p class="result-line"><strong>Expected (romanized):</strong> ${renderFocusAwareText(data.expected_romaji || '-', focusItems)}</p>
+        <p class="result-line"><strong>Recognized (romanized):</strong> ${renderFocusAwareText(data.recognized_romaji || '-', focusItems)}</p>
+        ${renderTranslatedFieldWithFocus(data, 'expected_translation', focusItems, { label: 'Expected translation', className: 'result-line' })}
+        ${renderTranslatedFieldWithFocus(data, 'recognized_translation', focusItems, { label: 'Recognized translation', className: 'result-line' })}
       </div>
     `
     : '';
-  const mismatchHtml = renderMismatchesHtml(data.sequence_mismatches);
-  const wordFeedbackHtml = renderWordFeedbackHtml(data.word_feedback);
+  const mismatchHtml = renderMismatchesHtml(data.sequence_mismatches, focusItems);
+  const wordFeedbackHtml = renderWordFeedbackHtml(data.word_feedback, focusItems);
   const nextStepHtml = renderTranslatedField(data, 'next_step', {
     label: 'Next step',
     className: 'result-line',

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from languages.japanese.app import api
 from languages.japanese.app.api import app
-from languages.japanese.app.topic_flow import required_competencies_for_stage
+from languages.japanese.app.topic_flow import TopicDefinition, required_competencies_for_stage
 
 EXPECTED_DAILY_COUNT = api.TOPIC_DAILY_REQUIRED_GAME_COUNT
 EXPECTED_DAILY_SCORE_MAX = api._daily_score_cap_for_game_count(EXPECTED_DAILY_COUNT)
@@ -49,6 +49,28 @@ class TopicDailyFlowTests(unittest.TestCase):
         with api.memory._conn() as conn:
             conn.execute("DELETE FROM topic_sequence_cache WHERE language = 'ja'")
             conn.execute("DELETE FROM topic_lessons_cache WHERE language = 'ja'")
+
+    @staticmethod
+    def _topic_by_key(topic_key: str):
+        for topic in api._topics_for_language("ja"):
+            if topic.topic_key == topic_key:
+                return topic
+        for topic in api._fallback_topics_for_language("ja"):
+            if topic.topic_key == topic_key:
+                return topic
+        if topic_key == "basic_greetings":
+            return TopicDefinition(
+                topic_key="basic_greetings",
+                language="ja",
+                title="Basic Greetings",
+                description="Everyday greetings and first-meeting expressions.",
+                lessons_by_level={},
+                daily_games=(),
+                extra_games=(),
+                stage="basic",
+                covers=("identity", "basic_questions"),
+            )
+        raise AssertionError(f"topic not found: {topic_key}")
 
     def test_daily_response_contains_lesson_and_required_topic_games(self) -> None:
         response = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
@@ -158,6 +180,140 @@ class TopicDailyFlowTests(unittest.TestCase):
         payload = card["payload"]
         self.assertEqual(payload.get("input_mode"), "drag")
         self.assertEqual(payload.get("options"), ["すし", "てんぷら", "うどん"])
+
+    def test_topic_cards_attach_related_focus_items_for_existing_sentence_and_particle_games(self) -> None:
+        topic, _progress, today_iso = api._daily_topic_for(learner_id=self.learner_id, language="ja")
+        sentence_card = api._build_topic_card_for_plan_entry(
+            topic=topic,
+            game_type="sentence_order",
+            level=1,
+            activity_id="ja-sentence-order-1-1",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+        grammar_card = api._build_topic_card_for_plan_entry(
+            topic=topic,
+            game_type="grammar_particle_fix",
+            level=1,
+            activity_id="ja-particle-1-1",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+
+        self.assertIsNotNone(sentence_card)
+        self.assertIsNotNone(grammar_card)
+
+        sentence_related = sentence_card["payload"].get("related_focus_items", [])
+        grammar_related = grammar_card["payload"].get("related_focus_items", [])
+
+        self.assertGreaterEqual(len(sentence_related), 2)
+        self.assertGreaterEqual(len(grammar_related), 2)
+        self.assertIn("は", [item["script"] for item in sentence_related])
+        self.assertIn("私", [item["script"] for item in sentence_related])
+        self.assertIn("は", [item["script"] for item in grammar_related])
+
+    def test_kanji_match_uses_topic_focus_pairs_when_available(self) -> None:
+        topic, _progress, _today_iso = api._daily_topic_for(learner_id=self.learner_id, language="ja")
+        card = api._build_card_for_game_type(
+            game_type="kanji_match",
+            language="ja",
+            level=1,
+        )
+        decorated = api._decorate_card_with_focus_context(card=card, topic=topic, level=1)
+
+        self.assertIsNotNone(decorated)
+        pairs = decorated["payload"].get("pairs", [])
+        self.assertTrue(decorated["payload"].get("focus_sourced_pairs"))
+        self.assertGreaterEqual(len(pairs), 2)
+        self.assertIn("私", [pair["symbol"] for pair in pairs])
+
+    def test_topic_cards_attach_related_focus_items_for_listening_context_pronunciation_and_mora_games(self) -> None:
+        identity_topic = self._topic_by_key("identity_and_plans")
+        greetings_topic = self._topic_by_key("basic_greetings")
+        today_iso = str(date.today())
+
+        listening_card = api._build_topic_card_for_plan_entry(
+            topic=identity_topic,
+            game_type="listening_gap_fill",
+            level=1,
+            activity_id="ja-gap-1-1",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+        mora_card = api._build_topic_card_for_plan_entry(
+            topic=identity_topic,
+            game_type="mora_romanization",
+            level=1,
+            activity_id="ja-mora-romanization-1-1",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+        context_card = api._build_topic_card_for_plan_entry(
+            topic=greetings_topic,
+            game_type="context_quiz",
+            level=1,
+            activity_id="ja-context-1-1",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+        pronunciation_card = api._build_topic_card_for_plan_entry(
+            topic=greetings_topic,
+            game_type="pronunciation_match",
+            level=1,
+            activity_id="ja-pronunciation-1-1",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+
+        self.assertIsNotNone(listening_card)
+        self.assertIsNotNone(mora_card)
+        self.assertIsNotNone(context_card)
+        self.assertIsNotNone(pronunciation_card)
+
+        listening_related = listening_card["payload"].get("related_focus_items", [])
+        mora_related = mora_card["payload"].get("related_focus_items", [])
+        context_related = context_card["payload"].get("related_focus_items", [])
+        pronunciation_related = pronunciation_card["payload"].get("related_focus_items", [])
+
+        self.assertIn("私", [item["script"] for item in listening_related])
+        self.assertIn("学生", [item["script"] for item in mora_related])
+        self.assertIn("はじめまして", [item["script"] for item in context_related])
+        self.assertIn("おはようございます", [item["script"] for item in pronunciation_related])
+
+    def test_topic_cards_attach_related_focus_items_for_focus_item_games(self) -> None:
+        topic, _progress, today_iso = api._daily_topic_for(learner_id=self.learner_id, language="ja")
+        meaning_card = api._build_topic_card_for_plan_entry(
+            topic=topic,
+            game_type="meaning_match",
+            level=1,
+            activity_id="kanji-私",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+        reading_card = api._build_topic_card_for_plan_entry(
+            topic=topic,
+            game_type="kanji_reading_match",
+            level=1,
+            activity_id="kanji-私",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+        particle_card = api._build_topic_card_for_plan_entry(
+            topic=topic,
+            game_type="particle_function_match",
+            level=1,
+            activity_id="particle-は",
+            learner_id=self.learner_id,
+            day_iso=today_iso,
+        )
+
+        self.assertIsNotNone(meaning_card)
+        self.assertIsNotNone(reading_card)
+        self.assertIsNotNone(particle_card)
+
+        self.assertIn("私", [item["script"] for item in meaning_card["payload"].get("related_focus_items", [])])
+        self.assertIn("私", [item["script"] for item in reading_card["payload"].get("related_focus_items", [])])
+        self.assertIn("は", [item["script"] for item in particle_card["payload"].get("related_focus_items", [])])
 
     def test_level_progress_continues_beyond_three_without_cap(self) -> None:
         api.memory.set_language_level(self.learner_id, "ja", 5)
@@ -2981,10 +3137,19 @@ class TopicDailyFlowTests(unittest.TestCase):
             return payload
 
         if game_type == "kanji_match":
-            learner_matches = {
-                pair.symbol: pair.meaning
-                for pair in api.game_services[game_type].get_pairs(language=card["language"], level=card["level"])
-            }
+            pair_rows = card_payload.get("expected_pairs") or card_payload.get("pairs") or []
+            if pair_rows:
+                learner_matches = {
+                    str(pair.get("symbol") or "").strip(): str(pair.get("meaning") or "").strip()
+                    for pair in pair_rows
+                    if str(pair.get("symbol") or "").strip()
+                }
+            else:
+                learner_matches = {
+                    pair.symbol: pair.meaning
+                    for pair in api.game_services[game_type].get_pairs(language=card["language"], level=card["level"])
+                }
+            payload["expected_pairs"] = pair_rows
             payload["learner_matches"] = learner_matches
             payload["learner_meanings"] = learner_matches
             return payload
@@ -3109,8 +3274,17 @@ class TopicDailyFlowTests(unittest.TestCase):
             return payload
 
         if game_type == "kanji_match":
-            pairs = api.game_services[game_type].get_pairs(language=card["language"], level=card["level"])
-            learner_matches = {pair.symbol: "__wrong__" for pair in pairs}
+            pair_rows = card_payload.get("expected_pairs") or card_payload.get("pairs") or []
+            if pair_rows:
+                learner_matches = {
+                    str(pair.get("symbol") or "").strip(): "__wrong__"
+                    for pair in pair_rows
+                    if str(pair.get("symbol") or "").strip()
+                }
+            else:
+                pairs = api.game_services[game_type].get_pairs(language=card["language"], level=card["level"])
+                learner_matches = {pair.symbol: "__wrong__" for pair in pairs}
+            payload["expected_pairs"] = pair_rows
             payload["learner_matches"] = learner_matches
             payload["learner_meanings"] = learner_matches
             return payload
