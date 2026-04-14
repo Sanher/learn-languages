@@ -148,3 +148,44 @@ class FocusItemCatalogTests(unittest.TestCase):
         self.assertTrue(payload)
         self.assertTrue({"できます", "たいです", "です", "だ"} & scripts)
         self.assertTrue(any(item["item_type"] == "expression" for item in payload))
+
+    def test_conditionals_advanced_catalog_surfaces_core_forms(self) -> None:
+        payload = build_fallback_focus_items_for_topic(
+            language="ja",
+            topic_key="conditional_patterns",
+            stage="advanced",
+            max_items=8,
+        )
+
+        scripts = {item["script"] for item in payload}
+        self.assertIn("たら", scripts)
+        self.assertIn("なら", scripts)
+        self.assertIn("れば", scripts)
+
+    def test_formal_register_advanced_catalog_contains_formal_phrases(self) -> None:
+        payload = build_fallback_focus_items_for_topic(
+            language="ja",
+            topic_key="formal_register_patterns",
+            stage="advanced",
+            max_items=8,
+        )
+
+        scripts = {item["script"] for item in payload}
+        self.assertIn("ございます", scripts)
+        self.assertIn("いたします", scripts)
+        self.assertIn("いただけますか", scripts)
+        self.assertTrue(any(item["item_type"] == "expression" for item in payload))
+
+    def test_unknown_advanced_topic_can_fallback_by_competency_coverage(self) -> None:
+        payload = build_fallback_focus_items_for_topic(
+            language="ja",
+            topic_key="unknown_advanced_topic",
+            stage="advanced",
+            covers=("discourse_connectors", "formal_register"),
+            max_items=8,
+        )
+
+        scripts = {item["script"] for item in payload}
+        self.assertTrue(payload)
+        self.assertTrue({"しかし", "そのため", "ございます", "いただけますか"} & scripts)
+        self.assertTrue(any(item["item_type"] == "expression" for item in payload))
