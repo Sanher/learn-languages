@@ -258,33 +258,46 @@ button.is-loading {
 }
 
 .focus-chip {
+  position: relative;
   display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  padding: 3px 8px 4px;
+  align-items: flex-end;
+  justify-content: center;
+  min-height: 1.9em;
+  padding: 8px 8px 2px;
   border-radius: 999px;
   border: 1px solid #475569;
   background: #0f172a;
   color: #e2e8f0;
   font-size: 12px;
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1;
   white-space: nowrap;
+  text-align: center;
   vertical-align: baseline;
+  overflow: visible;
 }
 
 .focus-chip-type {
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 4px;
+  background: #0f172a;
   opacity: 0.72;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  font-size: 9px;
+  font-size: 7px;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .focus-chip-script {
   font-size: 13px;
-  line-height: 1.1;
+  line-height: 1;
+  display: block;
+  width: 100%;
+  text-align: center;
 }
 
 .focus-chip--particle {
