@@ -286,6 +286,45 @@ function focusTypeLabel(itemType) {
   return 'Word';
 }
 
+function focusChipGloss(item) {
+  if (!item || typeof item !== 'object') {
+    return { primary: '', secondary: '' };
+  }
+  const type = String(item.item_type || 'word').trim().toLowerCase();
+  const primary = String(
+    type === 'particle'
+      ? (item.function || item.meaning_en || '')
+      : (item.meaning_en || item.function || '')
+  ).trim();
+  const secondary = String(item.meaning_secondary || '').trim();
+  return { primary, secondary };
+}
+
+function renderFocusChip(item, { staticChip = false, showHoverGloss = false } = {}) {
+  if (!item || typeof item !== 'object') return '';
+  const type = String(item.item_type || 'word').trim().toLowerCase();
+  const script = String(item.script || '').trim();
+  if (!script) return '';
+  const classes = ['focus-chip', `focus-chip--${escapeHtml(type)}`];
+  if (staticChip) classes.push('focus-chip--static');
+  const { primary, secondary } = focusChipGloss(item);
+  const hoverHtml = showHoverGloss && (primary || secondary)
+    ? `
+        <span class="focus-chip-hover" role="note">
+          ${primary ? `<span class="focus-chip-hover-primary">${escapeHtml(primary)}</span>` : ''}
+          ${secondary ? `<span class="focus-chip-hover-secondary">${escapeHtml(secondary)}</span>` : ''}
+        </span>
+      `
+    : '';
+  return `
+    <span class="${classes.join(' ')}" data-focus-item-id="${escapeHtml(item.item_id || '')}" data-focus-type="${escapeHtml(type)}">
+      <span class="focus-chip-type">${escapeHtml(focusTypeLabel(type))}</span>
+      <span class="focus-chip-script">${escapeHtml(script)}</span>
+      ${hoverHtml}
+    </span>
+  `;
+}
+
 function lessonFocusHighlightItems(focusItems) {
   return [...focusItems]
     .filter((item) => String(item && item.script || '').trim())
@@ -305,17 +344,7 @@ function renderFocusAwareText(value, focusItems, { multiline = false } = {}) {
   while (index < source.length) {
     const match = items.find((item) => source.startsWith(String(item.script || ''), index));
     if (match) {
-      const type = String(match.item_type || 'word').trim().toLowerCase();
-      const classes = [
-        'focus-chip',
-        `focus-chip--${escapeHtml(type)}`,
-      ];
-      parts.push(
-        `<span class="${classes.join(' ')}" data-focus-item-id="${escapeHtml(match.item_id || '')}" data-focus-type="${escapeHtml(type)}">`
-          + `<span class="focus-chip-type">${escapeHtml(focusTypeLabel(type))}</span>`
-          + `<span class="focus-chip-script">${escapeHtml(match.script || '')}</span>`
-        + '</span>'
-      );
+      parts.push(renderFocusChip(match, { showHoverGloss: isBeginnerTopicSupport() }));
       index += String(match.script || '').length;
       continue;
     }
@@ -382,7 +411,6 @@ function renderFocusItemsSection(focusItems) {
     const type = String(item.item_type || 'word').trim().toLowerCase();
     const script = String(item.script || '').trim();
     if (!script) return '';
-    const typeLabel = focusTypeLabel(type);
     const coreBadge = item.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
     const examBadge = item.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
     const readingKana = String(item.reading_kana || '').trim();
@@ -398,10 +426,7 @@ function renderFocusItemsSection(focusItems) {
       <article class="focus-item-card focus-item-card--${escapeHtml(type)}">
         <div class="focus-item-card-head">
           <div class="focus-item-card-tags">
-            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
-              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
-              <span class="focus-chip-script">${escapeHtml(script)}</span>
-            </span>
+            ${renderFocusChip(item, { staticChip: true })}
             ${coreBadge}
             ${examBadge}
           </div>
@@ -446,7 +471,6 @@ function renderRelatedFocusItemsSection(focusItems) {
     const type = String(item.item_type || 'word').trim().toLowerCase();
     const script = String(item.script || '').trim();
     if (!script) return '';
-    const typeLabel = focusTypeLabel(type);
     const coreBadge = item.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
     const examBadge = item.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
     const readingKana = String(item.reading_kana || '').trim();
@@ -457,10 +481,7 @@ function renderRelatedFocusItemsSection(focusItems) {
     return `
       <article class="game-focus-item-card game-focus-item-card--${escapeHtml(type)}">
         <div class="focus-item-card-tags">
-          <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
-            <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
-            <span class="focus-chip-script">${escapeHtml(script)}</span>
-          </span>
+          ${renderFocusChip(item, { staticChip: true })}
           ${coreBadge}
           ${examBadge}
         </div>
@@ -607,6 +628,40 @@ function isBeginnerTopicSupport() {
   return currentTopicStage() === 'basic' || String((dailyProgress && dailyProgress.current_rank) || '').trim().toLowerCase() === 'beginner';
 }
 
+function weeklyExamUiState() {
+  const completedCount = Number((dailyProgress && dailyProgress.daily_games_completed_count) || 0);
+  const totalCount = Number((dailyProgress && dailyProgress.daily_games_total) || dailyGameCards.length || 0);
+  const lessonDone = isLessonCompleted();
+  const due = Boolean(dailyProgress && dailyProgress.weekly_exam_due);
+  const levelReady = Boolean(dailyProgress && dailyProgress.weekly_exam_level_ready);
+  const masteryReady = Boolean(dailyProgress && dailyProgress.topic_mastery_ready_for_weekly_exam);
+  const minLevel = Number((dailyProgress && dailyProgress.weekly_exam_min_level) || 5);
+  const lessonProgressReady = lessonDone && completedCount >= totalCount;
+  const unlocked = due && lessonProgressReady && levelReady && masteryReady;
+  let buttonLabel = 'Take weekly mini-exam';
+  if (!due) {
+    buttonLabel = 'Weekly mini-exam not due';
+  } else if (!levelReady) {
+    buttonLabel = `Weekly mini-exam locked (reach level ${minLevel})`;
+  } else if (!masteryReady) {
+    buttonLabel = 'Weekly mini-exam locked (build topic mastery)';
+  } else if (!lessonProgressReady) {
+    buttonLabel = "Available after finishing today's lesson";
+  }
+  return {
+    completedCount,
+    totalCount,
+    lessonDone,
+    due,
+    levelReady,
+    masteryReady,
+    minLevel,
+    lessonProgressReady,
+    unlocked,
+    buttonLabel,
+  };
+}
+
 function hasJapaneseScript(value) {
   return /[\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff]/.test(String(value || ''));
 }
@@ -657,7 +712,22 @@ function particleOptionToRomaji(option) {
     .join(' / ');
 }
 
+function supportsKanaGuide(gameType) {
+  const normalized = String(gameType || '').trim().toLowerCase();
+  return [
+    'grammar_particle_fix',
+    'sentence_order',
+    'listening_gap_fill',
+    'mora_romanization',
+    'pronunciation_match',
+    'kana_speed_round',
+  ].includes(normalized);
+}
+
 function evaluationGuideLine(data) {
+  if (!supportsKanaGuide(selectedGame && selectedGame.game_type)) {
+    return '';
+  }
   const display = data && typeof data.display === 'object' ? data.display : {};
   if (selectedGame && selectedGame.game_type === 'grammar_particle_fix') {
     const correctParticle = String(data.correct_particle || '').trim();
@@ -683,6 +753,9 @@ function evaluationGuideLine(data) {
 }
 
 function evaluationGuideRomanizedLine(data) {
+  if (!supportsKanaGuide(selectedGame && selectedGame.game_type)) {
+    return '';
+  }
   const display = data && typeof data.display === 'object' ? data.display : {};
   if (selectedGame && selectedGame.game_type === 'grammar_particle_fix') {
     const correctParticle = String(data.correct_particle || '').trim();
@@ -702,6 +775,7 @@ function evaluationGuideRomanizedLine(data) {
 
 function renderKanaGuideHtml(data, translationSource) {
   if (currentLanguage !== 'ja') return '';
+  if (!supportsKanaGuide(selectedGame && selectedGame.game_type)) return '';
   const focusItems = currentEvaluationFocusItems(data);
   const japaneseLine = evaluationGuideLine(data);
   if (!japaneseLine) return '';
@@ -983,19 +1057,8 @@ function renderLessonPanel() {
   const failureSummary = Object.keys(failures).length > 0
     ? Object.entries(failures).map(([game, count]) => `${game}: ${count}`).join(' | ')
     : 'No failures registered yet.';
-  const weeklyDue = Boolean(dailyProgress && dailyProgress.weekly_exam_due);
-  const weeklyLevelReady = Boolean(dailyProgress && dailyProgress.weekly_exam_level_ready);
-  const weeklyMasteryReady = Boolean(dailyProgress && dailyProgress.topic_mastery_ready_for_weekly_exam);
-  const weeklyMinLevel = Number((dailyProgress && dailyProgress.weekly_exam_min_level) || 5);
-  const weeklyExamUnlocked = weeklyDue && lessonDone && completedCount >= totalCount && weeklyLevelReady && weeklyMasteryReady;
-  const weeklyButtonLabel = !weeklyDue
-    ? 'Weekly mini-exam not due'
-    : !weeklyLevelReady
-      ? `Weekly mini-exam locked (reach level ${weeklyMinLevel})`
-      : !weeklyMasteryReady
-        ? 'Weekly mini-exam locked (build topic mastery)'
-        : 'Take weekly mini-exam';
-  const weeklyDisabled = weeklyExamUnlocked ? '' : 'disabled';
+  const weeklyExamState = weeklyExamUiState();
+  const weeklyDisabled = weeklyExamState.unlocked ? '' : 'disabled';
   const readyTo2 = Boolean(dailyProgress && dailyProgress.ready_to_level_2);
   const readyTo3 = Boolean(dailyProgress && dailyProgress.ready_to_level_3);
   const levelExamReady = readyTo2 || readyTo3;
@@ -1139,7 +1202,7 @@ function renderLessonPanel() {
       ${unlockLine}
       ${lessonLevelProgressHtml}
       <div class="lesson-progress-actions">
-        <button id="weekly-exam-btn" class="ghost-btn" type="button" ${weeklyDisabled}>${weeklyButtonLabel}</button>
+        <button id="weekly-exam-btn" class="ghost-btn" type="button" data-action="take-weekly-exam" ${weeklyDisabled}>${weeklyExamState.buttonLabel}</button>
         <button id="level-exam-btn" class="ghost-btn" type="button" ${levelExamDisabled}>${levelExamLabel}</button>
         <button id="raw-data-btn" class="ghost-btn" type="button">View raw data</button>
         <button id="refresh-topic-sequence-btn" class="ghost-btn" type="button">Refresh topic list now</button>
@@ -1188,7 +1251,11 @@ function isLevelExamResultVisible() {
 function renderWeeklyExamResultCard() {
   if (!weeklyExamResult) return '';
   const results = Array.isArray(weeklyExamResult.answer_results) ? weeklyExamResult.answer_results : [];
+  const focusItems = Array.isArray(dailyLesson && dailyLesson.focus_items) ? dailyLesson.focus_items : [];
   const correctCount = results.filter((item) => Boolean(item && item.is_correct)).length;
+  const failureTotal = Number(weeklyExamResult.failure_total || 0);
+  const failureLimit = Number(weeklyExamResult.failure_limit || 0);
+  const criteria = Array.isArray(weeklyExamResult.weekly_exam_criteria) ? weeklyExamResult.weekly_exam_criteria : [];
   const weakGames = Array.from(
     new Set(
       results
@@ -1202,6 +1269,43 @@ function renderWeeklyExamResultCard() {
     className: 'result-line',
     multiline: true,
   });
+  const criteriaHtml = criteria
+    .map((criterion, index) => {
+      const isPassed = Boolean(criterion && criterion.passed);
+      const statusClass = isPassed ? 'is-correct' : 'is-review';
+      const statusLabel = isPassed ? 'Passed' : 'Needs work';
+      const labels = {
+        score: 'Score threshold',
+        failures: 'Failure pressure',
+        daily_block: 'Daily lesson block',
+        coverage: 'Answer coverage',
+      };
+      const title = labels[String((criterion && criterion.key) || '').trim()] || `Criterion ${index + 1}`;
+      const actual = String((criterion && criterion.actual) || '').trim();
+      const expected = String((criterion && criterion.expected) || '').trim();
+      const explanationHtml = renderTranslatedField(criterion, 'explanation', {
+        label: 'Explanation',
+        className: 'result-line',
+        multiline: true,
+      });
+      return `
+        <article class="result-block level-exam-review-item ${statusClass}">
+          <div class="weekly-exam-review-head">
+            <div>
+              <p class="weekly-exam-review-kicker">Criterion ${index + 1}</p>
+              <h3>${escapeHtml(title)}</h3>
+            </div>
+            <div class="weekly-exam-review-meta">
+              <span class="weekly-exam-status ${statusClass}">${statusLabel}</span>
+            </div>
+          </div>
+          ${actual ? `<p class="result-line"><strong>Current:</strong> ${escapeHtml(actual)}</p>` : ''}
+          ${expected ? `<p class="result-line"><strong>Expected:</strong> ${escapeHtml(expected)}</p>` : ''}
+          ${explanationHtml}
+        </article>
+      `;
+    })
+    .join('');
   const itemsHtml = results
     .map((item, index) => {
       const isCorrect = Boolean(item && item.is_correct);
@@ -1213,12 +1317,12 @@ function renderWeeklyExamResultCard() {
         className: 'result-line',
         multiline: true,
       });
-      const explanationHtml = renderTranslatedField(item, 'feedback', {
+      const explanationHtml = renderTranslatedFieldWithFocus(item, 'feedback', focusItems, {
         label: 'Explanation',
         className: 'result-line',
         multiline: true,
       });
-      const literalTranslationHtml = renderTranslatedField(item, 'literal_translation', {
+      const literalTranslationHtml = renderTranslatedFieldWithFocus(item, 'literal_translation', focusItems, {
         label: 'Literal translation',
         className: 'result-line',
         multiline: true,
@@ -1230,13 +1334,13 @@ function renderWeeklyExamResultCard() {
         ? `<p class="alert">${escapeHtml(String(item.error || 'Review data unavailable.'))}</p>`
         : '';
       const yourAnswerHtml = yourAnswer
-        ? `<p class="result-line"><strong>Your answer:</strong> ${escapeHtml(yourAnswer)}</p>`
+        ? `<p class="result-line"><strong>Your answer:</strong> ${renderFocusAwareText(yourAnswer, focusItems, { multiline: true })}</p>`
         : '';
       const correctAnswerHtml = correctAnswer
-        ? `<p class="result-line"><strong>Correct answer:</strong> ${escapeHtml(correctAnswer)}</p>`
+        ? `<p class="result-line"><strong>Correct answer:</strong> ${renderFocusAwareText(correctAnswer, focusItems, { multiline: true })}</p>`
         : '';
       const romanizedHtml = romanizedLine
-        ? `<p class="result-line"><strong>Romanized:</strong> ${escapeHtml(romanizedLine)}</p>`
+        ? `<p class="result-line"><strong>Romanized:</strong> ${renderFocusAwareText(romanizedLine, focusItems, { multiline: true })}</p>`
         : '';
       return `
         <article class="result-block weekly-exam-review-item ${statusClass}">
@@ -1272,8 +1376,10 @@ function renderWeeklyExamResultCard() {
       <p><strong>Status:</strong> ${weeklyExamResult.passed ? 'Passed' : 'Not passed yet'}</p>
       <p><strong>Score:</strong> ${escapeHtml(Number(weeklyExamResult.exam_score || 0))}/${escapeHtml(Number(weeklyExamResult.min_pass_score || 0))}</p>
       <p class="muted">Correct answers: ${correctCount}/${results.length}.</p>
+      <p class="muted">Failure pressure: ${escapeHtml(failureTotal)}/${escapeHtml(failureLimit)}.</p>
       ${overallFeedbackHtml}
       ${weakGamesHtml}
+      ${criteriaHtml ? `<div class="level-exam-review-list">${criteriaHtml}</div>` : ''}
       <div class="actions weekly-exam-result-actions">
         <button id="weekly-exam-continue-btn" type="button">Return to topic flow</button>
       </div>
@@ -1751,7 +1857,6 @@ function renderSingleGame(game) {
     `;
   } else if (gameType === 'kanji_reading_match') {
     const type = String(payload.item_type || 'kanji').trim().toLowerCase();
-    const typeLabel = focusTypeLabel(type);
     const script = String(payload.script || '').trim();
     const coreBadge = payload.is_core ? '<span class="focus-item-status-badge is-core">Core</span>' : '';
     const examBadge = payload.is_exam_relevant ? '<span class="focus-item-status-badge is-exam">Exam</span>' : '';
@@ -1764,10 +1869,7 @@ function renderSingleGame(game) {
       <div class="prompt game-meta">
         <div class="kanji-reading-match-head">
           <div class="focus-item-card-tags">
-            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
-              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
-              <span class="focus-chip-script">${escapeHtml(script)}</span>
-            </span>
+            ${renderFocusChip(payload, { staticChip: true })}
             ${coreBadge}
             ${examBadge}
           </div>
@@ -1795,7 +1897,6 @@ function renderSingleGame(game) {
     `;
   } else if (gameType === 'meaning_match') {
     const type = String(payload.item_type || 'word').trim().toLowerCase();
-    const typeLabel = focusTypeLabel(type);
     const script = String(payload.script || '').trim();
     const readingKana = String(payload.reading_kana || '').trim();
     const readingRomanized = String(payload.reading_romanized || '').trim();
@@ -1809,10 +1910,7 @@ function renderSingleGame(game) {
       <div class="prompt game-meta">
         <div class="kanji-reading-match-head">
           <div class="focus-item-card-tags">
-            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
-              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
-              <span class="focus-chip-script">${escapeHtml(script)}</span>
-            </span>
+            ${renderFocusChip(payload, { staticChip: true })}
             ${coreBadge}
             ${examBadge}
           </div>
@@ -1840,7 +1938,6 @@ function renderSingleGame(game) {
     `;
   } else if (gameType === 'particle_function_match') {
     const type = 'particle';
-    const typeLabel = focusTypeLabel(type);
     const script = String(payload.script || '').trim();
     const readingKana = String(payload.reading_kana || '').trim();
     const readingRomanized = String(payload.reading_romanized || '').trim();
@@ -1855,10 +1952,7 @@ function renderSingleGame(game) {
       <div class="prompt game-meta">
         <div class="kanji-reading-match-head">
           <div class="focus-item-card-tags">
-            <span class="focus-chip focus-chip--${escapeHtml(type)} focus-chip--static">
-              <span class="focus-chip-type">${escapeHtml(typeLabel)}</span>
-              <span class="focus-chip-script">${escapeHtml(script)}</span>
-            </span>
+            ${renderFocusChip(payload, { staticChip: true })}
             ${coreBadge}
             ${examBadge}
           </div>
@@ -2577,6 +2671,18 @@ function renderEvaluation(data) {
     className: 'result-line',
     multiline: true,
   });
+  const weeklyExamState = weeklyExamUiState();
+  const weeklyExamCtaHtml = (!isWeeklyExamActive() && weeklyExamState.unlocked)
+    ? `
+      <div class="result-block weekly-exam-inline-cta">
+        <p><strong>Weekly mini-exam unlocked</strong></p>
+        <p class="muted">You finished today's required lesson block. You can take the topic exam now, even if you keep exploring optional games.</p>
+        <div class="actions weekly-exam-result-actions">
+          <button id="weekly-exam-inline-btn" type="button" data-action="take-weekly-exam">Take weekly mini-exam</button>
+        </div>
+      </div>
+    `
+    : '';
 
   resultEl.innerHTML = `
     ${alertsHtml}
@@ -2601,6 +2707,7 @@ function renderEvaluation(data) {
     ${mismatchHtml}
     ${wordFeedbackHtml}
     ${nextStepHtml}
+    ${weeklyExamCtaHtml}
   `;
   applyListeningGapFillFeedback(data);
   applyKanjiEvaluationFeedback(data);
@@ -3442,12 +3549,15 @@ async function advanceWeeklyExamQuestion() {
 }
 
 async function takeWeeklyExam() {
-  const weeklyExamBtn = document.getElementById('weekly-exam-btn');
-  const previousText = weeklyExamBtn ? weeklyExamBtn.textContent : '';
-  if (weeklyExamBtn) {
-    weeklyExamBtn.disabled = true;
-    weeklyExamBtn.textContent = 'Loading...';
-  }
+  const weeklyExamButtons = Array.from(document.querySelectorAll('[data-action="take-weekly-exam"]'));
+  const previousLabels = weeklyExamButtons.map((button) => ({
+    button,
+    label: button.textContent || 'Take weekly mini-exam',
+  }));
+  weeklyExamButtons.forEach((button) => {
+    button.disabled = true;
+    button.textContent = 'Loading...';
+  });
   try {
     const topicKey = (dailyTopic && dailyTopic.topic_key) || (dailyLesson && dailyLesson.topic_key) || '';
     const firstRes = await fetch(apiUrl('api/exams/weekly'), {
@@ -3485,10 +3595,10 @@ async function takeWeeklyExam() {
     }
     openWeeklyExamSession(firstData);
   } finally {
-    if (weeklyExamBtn) {
-      weeklyExamBtn.disabled = false;
-      weeklyExamBtn.textContent = previousText || 'Take weekly mini-exam';
-    }
+    previousLabels.forEach(({ button, label }) => {
+      button.disabled = false;
+      button.textContent = label || 'Take weekly mini-exam';
+    });
     updateTopbar();
     renderSingleGame(selectedGame);
     wireGameActions();
@@ -3570,6 +3680,7 @@ function wireGameActions() {
   const pronunciationRecordBtn = document.getElementById('pronunciation-record-btn');
   const pronunciationStopRecordBtn = document.getElementById('pronunciation-stop-record-btn');
   const weeklyExamBtn = document.getElementById('weekly-exam-btn');
+  const weeklyExamInlineBtn = document.getElementById('weekly-exam-inline-btn');
   const weeklyExamContinueBtn = document.getElementById('weekly-exam-continue-btn');
   const levelExamContinueBtn = document.getElementById('level-exam-continue-btn');
   const levelExamBtn = document.getElementById('level-exam-btn');
@@ -3613,6 +3724,7 @@ function wireGameActions() {
   pronunciationRecordBtn?.addEventListener('click', startPronunciationRecording);
   pronunciationStopRecordBtn?.addEventListener('click', stopPronunciationRecording);
   weeklyExamBtn?.addEventListener('click', takeWeeklyExam);
+  weeklyExamInlineBtn?.addEventListener('click', takeWeeklyExam);
   weeklyExamContinueBtn?.addEventListener('click', () => {
     void loadDailyGame();
   });

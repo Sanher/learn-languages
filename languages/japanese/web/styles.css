@@ -263,7 +263,8 @@ button.is-loading {
   align-items: flex-end;
   justify-content: center;
   min-height: 1.9em;
-  padding: 8px 8px 2px;
+  min-width: 1.75em;
+  padding: 7px 2px 2px;
   border-radius: 999px;
   border: 1px solid #475569;
   background: #0f172a;
@@ -283,7 +284,7 @@ button.is-loading {
   left: 50%;
   transform: translateX(-50%);
   padding: 0 4px;
-  background: #0f172a;
+  background: #0b1220;
   opacity: 0.72;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -326,6 +327,46 @@ button.is-loading {
 
 .focus-chip--static {
   width: fit-content;
+  min-width: 2.2em;
+  padding-inline: 6px;
+}
+
+.focus-chip-hover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  z-index: 6;
+  display: flex;
+  min-width: 120px;
+  max-width: 220px;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.96);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.42);
+  color: #e2e8f0;
+  font-size: 11px;
+  line-height: 1.25;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(4px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.focus-chip:hover .focus-chip-hover,
+.focus-chip:focus-within .focus-chip-hover {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.focus-chip-hover-primary {
+  color: #e2e8f0;
+}
+
+.focus-chip-hover-secondary {
+  color: #bfdbfe;
 }
 
 .lesson-example {
@@ -1169,6 +1210,16 @@ button.is-loading {
 
 .weekly-exam-result-actions {
   margin-top: 0;
+}
+
+.weekly-exam-inline-cta {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.weekly-exam-inline-cta p {
+  margin: 0;
 }
 
 .weekly-exam-review-list,

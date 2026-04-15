@@ -2122,6 +2122,87 @@ def _level_exam_flags(
     }
 
 
+def _weekly_exam_criteria(
+    *,
+    lesson_completed: bool,
+    completed_daily_games_count: int,
+    exam_score: int,
+    min_pass_score: int,
+    failure_total: int,
+    failure_limit: int = 16,
+    answered_count: int | None = None,
+    required_answer_count: int | None = None,
+) -> list[dict[str, Any]]:
+    score_ok = int(exam_score) >= int(min_pass_score)
+    failures_ok = int(failure_total) <= int(failure_limit)
+    lesson_and_daily_done = bool(lesson_completed) and int(completed_daily_games_count) >= TOPIC_DAILY_REQUIRED_GAME_COUNT
+
+    criteria: list[dict[str, Any]] = [
+        {
+            "key": "score",
+            "passed": bool(score_ok),
+            "actual": f"{int(exam_score)}/{int(min_pass_score)}",
+            "expected": f"Reach at least {int(min_pass_score)} points.",
+            "explanation": "Your weekly exam score must reach the required threshold.",
+        },
+        {
+            "key": "failures",
+            "passed": bool(failures_ok),
+            "actual": f"{int(failure_total)} failure point(s)",
+            "expected": f"Stay at {int(failure_limit)} failure point(s) or fewer.",
+            "explanation": "Weekly exams also check cumulative failure pressure from this topic's practice history.",
+        },
+        {
+            "key": "daily_block",
+            "passed": bool(lesson_and_daily_done),
+            "actual": (
+                f"Lesson {'done' if lesson_completed else 'not done'}; "
+                f"{int(completed_daily_games_count)}/{TOPIC_DAILY_REQUIRED_GAME_COUNT} daily games complete."
+            ),
+            "expected": f"Finish the lesson and all {TOPIC_DAILY_REQUIRED_GAME_COUNT} daily games.",
+            "explanation": "The weekly exam only passes after the full daily lesson block is complete.",
+        },
+    ]
+
+    if answered_count is not None and required_answer_count is not None:
+        criteria.append(
+            {
+                "key": "coverage",
+                "passed": int(answered_count) >= int(required_answer_count),
+                "actual": f"{int(answered_count)}/{int(required_answer_count)} answers submitted.",
+                "expected": f"Submit at least {int(required_answer_count)} answers.",
+                "explanation": "Cumulative weekly exams require a minimum answer count before the result is valid.",
+            }
+        )
+
+    return criteria
+
+
+def _weekly_exam_feedback_message(
+    *,
+    passed: bool,
+    score_ok: bool,
+    failures_ok: bool,
+    lesson_and_daily_done: bool,
+    answered_enough: bool = True,
+) -> str:
+    if passed:
+        return "Weekly mini-exam passed. You can keep building toward the rank exam."
+
+    blockers: list[str] = []
+    if not score_ok:
+        blockers.append("score threshold")
+    if not failures_ok:
+        blockers.append("failure pressure")
+    if not lesson_and_daily_done:
+        blockers.append("daily lesson completion")
+    if not answered_enough:
+        blockers.append("answer coverage")
+    if not blockers:
+        return "Weekly mini-exam failed. Review the detailed criteria before retrying."
+    return f"Weekly mini-exam failed. Review: {', '.join(blockers)}."
+
+
 def _rank_state(
     *,
     level_1_to_2_passed: bool,
@@ -2807,123 +2888,110 @@ def _maybe_promote_level_from_previous_day(
     current_level: int,
 ) -> tuple[int, dict[str, Any] | None]:
     # Promote only when a new day starts so the current daily flow never mixes cards from two levels.
-    # The target check uses accumulated score gathered while the learner stayed on the previous level.
+    # If the most recent day was incomplete, keep scanning older completed days at the same level so a
+    # previously earned level-up is not lost just because the learner had a partial day afterward.
     normalized_level = max(1, int(current_level))
-
-    previous_progress = memory.latest_daily_topic_progress_before(
+    previous_rows = memory.list_daily_topic_progress_before(
         learner_id=learner_id,
         language=language,
         before_day_iso=today_iso,
+        limit=30,
     )
-    if previous_progress is None:
+    if not previous_rows:
         return normalized_level, None
 
-    previous_level = max(1, int(previous_progress.level_state or normalized_level))
-    if previous_level != normalized_level:
-        logger.info(
-            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=level_changed prev_level=%s current_level=%s",
-            learner_id,
-            language,
-            previous_progress.day_iso,
-            previous_level,
-            normalized_level,
-        )
-        return normalized_level, None
+    closed_topics = {item.topic_key for item in memory.list_closed_topics(learner_id=learner_id, language=language)}
 
-    closed_topics = memory.list_closed_topics(learner_id=learner_id, language=language)
-    if any(item.topic_key == previous_progress.topic_key for item in closed_topics):
-        logger.info(
-            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=topic_closed topic=%s",
-            learner_id,
-            language,
-            previous_progress.day_iso,
-            previous_progress.topic_key,
-        )
-        return normalized_level, None
+    for previous_progress in previous_rows:
+        previous_level = max(1, int(previous_progress.level_state or normalized_level))
+        if previous_level != normalized_level:
+            continue
 
-    topic = _topic_definition_for_key(language=language, topic_key=previous_progress.topic_key)
-    if topic is None:
-        logger.warning(
-            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=unknown_topic topic=%s",
-            learner_id,
-            language,
-            previous_progress.day_iso,
-            previous_progress.topic_key,
-        )
-        return normalized_level, None
+        if previous_progress.topic_key in closed_topics:
+            continue
 
-    daily_game_types = [
-        game_type
-        for game_type, _activity_id in _daily_plan_for_topic_day(
-            topic=topic,
-            level=previous_level,
+        topic = _topic_definition_for_key(language=language, topic_key=previous_progress.topic_key)
+        if topic is None:
+            logger.warning(
+                "daily_level_score_promotion_candidate_skipped learner_id=%s language=%s prev_day=%s reason=unknown_topic topic=%s",
+                learner_id,
+                language,
+                previous_progress.day_iso,
+                previous_progress.topic_key,
+            )
+            continue
+
+        daily_game_types = [
+            game_type
+            for game_type, _activity_id in _daily_plan_for_topic_day(
+                topic=topic,
+                level=previous_level,
+                learner_id=learner_id,
+                day_iso=previous_progress.day_iso,
+            )
+        ]
+        previous_payload = _daily_progress_payload(progress=previous_progress, daily_game_types=daily_game_types)
+        day_completed = bool(previous_payload.get("extras_unlocked"))
+        if not bool(previous_payload.get("lesson_completed")) or not day_completed:
+            continue
+
+        topic_days_count = memory.count_days_on_topic(
             learner_id=learner_id,
-            day_iso=previous_progress.day_iso,
+            language=language,
+            topic_key=previous_progress.topic_key,
+            up_to_day_iso=previous_progress.day_iso,
         )
-    ]
-    previous_payload = _daily_progress_payload(progress=previous_progress, daily_game_types=daily_game_types)
-    day_completed = bool(previous_payload.get("extras_unlocked"))
-    if not bool(previous_payload.get("lesson_completed")) or not day_completed:
-        logger.info(
-            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=incomplete_day lesson_completed=%s day_completed=%s",
-            learner_id,
-            language,
-            previous_progress.day_iso,
-            previous_payload.get("lesson_completed"),
-            day_completed,
+        daily_score_cap = int(previous_payload.get("daily_score_max", _daily_score_cap_for_game_count(len(daily_game_types))))
+        points_target = _level_points_target(
+            current_level=previous_level,
+            daily_score_cap=daily_score_cap,
+            topic_day_target_score=_target_score_for_topic_day(topic_days_count, daily_score_cap=daily_score_cap),
         )
-        return normalized_level, None
+        accumulated_score = memory.accumulated_level_score(
+            learner_id=learner_id,
+            language=language,
+            level_state=previous_level,
+            topic_key=previous_progress.topic_key,
+            up_to_day_iso=previous_progress.day_iso,
+        )
+        if accumulated_score < points_target:
+            continue
 
-    topic_days_count = memory.count_days_on_topic(
-        learner_id=learner_id,
-        language=language,
-        topic_key=previous_progress.topic_key,
-    )
-    daily_score_cap = int(previous_payload.get("daily_score_max", _daily_score_cap_for_game_count(len(daily_game_types))))
-    points_target = _level_points_target(
-        current_level=previous_level,
-        daily_score_cap=daily_score_cap,
-        topic_day_target_score=_target_score_for_topic_day(topic_days_count, daily_score_cap=daily_score_cap),
-    )
-    accumulated_score = memory.accumulated_level_score(
-        learner_id=learner_id,
-        language=language,
-        level_state=previous_level,
-        topic_key=previous_progress.topic_key,
-        up_to_day_iso=previous_progress.day_iso,
-    )
-    if accumulated_score < points_target:
+        next_level = previous_level + 1
+        if next_level <= normalized_level:
+            return normalized_level, None
+
+        memory.set_language_level(learner_id=learner_id, language=language, level=next_level)
         logger.info(
-            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=target_not_met accumulated_score=%s target=%s",
+            "daily_level_score_promoted learner_id=%s language=%s source_day=%s topic=%s from_level=%s to_level=%s accumulated_score=%s target=%s",
             learner_id,
             language,
             previous_progress.day_iso,
+            previous_progress.topic_key,
+            previous_level,
+            next_level,
             accumulated_score,
             points_target,
         )
-        return normalized_level, None
+        return next_level, {
+            "from_level": previous_level,
+            "to_level": next_level,
+            "message": f"Level up! You reached level {next_level}.",
+        }
 
-    next_level = previous_level + 1
-    if next_level <= normalized_level:
-        return normalized_level, None
-
-    memory.set_language_level(learner_id=learner_id, language=language, level=next_level)
-    logger.info(
-        "daily_level_score_promoted learner_id=%s language=%s prev_day=%s topic=%s from_level=%s to_level=%s accumulated_score=%s target=%s",
-        learner_id,
-        language,
-        previous_progress.day_iso,
-        previous_progress.topic_key,
-        previous_level,
-        next_level,
-        accumulated_score,
-        points_target,
+    latest_same_level = next(
+        (row for row in previous_rows if max(1, int(row.level_state or normalized_level)) == normalized_level),
+        None,
     )
-    return next_level, {
-        "from_level": previous_level,
-        "to_level": next_level,
-        "message": f"Level up! You reached level {next_level}.",
-    }
+    if latest_same_level is not None:
+        logger.info(
+            "daily_level_score_promotion_skipped learner_id=%s language=%s prev_day=%s reason=no_completed_candidate level=%s",
+            learner_id,
+            language,
+            latest_same_level.day_iso,
+            normalized_level,
+        )
+    return normalized_level, None
 
 
 def _extract_kana_sequence(prompt: str) -> str:
@@ -4800,11 +4868,23 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
                 topic.topic_key,
                 len(submitted_answers),
             )
-        lesson_and_daily_done = bool(progress.lesson_completed) and len(progress.completed_daily_games()) >= TOPIC_DAILY_REQUIRED_GAME_COUNT
+        completed_daily_games_count = len(progress.completed_daily_games())
+        lesson_and_daily_done = bool(progress.lesson_completed) and completed_daily_games_count >= TOPIC_DAILY_REQUIRED_GAME_COUNT
         exam_score = int(req.exam_score) if req.exam_score is not None else int(base_daily["daily_score"])
         failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
         min_pass_score = WEEKLY_EXAM_PASS_SCORE
-        passed = bool(lesson_and_daily_done and exam_score >= min_pass_score and failure_total <= 16)
+        failure_limit = 16
+        score_ok = exam_score >= min_pass_score
+        failures_ok = failure_total <= failure_limit
+        passed = bool(lesson_and_daily_done and score_ok and failures_ok)
+        weekly_exam_criteria = _weekly_exam_criteria(
+            lesson_completed=bool(progress.lesson_completed),
+            completed_daily_games_count=completed_daily_games_count,
+            exam_score=exam_score,
+            min_pass_score=min_pass_score,
+            failure_total=failure_total,
+            failure_limit=failure_limit,
+        )
         memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
         if passed:
             _close_topic_after_weekly_exam_pass(
@@ -4844,11 +4924,15 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
             "min_pass_score": min_pass_score,
             "question_count": len(questions),
             "questions_preview": questions,
-            "feedback": (
-                "Weekly mini-exam passed in legacy mode."
-                if passed
-                else "Weekly mini-exam failed. Complete daily games and improve consistency before retrying next week."
+            "feedback": _weekly_exam_feedback_message(
+                passed=passed,
+                score_ok=score_ok,
+                failures_ok=failures_ok,
+                lesson_and_daily_done=lesson_and_daily_done,
             ),
+            "failure_total": failure_total,
+            "failure_limit": failure_limit,
+            "weekly_exam_criteria": weekly_exam_criteria,
             "daily_progress": refreshed_daily,
             },
         )
@@ -4983,11 +5067,26 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
     raw_average = sum(raw_scores) / score_count
     exam_score = int(round((raw_average / 100.0) * 300.0))
 
-    lesson_and_daily_done = bool(progress.lesson_completed) and len(progress.completed_daily_games()) >= TOPIC_DAILY_REQUIRED_GAME_COUNT
+    completed_daily_games_count = len(progress.completed_daily_games())
+    lesson_and_daily_done = bool(progress.lesson_completed) and completed_daily_games_count >= TOPIC_DAILY_REQUIRED_GAME_COUNT
     failure_total = sum(int(value) for value in dict(insights.get("topic_failure_totals", {})).values())
     min_pass_score = WEEKLY_EXAM_PASS_SCORE
-    answered_enough = len(answer_results) >= max(3, min(len(questions), 6))
-    passed = bool(lesson_and_daily_done and answered_enough and exam_score >= min_pass_score and failure_total <= 16)
+    failure_limit = 16
+    required_answer_count = max(3, min(len(questions), 6))
+    answered_enough = len(answer_results) >= required_answer_count
+    score_ok = exam_score >= min_pass_score
+    failures_ok = failure_total <= failure_limit
+    passed = bool(lesson_and_daily_done and answered_enough and score_ok and failures_ok)
+    weekly_exam_criteria = _weekly_exam_criteria(
+        lesson_completed=bool(progress.lesson_completed),
+        completed_daily_games_count=completed_daily_games_count,
+        exam_score=exam_score,
+        min_pass_score=min_pass_score,
+        failure_total=failure_total,
+        failure_limit=failure_limit,
+        answered_count=len(answer_results),
+        required_answer_count=required_answer_count,
+    )
 
     memory.save_weekly_exam_result(learner_id=learner_id, day_iso=today_iso, passed=passed)
     if passed:
@@ -5029,11 +5128,16 @@ def take_weekly_exam(req: WeeklyExamRequest) -> dict:
         "question_count": len(questions),
         "answers_evaluated": len(answer_results),
         "answer_results": answer_results,
-        "feedback": (
-            "Weekly mini-exam passed. You can keep building toward the rank exam."
-            if passed
-            else "Weekly mini-exam failed. Complete daily games and improve consistency before retrying next week."
+        "feedback": _weekly_exam_feedback_message(
+            passed=passed,
+            score_ok=score_ok,
+            failures_ok=failures_ok,
+            lesson_and_daily_done=lesson_and_daily_done,
+            answered_enough=answered_enough,
         ),
+        "failure_total": failure_total,
+        "failure_limit": failure_limit,
+        "weekly_exam_criteria": weekly_exam_criteria,
         "daily_progress": refreshed_daily,
         },
     )

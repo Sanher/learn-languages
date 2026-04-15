@@ -1058,15 +1058,28 @@ class ProgressMemory:
                     continue
         return totals
 
-    def count_days_on_topic(self, learner_id: str, language: str, topic_key: str) -> int:
+    def count_days_on_topic(
+        self,
+        learner_id: str,
+        language: str,
+        topic_key: str,
+        up_to_day_iso: str | None = None,
+    ) -> int:
+        params: list[Any] = [learner_id, language, topic_key]
+        query = [
+            """
+            SELECT COUNT(*)
+            FROM daily_topic_progress
+            WHERE learner_id = ? AND language = ? AND topic_key = ?
+            """
+        ]
+        if up_to_day_iso:
+            query.append("AND day_iso <= ?")
+            params.append(str(up_to_day_iso))
         with self._conn() as conn:
             row = conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM daily_topic_progress
-                WHERE learner_id = ? AND language = ? AND topic_key = ?
-                """,
-                (learner_id, language, topic_key),
+                "\n".join(query),
+                tuple(params),
             ).fetchone()
         return int(row[0] if row else 0)
 
@@ -1164,6 +1177,29 @@ class ProgressMemory:
             row[3],
         )
         return DailyTopicProgress(*row)
+
+    def list_daily_topic_progress_before(
+        self,
+        *,
+        learner_id: str,
+        language: str,
+        before_day_iso: str,
+        limit: int = 30,
+    ) -> list[DailyTopicProgress]:
+        max_items = max(1, int(limit))
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT learner_id, day_iso, language, topic_key, lesson_completed, completed_daily_games_json,
+                       level_state, daily_score, daily_game_scores_json, daily_game_failures_json
+                FROM daily_topic_progress
+                WHERE learner_id = ? AND language = ? AND day_iso < ?
+                ORDER BY day_iso DESC, topic_key ASC
+                LIMIT ?
+                """,
+                (learner_id, language, before_day_iso, max_items),
+            ).fetchall()
+        return [DailyTopicProgress(*row) for row in rows]
 
     def retention_ratio(
         self,

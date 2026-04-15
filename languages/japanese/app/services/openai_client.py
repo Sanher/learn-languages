@@ -550,7 +550,9 @@ class OpenAIPlanner:
             "Keep the provided focus_items aligned to the scaffold for each level. "
             "Do not invent, remove, or replace focus item identities. "
             "Reuse the provided item_id, item_type, script, is_core, is_exam_relevant, and covers_competencies. "
-            "Only enrich optional lesson-facing fields when useful, especially meaning_secondary and example_* fields."
+            "Only enrich optional lesson-facing fields when useful. "
+            "Always prefer filling meaning_secondary with the selected secondary-language translation of the item meaning or particle function when that translation is clear. "
+            "Use example_* fields only when they add value."
         )
         user_prompt = (
             f"Language={language}\n"

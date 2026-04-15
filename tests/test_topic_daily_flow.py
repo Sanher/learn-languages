@@ -206,6 +206,68 @@ class TopicDailyFlowTests(unittest.TestCase):
         second_games = [card["game_type"] for card in second.json()["daily_games"]]
         self.assertFalse(set(first_games) & set(second_games))
 
+    def test_level_promotion_recovers_when_latest_previous_day_is_incomplete(self) -> None:
+        day_one = date(2026, 3, 20)
+        day_two = day_one + timedelta(days=1)
+        day_three = day_two + timedelta(days=1)
+
+        with unittest.mock.patch.object(api, "date", _FrozenDate):
+            _FrozenDate._today = day_one
+            response = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            topic_key = payload["topic"]["topic_key"]
+            daily_games = payload["daily_games"]
+            daily_game_types = [card["game_type"] for card in daily_games]
+
+            api.memory.mark_lesson_completed(
+                learner_id=self.learner_id,
+                day_iso=day_one.isoformat(),
+                language="ja",
+                topic_key=topic_key,
+            )
+            for game_type in daily_game_types:
+                api.memory.mark_daily_game_completed(
+                    learner_id=self.learner_id,
+                    day_iso=day_one.isoformat(),
+                    language="ja",
+                    topic_key=topic_key,
+                    game_type=game_type,
+                )
+                api.memory.upsert_daily_game_score(
+                    learner_id=self.learner_id,
+                    day_iso=day_one.isoformat(),
+                    language="ja",
+                    topic_key=topic_key,
+                    game_type=game_type,
+                    score=100,
+                    allowed_daily_games=daily_game_types,
+                    max_total_score=EXPECTED_DAILY_SCORE_MAX,
+                )
+
+            # Simulate a later incomplete day that was created before the learner returned.
+            api.memory.load_or_create_daily_topic_progress(
+                learner_id=self.learner_id,
+                day_iso=day_two.isoformat(),
+                language="ja",
+                topic_key=topic_key,
+            )
+            api.memory.set_daily_level_state(
+                learner_id=self.learner_id,
+                day_iso=day_two.isoformat(),
+                language="ja",
+                topic_key=topic_key,
+                level_state=1,
+            )
+
+            _FrozenDate._today = day_three
+            promoted = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+
+        self.assertEqual(promoted.status_code, 200)
+        promoted_payload = promoted.json()
+        self.assertEqual(promoted_payload["daily_progress"]["level_progress"]["current_level"], 2)
+        self.assertEqual(api.memory.level_for_language(self.learner_id, "ja", default_level=1), 2)
+
     def test_level_two_listening_gap_fill_card_keeps_drag_options(self) -> None:
         card = api._build_card_for_activity(
             game_type="listening_gap_fill",
@@ -1997,6 +2059,110 @@ class TopicDailyFlowTests(unittest.TestCase):
         self.assertTrue(str(first_review.get("correct_answer", "")).strip())
         self.assertNotEqual(first_review.get("your_answer"), first_review.get("correct_answer"))
         self.assertIn("result", first_review)
+        self.assertIn("failure_total", phase_two_data)
+        self.assertIn("failure_limit", phase_two_data)
+        self.assertIn("weekly_exam_criteria", phase_two_data)
+        criterion_keys = {item.get("key") for item in phase_two_data["weekly_exam_criteria"]}
+        self.assertIn("score", criterion_keys)
+        self.assertIn("failures", criterion_keys)
+        self.assertIn("daily_block", criterion_keys)
+        self.assertIn("coverage", criterion_keys)
+
+    def test_weekly_exam_can_fail_on_failure_pressure_even_with_passing_score(self) -> None:
+        api.memory.set_language_level(self.learner_id, "ja", 5)
+        daily = self.client.post("/api/games/daily", json={"learner_id": self.learner_id})
+        self.assertEqual(daily.status_code, 200)
+        daily_data = daily.json()
+        topic_key = daily_data["topic"]["topic_key"]
+
+        self.client.post(
+            "/api/games/lesson/complete",
+            json={
+                "learner_id": self.learner_id,
+                "language": "ja",
+                "topic_key": topic_key,
+            },
+        )
+        for card in daily_data["daily_games"]:
+            payload = self._payload_for_daily_card(card)
+            self.client.post(
+                "/api/games/evaluate",
+                json={
+                    "learner_id": self.learner_id,
+                    "game_type": card["game_type"],
+                    "language": "ja",
+                    "level": card["level"],
+                    "retry_count": 0,
+                    "payload": payload,
+                },
+            )
+        self._seed_topic_mastery_level_three(topic_key)
+
+        today_iso = date.today().isoformat()
+        for _ in range(17):
+            api.memory.increment_daily_game_failure(
+                learner_id=self.learner_id,
+                day_iso=today_iso,
+                language="ja",
+                topic_key=topic_key,
+                game_type="sentence_order",
+            )
+
+        with unittest.mock.patch.object(api, "WEEKLY_EXAM_FORCE_LEGACY", False):
+            phase_one = self.client.post(
+                "/api/exams/weekly",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "question_count": 4,
+                    "mode": "cumulative",
+                },
+            )
+            self.assertEqual(phase_one.status_code, 200)
+            questions = phase_one.json()["questions"]
+            submitted_answers = [
+                {
+                    "question_id": question["question_id"],
+                    "topic_key": question["topic_key"],
+                    "game_type": question["game_type"],
+                    "item_id": question["item_id"],
+                    "payload": self._payload_for_daily_card(
+                        {
+                            "activity_id": question["item_id"],
+                            "game_type": question["game_type"],
+                            "payload": question.get("payload", {}),
+                            "language": question["language"],
+                            "level": question["level"],
+                            "prompt": question.get("prompt", ""),
+                        }
+                    ),
+                }
+                for question in questions
+            ]
+
+            phase_two = self.client.post(
+                "/api/exams/weekly",
+                json={
+                    "learner_id": self.learner_id,
+                    "language": "ja",
+                    "topic_key": topic_key,
+                    "question_count": 4,
+                    "mode": "cumulative",
+                    "answers": submitted_answers,
+                },
+            )
+
+        self.assertEqual(phase_two.status_code, 200)
+        phase_two_data = phase_two.json()
+        self.assertFalse(phase_two_data["passed"])
+        self.assertGreaterEqual(phase_two_data["exam_score"], phase_two_data["min_pass_score"])
+        self.assertEqual(phase_two_data["failure_total"], 17)
+        self.assertEqual(phase_two_data["failure_limit"], 16)
+        failures_criterion = next(
+            item for item in phase_two_data["weekly_exam_criteria"] if item.get("key") == "failures"
+        )
+        self.assertFalse(failures_criterion["passed"])
 
     def test_weekly_exam_locked_when_topic_mastery_below_minimum(self) -> None:
         api.memory.set_language_level(self.learner_id, "ja", 5)
