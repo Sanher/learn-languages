@@ -65,6 +65,7 @@ class FocusItem:
     example_script: str | None = None
     example_romanized: str | None = None
     example_literal_translation: str | None = None
+    example_secondary_translation: str | None = None
     level_hint: int | None = None
     is_core: bool = False
     is_exam_relevant: bool = False
@@ -84,6 +85,7 @@ class FocusItem:
             "example_script": self.example_script,
             "example_romanized": self.example_romanized,
             "example_literal_translation": self.example_literal_translation,
+            "example_secondary_translation": self.example_secondary_translation,
             "level_hint": self.level_hint,
             "is_core": self.is_core,
             "is_exam_relevant": self.is_exam_relevant,
@@ -133,6 +135,7 @@ def normalize_focus_item(raw: Any) -> FocusItem | None:
         example_script=_clean_optional_text(raw.get("example_script")),
         example_romanized=_clean_optional_text(raw.get("example_romanized")),
         example_literal_translation=_clean_optional_text(raw.get("example_literal_translation")),
+        example_secondary_translation=_clean_optional_text(raw.get("example_secondary_translation")),
         level_hint=level_hint,
         is_core=bool(raw.get("is_core") or raw.get("mandatory")),
         is_exam_relevant=bool(raw.get("is_exam_relevant") or raw.get("exam_relevant")),
@@ -186,6 +189,7 @@ def normalize_focus_item_enrichment(raw: Any) -> dict[str, Any] | None:
         "example_script",
         "example_romanized",
         "example_literal_translation",
+        "example_secondary_translation",
         "source",
     ):
         value = _clean_optional_text(raw.get(key))
@@ -238,6 +242,7 @@ def merge_focus_item_payloads(
         "example_script",
         "example_romanized",
         "example_literal_translation",
+        "example_secondary_translation",
     )
     fill_if_missing_fields = (
         "reading_kana",

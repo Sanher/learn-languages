@@ -237,9 +237,8 @@ function renderBilingualValue(bundle, { showEnglish = true, multiline = false } 
     parts.push(`<span class="translation-primary-line">${multiline ? multilineHtml(enText) : escapeHtml(enText)}</span>`);
   }
   if (secondaryLang && secondaryText) {
-    const secondaryLabel = secondaryTranslationLabel(secondaryLang);
     const secondaryBody = multiline ? multilineHtml(secondaryText) : escapeHtml(secondaryText);
-    parts.push(`<span class="translation-secondary-line">${escapeHtml(secondaryLabel)}: ${secondaryBody}</span>`);
+    parts.push(`<span class="translation-secondary-line">${secondaryBody}</span>`);
   }
   return parts.join('<br />');
 }
@@ -345,10 +344,7 @@ function renderTranslatedFieldWithFocus(record, field, focusItems, {
     parts.push(`<span class="translation-primary-line">${renderFocusAwareText(enText, focusItems, { multiline })}</span>`);
   }
   if (secondaryLang && secondaryText) {
-    parts.push(
-      `<span class="translation-secondary-line">${escapeHtml(secondaryTranslationLabel(secondaryLang))}: `
-      + `${renderFocusAwareText(secondaryText, focusItems, { multiline })}</span>`
-    );
+    parts.push(`<span class="translation-secondary-line">${renderFocusAwareText(secondaryText, focusItems, { multiline })}</span>`);
   }
   if (!parts.length) return '';
   const classes = className ? ` class="${escapeHtml(className)}"` : '';
@@ -372,10 +368,7 @@ function renderTranslatedListWithFocus(record, field, focusItems) {
         lines.push(`<span class="translation-primary-line">${renderFocusAwareText(enText, focusItems)}</span>`);
       }
       if (secondaryLang && secondaryText) {
-        lines.push(
-          `<span class="translation-secondary-line">${escapeHtml(secondaryTranslationLabel(secondaryLang))}: `
-          + `${renderFocusAwareText(secondaryText, focusItems)}</span>`
-        );
+        lines.push(`<span class="translation-secondary-line">${renderFocusAwareText(secondaryText, focusItems)}</span>`);
       }
       return lines.length ? `<li>${lines.join('<br />')}</li>` : '';
     })
@@ -398,9 +391,9 @@ function renderFocusItemsSection(focusItems) {
     const definitionText = String(type === 'particle' ? (item.function || '') : (item.meaning_en || '')).trim();
     const secondaryMeaning = String(item.meaning_secondary || '').trim();
     const exampleScript = String(item.example_script || '').trim();
+    const exampleSecondary = String(item.example_secondary_translation || '').trim();
     const exampleRomanized = String(item.example_romanized || '').trim();
     const exampleLiteral = String(item.example_literal_translation || '').trim();
-    const secondaryLabel = secondaryTranslationLabel(translationPreferences.secondary_translation_language);
     return `
       <article class="focus-item-card focus-item-card--${escapeHtml(type)}">
         <div class="focus-item-card-head">
@@ -420,10 +413,11 @@ function renderFocusItemsSection(focusItems) {
           ` : ''}
         </div>
         ${definitionText ? `<p class="focus-item-definition"><strong>${escapeHtml(definitionLabel)}:</strong> ${escapeHtml(definitionText)}</p>` : ''}
-        ${secondaryMeaning ? `<p class="translation-secondary-line">${escapeHtml(secondaryLabel)}: ${escapeHtml(secondaryMeaning)}</p>` : ''}
-        ${(exampleScript || exampleRomanized || exampleLiteral) ? `
+        ${secondaryMeaning ? `<p class="translation-secondary-line">${escapeHtml(secondaryMeaning)}</p>` : ''}
+        ${(exampleScript || exampleSecondary || exampleRomanized || exampleLiteral) ? `
           <div class="focus-item-example">
             ${exampleScript ? `<p><strong>Example:</strong> ${renderFocusAwareText(exampleScript, focusItems)}</p>` : ''}
+            ${exampleSecondary ? `<p class="translation-secondary-line">${renderFocusAwareText(exampleSecondary, focusItems)}</p>` : ''}
             ${exampleRomanized ? `<p><strong>Romanized:</strong> ${escapeHtml(exampleRomanized)}</p>` : ''}
             ${exampleLiteral ? `<p><strong>Literal:</strong> ${escapeHtml(exampleLiteral)}</p>` : ''}
           </div>
@@ -460,7 +454,6 @@ function renderRelatedFocusItemsSection(focusItems) {
     const definitionLabel = type === 'particle' ? 'Function' : 'Meaning';
     const definitionText = String(type === 'particle' ? (item.function || '') : (item.meaning_en || '')).trim();
     const secondaryMeaning = String(item.meaning_secondary || '').trim();
-    const secondaryLabel = secondaryTranslationLabel(translationPreferences.secondary_translation_language);
     return `
       <article class="game-focus-item-card game-focus-item-card--${escapeHtml(type)}">
         <div class="focus-item-card-tags">
@@ -479,7 +472,7 @@ function renderRelatedFocusItemsSection(focusItems) {
           </p>
         ` : ''}
         ${definitionText ? `<p class="game-focus-item-definition"><strong>${escapeHtml(definitionLabel)}:</strong> ${escapeHtml(definitionText)}</p>` : ''}
-        ${secondaryMeaning ? `<p class="game-focus-item-definition secondary">${escapeHtml(secondaryLabel)}: ${escapeHtml(secondaryMeaning)}</p>` : ''}
+        ${secondaryMeaning ? `<p class="game-focus-item-definition secondary">${escapeHtml(secondaryMeaning)}</p>` : ''}
       </article>
     `;
   }).filter(Boolean).join('');

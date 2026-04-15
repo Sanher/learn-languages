@@ -98,6 +98,7 @@ class FocusItemTests(unittest.TestCase):
                     "script": "は",
                     "meaning_secondary": "Marca el tema de la oración.",
                     "example_script": "私は学生です。",
+                    "example_secondary_translation": "Soy estudiante.",
                     "example_romanized": "watashi wa gakusei desu",
                     "example_literal_translation": "I topic student am",
                 }
@@ -109,6 +110,7 @@ class FocusItemTests(unittest.TestCase):
         self.assertEqual(merged[0]["function"], "Marks the topic of the sentence.")
         self.assertEqual(merged[0]["meaning_secondary"], "Marca el tema de la oración.")
         self.assertEqual(merged[0]["example_script"], "私は学生です。")
+        self.assertEqual(merged[0]["example_secondary_translation"], "Soy estudiante.")
         self.assertTrue(merged[0]["is_core"])
         self.assertTrue(merged[0]["is_exam_relevant"])
         self.assertEqual(merged[0]["source"], "catalog+openai")
