@@ -291,13 +291,38 @@ function focusChipGloss(item) {
     return { primary: '', secondary: '' };
   }
   const type = String(item.item_type || 'word').trim().toLowerCase();
-  const primary = String(
+  const rawPrimary = String(
     type === 'particle'
       ? (item.function || item.meaning_en || '')
       : (item.meaning_en || item.function || '')
   ).trim();
+  const primary = compactFocusChipGloss(rawPrimary, { isParticle: type === 'particle' });
   const secondary = String(item.meaning_secondary || '').trim();
   return { primary, secondary };
+}
+
+function compactFocusChipGloss(value, { isParticle = false } = {}) {
+  let text = String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.。]+$/g, '');
+  if (!text) return '';
+  if (isParticle) {
+    text = text
+      .replace(/^marks?\s+/i, '')
+      .replace(/^used to\s+/i, '')
+      .replace(/\s+depending on context$/i, '')
+      .trim();
+  }
+  const firstSentence = text.split(/[.;:]/)[0].trim() || text;
+  let compact = firstSentence;
+  if (compact.length > 42 && compact.includes(',')) {
+    compact = compact.split(',').slice(0, 2).join(',').trim();
+  }
+  if (compact.length > 42) {
+    compact = `${compact.slice(0, 39).trim().replace(/[,\-–—/]+$/u, '')}...`;
+  }
+  return compact;
 }
 
 function renderFocusChip(item, { staticChip = false, showHoverGloss = false } = {}) {
@@ -316,8 +341,9 @@ function renderFocusChip(item, { staticChip = false, showHoverGloss = false } = 
         </span>
       `
     : '';
+  const focusAttrs = hoverHtml ? ' tabindex="0"' : '';
   return `
-    <span class="${classes.join(' ')}" data-focus-item-id="${escapeHtml(item.item_id || '')}" data-focus-type="${escapeHtml(type)}">
+    <span class="${classes.join(' ')}" data-focus-item-id="${escapeHtml(item.item_id || '')}" data-focus-type="${escapeHtml(type)}"${focusAttrs}>
       <span class="focus-chip-type">${escapeHtml(focusTypeLabel(type))}</span>
       <span class="focus-chip-script">${escapeHtml(script)}</span>
       ${hoverHtml}

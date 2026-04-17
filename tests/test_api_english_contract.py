@@ -143,6 +143,28 @@ class ApiEnglishContractTests(unittest.TestCase):
         self.assertEqual(daily.status_code, 200)
         self.assertEqual(daily.json()["translation_preferences"]["secondary_translation_language"], "es")
 
+    def test_secondary_translation_populates_focus_item_meanings(self) -> None:
+        learner_id = "test-user-focus-item-secondary"
+        self.client.post(
+            "/api/ui/secondary-translation",
+            json={
+                "learner_id": learner_id,
+                "secondary_language": "es",
+            },
+        )
+        with unittest.mock.patch.object(
+            api,
+            "_secondary_translation_for_text",
+            side_effect=lambda *, text, secondary_language, context, memo: f"es::{text}" if secondary_language == "es" else None,
+        ):
+            daily = self.client.post("/api/games/daily", json={"learner_id": learner_id})
+
+        self.assertEqual(daily.status_code, 200)
+        lesson = daily.json()["lesson"]
+        focus_items = lesson["focus_items"]
+        self.assertTrue(focus_items)
+        self.assertTrue(any(str(item.get("meaning_secondary") or "").startswith("es::") for item in focus_items))
+
     def test_secondary_translation_can_be_disabled_with_off(self) -> None:
         learner_id = "test-user-translation-off"
         self.client.post(

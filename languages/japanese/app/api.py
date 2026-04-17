@@ -547,6 +547,54 @@ def _translation_bundle_for_text(
     }
 
 
+def _focus_item_definition_text(item: dict[str, Any]) -> str:
+    item_type = str(item.get("item_type") or "").strip().lower()
+    primary = item.get("function") if item_type == "particle" else item.get("meaning_en")
+    fallback = item.get("meaning_en") if item_type == "particle" else item.get("function")
+    return str(primary or fallback or "").strip()
+
+
+def _looks_like_focus_item_payload(value: dict[str, Any]) -> bool:
+    item_type = str(value.get("item_type") or "").strip().lower()
+    script = str(value.get("script") or "").strip()
+    return bool(script) and item_type in {"kanji", "word", "particle", "expression"}
+
+
+def _augment_focus_item_translation_fields(
+    item: dict[str, Any],
+    *,
+    secondary_language: str | None,
+    context: str,
+    memo: dict[tuple[str, str, str], str | None],
+) -> dict[str, Any]:
+    if not _looks_like_focus_item_payload(item):
+        return item
+
+    updated = dict(item)
+    definition_text = _focus_item_definition_text(updated)
+    if definition_text and not str(updated.get("meaning_secondary") or "").strip():
+        translated_definition = _secondary_translation_for_text(
+            text=definition_text,
+            secondary_language=secondary_language,
+            context=f"{context}.meaning_secondary",
+            memo=memo,
+        )
+        if translated_definition:
+            updated["meaning_secondary"] = translated_definition
+
+    example_literal = str(updated.get("example_literal_translation") or "").strip()
+    if example_literal and not str(updated.get("example_secondary_translation") or "").strip():
+        translated_example = _secondary_translation_for_text(
+            text=example_literal,
+            secondary_language=secondary_language,
+            context=f"{context}.example_secondary_translation",
+            memo=memo,
+        )
+        if translated_example:
+            updated["example_secondary_translation"] = translated_example
+    return updated
+
+
 def _augment_with_secondary_translations(
     value: Any,
     *,
@@ -585,6 +633,12 @@ def _augment_with_secondary_translations(
                     )
                     for idx, item in enumerate(inner)
                 ]
+        result = _augment_focus_item_translation_fields(
+            result,
+            secondary_language=secondary_language,
+            context=context,
+            memo=memo,
+        )
         return result
 
     if isinstance(value, list):

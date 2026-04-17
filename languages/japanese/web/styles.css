@@ -278,17 +278,27 @@ button.is-loading {
   overflow: visible;
 }
 
+.focus-chip:focus {
+  outline: none;
+}
+
+.focus-chip:focus-visible {
+  box-shadow: 0 0 0 2px rgba(191, 219, 254, 0.35);
+}
+
 .focus-chip-type {
   position: absolute;
-  top: -5px;
+  top: -7px;
   left: 50%;
   transform: translateX(-50%);
   padding: 0 4px;
-  background: #0b1220;
-  opacity: 0.72;
+  border-radius: 999px;
+  background: #162033;
+  color: #dbeafe;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 7px;
+  font-weight: 800;
   line-height: 1;
   white-space: nowrap;
 }
@@ -333,29 +343,31 @@ button.is-loading {
 
 .focus-chip-hover {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 5px);
   left: 50%;
-  z-index: 6;
+  z-index: 20;
   display: flex;
-  min-width: 120px;
-  max-width: 220px;
+  min-width: 88px;
+  max-width: 180px;
   flex-direction: column;
-  gap: 3px;
-  padding: 6px 8px;
+  gap: 2px;
+  padding: 5px 6px;
   border: 1px solid #334155;
-  border-radius: 10px;
+  border-radius: 8px;
   background: rgba(2, 6, 23, 0.96);
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.42);
   color: #e2e8f0;
-  font-size: 11px;
-  line-height: 1.25;
+  font-size: 10px;
+  line-height: 1.2;
   opacity: 0;
   pointer-events: none;
   transform: translateX(-50%) translateY(4px);
   transition: opacity 140ms ease, transform 140ms ease;
+  text-align: center;
 }
 
 .focus-chip:hover .focus-chip-hover,
+.focus-chip:focus .focus-chip-hover,
 .focus-chip:focus-within .focus-chip-hover {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
