@@ -278,6 +278,10 @@ button.is-loading {
   overflow: visible;
 }
 
+.focus-chip[data-focus-gloss="true"] {
+  cursor: pointer;
+}
+
 .focus-chip:focus {
   outline: none;
 }
@@ -367,6 +371,7 @@ button.is-loading {
 }
 
 .focus-chip:hover .focus-chip-hover,
+.focus-chip.is-gloss-open .focus-chip-hover,
 .focus-chip:focus .focus-chip-hover,
 .focus-chip:focus-within .focus-chip-hover {
   opacity: 1;
@@ -817,6 +822,11 @@ button.is-loading {
 .translation-secondary-line {
   color: #bfdbfe;
   font-size: 13px;
+}
+
+.translation-secondary-line strong,
+.game-focus-item-definition.secondary strong {
+  color: #dbeafe;
 }
 
 .inline-select-field {

@@ -75,6 +75,7 @@ let weeklyExamSession = null;
 let weeklyExamResult = null;
 let levelExamResult = null;
 let isSubmittingWeeklyExam = false;
+let focusChipGlossBound = false;
 
 function renderRawDataOutput(payload) {
   if (!rawDataOutputEl) return;
@@ -341,7 +342,9 @@ function renderFocusChip(item, { staticChip = false, showHoverGloss = false } = 
         </span>
       `
     : '';
-  const focusAttrs = hoverHtml ? ' tabindex="0"' : '';
+  const focusAttrs = hoverHtml
+    ? ' tabindex="0" role="button" aria-expanded="false" data-focus-gloss="true"'
+    : '';
   return `
     <span class="${classes.join(' ')}" data-focus-item-id="${escapeHtml(item.item_id || '')}" data-focus-type="${escapeHtml(type)}"${focusAttrs}>
       <span class="focus-chip-type">${escapeHtml(focusTypeLabel(type))}</span>
@@ -464,11 +467,11 @@ function renderFocusItemsSection(focusItems) {
           ` : ''}
         </div>
         ${definitionText ? `<p class="focus-item-definition"><strong>${escapeHtml(definitionLabel)}:</strong> ${escapeHtml(definitionText)}</p>` : ''}
-        ${secondaryMeaning ? `<p class="translation-secondary-line">${escapeHtml(secondaryMeaning)}</p>` : ''}
+        ${secondaryMeaning ? `<p class="translation-secondary-line"><strong>Significado:</strong> ${escapeHtml(secondaryMeaning)}</p>` : ''}
         ${(exampleScript || exampleSecondary || exampleRomanized || exampleLiteral) ? `
           <div class="focus-item-example">
             ${exampleScript ? `<p><strong>Example:</strong> ${renderFocusAwareText(exampleScript, focusItems)}</p>` : ''}
-            ${exampleSecondary ? `<p class="translation-secondary-line">${renderFocusAwareText(exampleSecondary, focusItems)}</p>` : ''}
+            ${exampleSecondary ? `<p class="translation-secondary-line"><strong>Ejemplo:</strong> ${renderFocusAwareText(exampleSecondary, focusItems)}</p>` : ''}
             ${exampleRomanized ? `<p><strong>Romanized:</strong> ${escapeHtml(exampleRomanized)}</p>` : ''}
             ${exampleLiteral ? `<p><strong>Literal:</strong> ${escapeHtml(exampleLiteral)}</p>` : ''}
           </div>
@@ -519,7 +522,7 @@ function renderRelatedFocusItemsSection(focusItems) {
           </p>
         ` : ''}
         ${definitionText ? `<p class="game-focus-item-definition"><strong>${escapeHtml(definitionLabel)}:</strong> ${escapeHtml(definitionText)}</p>` : ''}
-        ${secondaryMeaning ? `<p class="game-focus-item-definition secondary">${escapeHtml(secondaryMeaning)}</p>` : ''}
+        ${secondaryMeaning ? `<p class="game-focus-item-definition secondary"><strong>Significado:</strong> ${escapeHtml(secondaryMeaning)}</p>` : ''}
       </article>
     `;
   }).filter(Boolean).join('');
@@ -3789,6 +3792,57 @@ function wireGameActions() {
   syncKanjiReadingPreview();
   syncSentenceOrderLocks();
   updateSentenceOrderStatusLine();
+  bindFocusChipGlossHandlers();
+}
+
+function closeFocusChipGlosses({ keep = null } = {}) {
+  document.querySelectorAll('.focus-chip.is-gloss-open[data-focus-gloss="true"]').forEach((chip) => {
+    if (keep && chip === keep) return;
+    chip.classList.remove('is-gloss-open');
+    chip.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function bindFocusChipGlossHandlers() {
+  if (focusChipGlossBound) return;
+  focusChipGlossBound = true;
+
+  document.addEventListener('click', (event) => {
+    const chip = event.target.closest('.focus-chip[data-focus-gloss="true"]');
+    if (!chip) {
+      closeFocusChipGlosses();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const willOpen = !chip.classList.contains('is-gloss-open');
+    closeFocusChipGlosses({ keep: chip });
+    chip.classList.toggle('is-gloss-open', willOpen);
+    chip.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  });
+
+  document.addEventListener('keydown', (event) => {
+    const chip = document.activeElement instanceof HTMLElement
+      ? document.activeElement.closest('.focus-chip[data-focus-gloss="true"]')
+      : null;
+    if (!chip) {
+      if (event.key === 'Escape') {
+        closeFocusChipGlosses();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      closeFocusChipGlosses();
+      chip.blur();
+      return;
+    }
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    const willOpen = !chip.classList.contains('is-gloss-open');
+    closeFocusChipGlosses({ keep: chip });
+    chip.classList.toggle('is-gloss-open', willOpen);
+    chip.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  });
 }
 
 function initDragAndDropComponents() {
