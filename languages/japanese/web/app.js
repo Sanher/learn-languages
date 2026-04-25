@@ -337,14 +337,19 @@ function renderFocusChip(item, { staticChip = false, showHoverGloss = false } = 
   const hoverHtml = showHoverGloss && (primary || secondary)
     ? `
         <span class="focus-chip-hover" role="note">
+          <span class="focus-chip-hover-type">${escapeHtml(focusTypeLabel(type))}</span>
           ${primary ? `<span class="focus-chip-hover-primary">${escapeHtml(primary)}</span>` : ''}
           ${secondary ? `<span class="focus-chip-hover-secondary">${escapeHtml(secondary)}</span>` : ''}
         </span>
       `
     : '';
+  const chipLabel = [focusTypeLabel(type), script, ...(hoverHtml ? [primary, secondary] : [])]
+    .filter(Boolean)
+    .join(': ');
+  const ariaLabelAttr = chipLabel ? ` aria-label="${escapeHtml(chipLabel)}"` : '';
   const focusAttrs = hoverHtml
-    ? ' tabindex="0" role="button" aria-expanded="false" data-focus-gloss="true"'
-    : '';
+    ? ` tabindex="0" role="button" aria-expanded="false" data-focus-gloss="true"${ariaLabelAttr}`
+    : ariaLabelAttr;
   return `
     <span class="${classes.join(' ')}" data-focus-item-id="${escapeHtml(item.item_id || '')}" data-focus-type="${escapeHtml(type)}"${focusAttrs}>
       <span class="focus-chip-type">${escapeHtml(focusTypeLabel(type))}</span>

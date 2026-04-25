@@ -260,11 +260,11 @@ button.is-loading {
 .focus-chip {
   position: relative;
   display: inline-flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: center;
-  min-height: 1.9em;
-  min-width: 1.75em;
-  padding: 7px 2px 2px;
+  min-height: 1.65em;
+  min-width: 1.65em;
+  padding: 3px 6px;
   border-radius: 999px;
   border: 1px solid #475569;
   background: #0f172a;
@@ -291,27 +291,13 @@ button.is-loading {
 }
 
 .focus-chip-type {
-  position: absolute;
-  top: -7px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 0 4px;
-  border-radius: 999px;
-  background: #162033;
-  color: #dbeafe;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 7px;
-  font-weight: 800;
-  line-height: 1;
-  white-space: nowrap;
+  display: none;
 }
 
 .focus-chip-script {
   font-size: 13px;
   line-height: 1;
-  display: block;
-  width: 100%;
+  display: inline-block;
   text-align: center;
 }
 
@@ -380,6 +366,15 @@ button.is-loading {
 
 .focus-chip-hover-primary {
   color: #e2e8f0;
+}
+
+.focus-chip-hover-type {
+  color: #93c5fd;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 .focus-chip-hover-secondary {
