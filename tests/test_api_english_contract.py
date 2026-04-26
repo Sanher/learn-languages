@@ -40,6 +40,20 @@ class ApiEnglishContractTests(unittest.TestCase):
         response = client.get("/web/%2e%2e/%2e%2e/README.md")
         self.assertEqual(response.status_code, 404)
 
+    def test_web_index_versions_static_assets(self) -> None:
+        response = self.client.get("/web/")
+        self.assertEqual(response.status_code, 200)
+        html = response.text
+        self.assertIn('href="styles.css?v=', html)
+        self.assertIn('src="app.js?v=', html)
+        self.assertEqual(response.headers.get("cache-control"), "no-store, max-age=0")
+
+    def test_web_assets_disable_cache(self) -> None:
+        response = self.client.get("/web/app.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("cache-control"), "no-store, max-age=0")
+        self.assertEqual(response.headers.get("pragma"), "no-cache")
+
     def test_unsupported_language_returns_english_error(self) -> None:
         response = self.client.post(
             "/api/ui/language",

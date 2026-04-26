@@ -14,7 +14,7 @@ from time import perf_counter
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from language_games.orchestrator import GamesOrchestrator
@@ -75,6 +75,10 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIR = BASE_DIR / "web"
 ADDON_LANGUAGE_DATA_DIR = Path("/data") / "japanese"
 LOCAL_LANGUAGE_DATA_DIR = BASE_DIR / "data" / "japanese"
+WEB_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "Pragma": "no-cache",
+}
 
 
 def _resolve_db_path() -> str:
@@ -358,6 +362,23 @@ def _resolve_web_asset(path: str) -> Path:
     return candidate
 
 
+def _web_asset_version(path: str) -> str:
+    asset_path = _resolve_web_asset(path)
+    stat = asset_path.stat()
+    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+
+
+def _web_index_response() -> HTMLResponse:
+    html = _resolve_web_asset("index.html").read_text(encoding="utf-8")
+    html = html.replace('href="styles.css"', f'href="styles.css?v={_web_asset_version("styles.css")}"')
+    html = html.replace('src="app.js"', f'src="app.js?v={_web_asset_version("app.js")}"')
+    return HTMLResponse(html, headers=WEB_NO_CACHE_HEADERS)
+
+
+def _web_file_response(path: str) -> FileResponse:
+    return FileResponse(_resolve_web_asset(path), headers=WEB_NO_CACHE_HEADERS)
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     db_file = Path(DB_PATH)
@@ -382,28 +403,28 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/web/")
-def web_index() -> FileResponse:
-    return FileResponse(_resolve_web_asset("index.html"))
+def web_index() -> HTMLResponse:
+    return _web_index_response()
 
 
 @app.get("/web/{path:path}")
 def web_assets(path: str) -> FileResponse:
-    return FileResponse(_resolve_web_asset(path))
+    return _web_file_response(path)
 
 
 @app.get("/")
-def root_index() -> FileResponse:
-    return FileResponse(_resolve_web_asset("index.html"))
+def root_index() -> HTMLResponse:
+    return _web_index_response()
 
 
 @app.get("/app.js")
 def root_app_js() -> FileResponse:
-    return FileResponse(_resolve_web_asset("app.js"))
+    return _web_file_response("app.js")
 
 
 @app.get("/styles.css")
 def root_styles_css() -> FileResponse:
-    return FileResponse(_resolve_web_asset("styles.css"))
+    return _web_file_response("styles.css")
 
 
 @app.post("/api/daily")
