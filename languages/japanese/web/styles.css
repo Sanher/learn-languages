@@ -338,7 +338,7 @@ button.is-loading {
   z-index: 20;
   display: flex;
   min-width: 88px;
-  max-width: 180px;
+  max-width: min(320px, calc(100vw - 32px));
   flex-direction: column;
   gap: 2px;
   padding: 5px 6px;
@@ -354,6 +354,8 @@ button.is-loading {
   transform: translateX(-50%) translateY(4px);
   transition: opacity 140ms ease, transform 140ms ease;
   text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .focus-chip:hover .focus-chip-hover,
@@ -379,6 +381,11 @@ button.is-loading {
 
 .focus-chip-hover-secondary {
   color: #bfdbfe;
+}
+
+.focus-chip-hover-primary,
+.focus-chip-hover-secondary {
+  min-width: 0;
 }
 
 .lesson-example {
