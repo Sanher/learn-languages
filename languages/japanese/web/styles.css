@@ -338,6 +338,7 @@ button.is-loading {
   z-index: 20;
   display: flex;
   min-width: 88px;
+  width: min(320px, calc(100vw - 32px));
   max-width: min(320px, calc(100vw - 32px));
   flex-direction: column;
   gap: 2px;
