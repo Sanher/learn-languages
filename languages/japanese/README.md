@@ -59,7 +59,7 @@ Notas de progresion:
 ## Variables de entorno sugeridas
 
 - `OPENAI_API_KEY`
-- `OPENAI_MODEL` (default: `gpt-4o-mini`)
+- `OPENAI_MODEL` (default: `gpt-5-mini`)
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_VOICE_ID`
 - `ELEVENLABS_MODEL_ID` (default: `eleven_multilingual_v2`)

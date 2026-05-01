@@ -35,7 +35,7 @@ class OpenAIPlanner:
         self.model = model or get_setting(
             env_names=("OPENAI_MODEL",),
             option_names=("openai_model", "openai.model"),
-            default="gpt-4o-mini",
+            default="gpt-5-mini",
         )
         raw_stt_models = get_setting(
             env_names=("OPENAI_STT_MODELS",),

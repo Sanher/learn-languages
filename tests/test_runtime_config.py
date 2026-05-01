@@ -82,6 +82,13 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(planner.model, "gpt-4.1-mini")
                 self.assertEqual(planner.stt_models, ["whisper-1", "gpt-4o-mini-transcribe"])
 
+    def test_openai_planner_default_model_is_gpt_5_mini(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            clear_cached_options()
+            planner = OpenAIPlanner()
+            self.assertEqual(planner.model, "gpt-5-mini")
+            self.assertEqual(planner.stt_models[0], "gpt-4o-mini-transcribe")
+
     def test_api_db_path_prefers_explicit_env_override(self) -> None:
         with patch.dict(os.environ, {"JAPANESE_DB_PATH": "/tmp/learn-languages/test-progress.db"}, clear=False):
             self.assertEqual(api._resolve_db_path(), "/tmp/learn-languages/test-progress.db")
